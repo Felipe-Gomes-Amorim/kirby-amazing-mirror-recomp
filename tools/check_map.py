@@ -11,7 +11,8 @@ Falha (exit 1) se:
   - sumirem funcoes do baseline alem da tolerancia
 Invariantes absolutos (sem baseline): checksum do header ok, 0 funcoes `suspect` sem
 retorno, todo pai de continuacao e funcao do mapa, todo bloco RAM tem funcoes dentro,
-toda funcao de build/recomp/program/extra_functions.csv (runtime) esta no mapa.
+toda funcao de build/recomp/program/extra_functions.csv (runtime) esta no mapa,
+nenhuma tabela de salto com exatamente 64 entradas sem `cmp` detectado (teto do analisador).
 
 Uso:
   python tools/check_map.py [rom.gba]            # verifica
@@ -63,6 +64,10 @@ def invariants(m):
     if orphans:
         errs.append(f"{len(orphans)} continuacoes com pai que nao e funcao: "
                     f"{[(hex(c['child']), hex(c['parent'])) for c in orphans[:5]]}")
+    capped = [t for t in m["jump_tables"] if len(t["targets"]) == 64 and not t.get("bounded")]
+    if capped:  # 64 e o teto do analisador: sem `cmp` detectado a tabela pode estar truncada
+        errs.append(f"{len(capped)} tabelas de salto com exatamente 64 entradas sem cmp detectado "
+                    f"(possivel truncamento): {[(hex(t['site']), hex(t['table'])) for t in capped[:8]]}")
     prog = ROOT / "build" / "recomp" / "program"
     rt_files = [prog / "extra_functions.csv"] + sorted(prog.glob("unresolved*.log"))
     missing = []

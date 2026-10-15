@@ -116,6 +116,7 @@ class Analyzer:
         self._lj_cache = {}
         self.extra_conts = []      # extras que caem dentro de outra funcao
         self.func_members = {}     # endereco de instrucao -> primeira funcao que o contem (build_functions)
+        self.cmp_at = {}           # alvo de desvio -> imm do ultimo `cmp rN,#imm` que o limita (switch)
         self.ram_aliases = {}      # enderecos RAM vistos pelo runtime (nao sao funcoes da ROM)
         self.runtime_seen = {}     # endereco ROM -> fonte (runtime|runtime-log)
 
@@ -162,7 +163,7 @@ class Analyzer:
 
     def walk(self, addr, thumb, work):
         regs = {}
-        last_cmp = None
+        last_cmp = self.cmp_at.get(addr)   # `cmp; bls L` : o limite chega ao bloco do switch
         mov_lr_pc = False
         self.prev_pop = None
         step = 2 if thumb else 4
@@ -210,6 +211,9 @@ class Analyzer:
             if base == "b":
                 ins.kind = "jump"
                 self.owner.setdefault(tgt, self.cur_owner)
+                # bls/blo/bcc/ble/blt tomados => indice <= imm: o limite vale em L (cmp r0,#k; bls L)
+                if cond and last_cmp is not None and m[len(base):] in ("ls", "lo", "cc", "le", "lt"):
+                    self.cmp_at.setdefault(tgt, last_cmp)
                 work.append((tgt, thumb, "branch"))
                 return not cond
             flip = base == "blx"
@@ -430,7 +434,8 @@ class Analyzer:
 
     # ---- tabelas de salto ----
     def add_table(self, ins, base, last_cmp, work):
-        limit = 64 if last_cmp is None else last_cmp + 1
+        bounded = last_cmp is not None and 0 <= last_cmp < 4096
+        limit = last_cmp + 1 if bounded else 64
         targets, a = [], base
         while len(targets) < limit:
             w = self.word(a)
@@ -445,7 +450,8 @@ class Analyzer:
         if not targets:
             self.unresolved.append((ins.addr, ins.mnem + " <tabela vazia>"))
             return
-        self.tables.append({"site": ins.addr, "base": base, "targets": targets, "thumb": ins.thumb})
+        self.tables.append({"site": ins.addr, "base": base, "targets": targets, "thumb": ins.thumb,
+                            "bounded": bounded})
         ins.kind = "ind"
         ins.succ.extend(targets)
         for t in targets:
@@ -453,7 +459,8 @@ class Analyzer:
             work.append((t, ins.thumb, "jumptable"))
 
     def add_arm_branch_table(self, ins, last_cmp, work):
-        limit = 64 if last_cmp is None else last_cmp + 1
+        bounded = last_cmp is not None and 0 <= last_cmp < 4096
+        limit = last_cmp + 1 if bounded else 64
         targets, a = [], ins.addr + 8
         while len(targets) < limit:
             d = self.decode(a, False)
@@ -463,7 +470,7 @@ class Analyzer:
             a += 4
         if targets:
             self.tables.append({"site": ins.addr, "base": ins.addr + 8, "targets": targets, "thumb": False,
-                                "branch_table": True})
+                                "branch_table": True, "bounded": bounded})
             ins.succ.extend(targets)
             ins.kind = "ind"
             for t in targets:
@@ -1028,10 +1035,11 @@ def main():
                 w.writerow([f"0x{t:08X}", f"0x{owner:08X}", why])
     with open(out / "jumptables.csv", "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["site", "table", "entries", "mode", "targets"])
+        w.writerow(["site", "table", "entries", "mode", "bounded", "targets"])
         for t in a.tables:
             w.writerow([f"0x{t['site']:08X}", f"0x{t['base']:08X}", len(t["targets"]),
-                        "thumb" if t["thumb"] else "arm", " ".join(f"0x{x:08X}" for x in t["targets"])])
+                        "thumb" if t["thumb"] else "arm", int(t["bounded"]),
+                        " ".join(f"0x{x:08X}" for x in t["targets"])])
     with open(out / "regions.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["start", "end", "size", "kind"])
@@ -1076,7 +1084,7 @@ def main():
         "continuations": [{"child": t, "parent": o, "why": w} for t, d in sorted(a.cont.items())
                           for o, w in sorted(d.items())],
         "jump_tables": [{"site": t["site"], "table": t["base"], "mode": "thumb" if t["thumb"] else "arm",
-                         "targets": t["targets"]} for t in a.tables],
+                         "bounded": t["bounded"], "targets": t["targets"]} for t in a.tables],
         "unresolved_indirect": [{"addr": ad, "insn": txt} for ad, txt in a.unresolved],
     }
     (out / "map.json").write_text(json.dumps(map_json, separators=(",", ":")), encoding="utf-8")
