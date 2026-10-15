@@ -418,7 +418,7 @@ descoberta compartilha estado (grafo) e e inerentemente sequencial; o que parale
 escreve; e do Riven) e a compilacao (`--jobs` do build_all, ja usado).
 
 ### QA do launcher e do controle (Poppy) - testes automatizados e roteiro manual
-**Automatizado:** `python -m unittest tests.test_launcher_qa -v` (raiz do repo; ~10 s; 50 testes). Compila de
+**Automatizado:** `python -m unittest tests.test_launcher_qa -v` (raiz do repo; ~35 s; 80 testes; sem SDL2 dev os de teclado/controle/retangulo PULAM). Compila de
 verdade, num harness C minimo, o `hw/config_ini.c` (UI) e o `recomp/runtime/rt_input.c` (jogo, sem SDL), e
 le o `launcher/flow.py`. Sem compilador funcional os testes de C pulam com o motivo (zig do projeto, `.venv`,
 WinLibs ou gcc/clang do PATH). Cobertura:
@@ -430,7 +430,7 @@ WinLibs ou gcc/clang do PATH). Cobertura:
 | paridade dos 3 leitores | UI (`config_ini.c`) x jogo (`rt_cfg_load`) x launcher (`flow.read_ini_value`) dao os mesmos valores em 14 arquivos comuns |
 **Achados (cada um foi um `expectedFailure` com o arquivo de entrada; corrigido o teste vira
 "unexpected success" e o decorador sai). Estado em 2026-10: 1-4 e 6 CORRIGIDOS (o jogo passou a usar o
-mesmo parser de `hw/config_ini.c`; `flow.py` ja corta `#`); resta o 5 (BOM), unico `expectedFailure`:**
+mesmo parser de `hw/config_ini.c`; `flow.py` ja corta `#`); o 5 (BOM) tambem foi corrigido. Hoje so restam os 2 `expectedFailure` de nomes SDL invalidos (secao abaixo):**
 1. `rt_input.c` `to_int`: `scale=2x` vale 2 no jogo, 3 (padrao) na UI. Dono: Nasus.
 2. `rt_input.c`: `deadzone` maximo 32000 (UI/contrato: 32767). Nasus.
 3. `rt_input.c`: `a=Escape` deixa o botao A SEM tecla no jogo e volta a X na UI; binding duplicado
@@ -473,7 +473,56 @@ renomeada de um arquivo de texto) para o caso invalido; um controle USB/Bluetoot
 | 22 | Launcher: marcar `Fullscreen` | `Window size` fica DESABILITADO (cinza, nao clica); desmarcar reabilita e restaura o N anterior; com fullscreen a UI preenche a tela |
 | 23 | Launcher: `Select ROM` com e sem ROM carregada | Sem ROM: botao `Select ROM` visivel. Com ROM valida carregada: o botao some e aparece so `ROM: <nome> OK`; ROM invalida volta a mostrar o botao |
 | 24 | Escala do jogo: `scaling=integer`, `fit`, `stretch` em tela cheia 1920x1080 | integer = 1440x960 com bordas nos 2 eixos; fit = 1620x1080 (bordas so nas laterais, 3:2); stretch = 1920x1080 (preenche e distorce). Sem pixels borrados em integer |
-Aceite: itens 1-8, 12-13 e 21-23 sao obrigatorios para liberar; os demais, sem regressao em relacao a versao anterior.
+| 25 | **[BLOQUEIA]** Remapear CADA botao do teclado (A, B, L, R, Start, Select, Up, Down, Left, Right) para uma tecla livre, um de cada vez | Cada um mostra `Press a key for <X>...`; a tecla nova grava em `[keyboard]`; no jogo SO o botao remapeado responde a nova tecla e a antiga para de valer; as demais ficam como estavam |
+| 26 | **[BLOQUEIA]** Remapear CADA botao do controle (A, B, L, R, Start, Select, D-pad x4) | Idem com `Press a button for <X>...`; grava em `[controller]`; vale no jogo e na navegacao do launcher |
+| 27 | **[BLOQUEIA]** Conflito: atribuir uma tecla/botao que ja e de OUTRO botao | Pede troca ou recusa (nunca deixa dois botoes na mesma tecla); apos confirmar, os dois ficam coerentes; o arquivo nao tem duplicatas (teclado e controle sao independentes) |
+| 28 | **[BLOQUEIA]** `Reset to defaults` (teclado e controle) | Volta a X/Z/A/S/Return/Backspace/setas e b/a/leftshoulder/rightshoulder/start/back/dpad; `stick_as_dpad=1` e `deadzone=8000`; arquivo gravado com os padroes |
+| 29 | **[BLOQUEIA]** Reservadas: tentar Esc, F11, F1 em qualquer botao (teclado) | Recusa com aviso; a tecla anterior continua; Esc ainda sai, F11 ainda alterna tela cheia, F1 ainda volta ao launcher |
+| 30 | **[BLOQUEIA]** Desconectar o controle NO MEIO do jogo (segurando uma direcao pelo analogico) | A direcao SOLTA na hora (Kirby para de andar); o teclado segue funcionando; sem travar nem mensagem de erro; reconectar volta a funcionar sem reiniciar (ate ~0,5 s) |
+| 31 | **[BLOQUEIA]** F1 durante o jogo -> launcher -> Play | Launcher volta com as MESMAS teclas/botoes (conferir nas abas Keyboard/Controller); Play reabre o jogo e as teclas remapeadas continuam valendo; nada foi regravado com padroes |
+| 32 | Remapear com o jogo ja fechado e abrir de novo; editar o `kirby.ini` a mao com nome SDL invalido (`a=Foo`) | Tecla valida vale; nome invalido: ver achado de nomes invalidos (hoje deixa o botao sem tecla: confirmar e reportar) |
+| 33 | Analogico: movimento suave, diagonais, parar no centro; ajustar `deadzone` (0, padrao 8000, 32767) | 8 direcoes por combinacao de eixos; sem tremida na borda (histerese 85%); deadzone 0 reage a qualquer toque; 32767 so deflexao total; `Left stick as D-pad` desmarcado: analogico ignorado e D-pad continua |
+Aceite: itens 1-8, 12-13, 21-23 e 25-31 (marcados **[BLOQUEIA]**) sao obrigatorios para liberar; os demais, sem
+regressao em relacao a versao anterior.
+
+### Teclas, botoes e analogico: contrato e testes (Poppy)
+Os testes rodam o `rt_input_init()`/`rt_input_poll()` REAIS (`recomp/runtime/rt_input.c`, RT_WINDOW) com uma camada
+SDL falsa por macro (controle, eixos, botoes e teclado controlaveis por script) e SDL2 de verdade para resolver nomes
+(`SDL_GetKeyFromName`, `SDL_GameControllerGetButtonFromString`). Classes em `tests/test_launcher_qa.py`:
+`KeyboardControllerBindingTest` (16) e `AnalogStickTest` (14).
+**Contrato verificado ([keyboard]/[controller]):**
+| regra | resultado |
+|---|---|
+| todos os nomes padrao existem no SDL (teclas e botoes) | ok |
+| arquivo vazio / v1 (`scale=`/`[kirby]`) -> teclas e botoes padrao | ok |
+| nomes validos (`Q`, `q`, `Space`, `Left Shift`, `Keypad 5`, `F5`...; `x y guide leftstick rightstick`) | ok, 1 botao muda, os outros ficam |
+| maiusculas/minusculas (`RETURN`, `LeftShoulder`) | ok |
+| reservadas `Escape`/`F11`/`F1` (qualquer caixa), em qualquer botao | volta a tecla padrao daquele botao; nunca fica ligada |
+| duplicata no teclado (`a=Z` com B=Z) | o mapa do TECLADO inteiro volta ao padrao; controle intacto |
+| duplicata no controle (`a=back` com SELECT=back) | o mapa do CONTROLE inteiro volta ao padrao; teclado intacto |
+| teclado e controle acionam o mesmo bit do KEYINPUT; teclado segue com o controle desconectado | ok |
+| UI (`config_ini.c` -> SDL) == jogo (efetivo) em 8 arquivos | ok |
+| launcher: nao le teclas/botoes (so `show`/`scaling`); nunca regrava os padroes | teste PULA ate existir `flow.read_bindings` |
+**Achados abertos (2 `expectedFailure`, dono: Nasus, `rt_input.c` `rt_input_init`):** nome que o SDL NAO conhece
+(`a=NotAKey`, `a=Ctrl+Z`; controle: `a=banana`) deixa o botao SEM tecla/botao em vez de voltar ao padrao
+("invalid value falls back to its default"). `config_ini.c` so valida a sintaxe do nome; o SDL so e consultado no
+jogo. Sugestao: se `SDL_GetKeyFromName` falhar, usar o nome padrao do botao (e logar uma vez).
+**Analogico (`rt_input_poll`; so o analogico ESQUERDO; `hyst`):**
+| caso | resultado |
+|---|---|
+| abaixo da zona morta (`|v| < dz`, 8 combinacoes) | nada |
+| `|v| == dz` ou maior | direcao aperta (limiar inclusivo) |
+| diagonais (+-20000,+-20000) | 2 bits (ex. RIGHT+DOWN); eixo dentro da zona morta so o outro |
+| histerese | aperta em `>= dz`; so solta abaixo de 85% de `dz` (8000: segura em 7000 e 6800, solta em 6799; volta a apertar so em 8000); sem tremida em 9000/7900/8100/7900... |
+| `stick_as_dpad=0` | analogico ignorado; D-pad (botoes) continua |
+| analogico direita + D-pad esquerda | cancelam o par (regra do GBA) |
+| `deadzone=0` | repouso (0,0) nada; +-1 ja aperta (dz efetivo minimo 1) |
+| `deadzone=32767` | 32766 nada; +32767 e -32768 apertam (simetrico, inclusive o minimo do int16) |
+| `deadzone` fora de 0..32767 / lixo no arquivo | volta a 8000 |
+| controle desconectado no meio do movimento | direcao SOLTA no mesmo quadro; reconecta em ate 30 quadros e volta a valer |
+Notas de desenho confirmadas no codigo: so um controle ativo por vez (os outros sao ignorados, `manage_pad`);
+varredura de hot-plug a cada 30 quadros (~0,5 s) para CONECTAR; na desconexao a direcao solta no mesmo
+quadro (no teste o SDL falso devolve 0 para controle removido, como o SDL real: confirmar com o item 30 do roteiro).
 
 ### Escala de video: `[video] scaling=integer|fit|stretch` - contrato, referencia e testes (Poppy)
 Contrato (`hw/config_ini.h`; decisao do usuario): padrao **fit**. `integer_scale=1` (v1/v2 antigo) -> integer,
@@ -982,6 +1031,50 @@ User feedback with screenshots. All UI text in English.
 - **Not done:** the full-screen path was only exercised with the SDL dummy video driver (flag and size
   logic); real monitor/DPI behaviour and the integer mode on a non-multiple window are untested by eye.
 
+### 14. Launcher: editable KEYBOARD / CONTROLLER pages, stick settings, live indicator (Gwen) - phases 2 and 3
+All UI text in English. Files: `hw/launcher_ui.c` (kirby_ui.dll; the file list is unchanged), `hw/config_ini.c`.
+- **GBA outline (own vector art, no Nintendo asset):** rounded body, L/R shoulders on top, d-pad cross on the
+  left, A and B circles on the right (B left of and a little below A), SELECT/START pills at the bottom, a dark
+  screen in the middle. Every button is clickable and shows its current key/button (inside the shoulders and
+  pills, next to the d-pad arms, under A/B). Two tabs (KEYBOARD / CONTROLLER) plus RESET (this tab only) and
+  BACK sit on top; the main page buttons `KEYBOARD...` / `CONTROLLER...` open the matching tab.
+- **Remapping:** click, or Enter/Space/pad south on the focused button -> `PRESS A KEY FOR A...` (controller:
+  `PRESS A BUTTON FOR A...`), the next key/button becomes the binding and is written to `[keyboard]` /
+  `[controller]` immediately. Esc cancels (does not leave the page; a click elsewhere also cancels). A name
+  already used by another GBA button is **swapped** (`A = Q (SWAPPED WITH B)`). **Esc, F11 and F1 are refused
+  with a warning and the capture continues**; names the ini cannot hold (`= ; # [ ]`, empty) are refused too.
+  Keyboard names are `SDL_GetKeyName`, pad names `SDL_GameControllerGetStringForButton`. Without a connected
+  controller the capture is refused (`NO CONTROLLER CONNECTED`). While waiting for a pad button, keyboard keys
+  are ignored (except Esc) and vice versa.
+- **Defaults by position** (config_ini.c, unchanged): keyboard X=A, Z=B, A=L, S=R, Return=Start,
+  Backspace=Select, arrows; controller A = SDL `b` (east), B = SDL `a` (south), shoulders, `start`, `back`, d-pad.
+- **Controller tab extras:** checkbox `LEFT STICK AS D-PAD` (`[controller] stick_as_dpad`), slider `DEADZONE`
+  0..32767 (default 8000, saved as `deadzone`; Left/Right on the focused slider = +-1000), and a **live
+  indicator**: circle with the dead-zone radius + a dot at the current left-stick position read with
+  `SDL_GameControllerGetAxis` (green dot when outside the zone). Only the first connected controller is used;
+  `NO CONTROLLER` is drawn when none. Hot-plug (`SDL_CONTROLLERDEVICEADDED/REMOVED`) re-opens the first one.
+- **Navigating the whole UI with the controller:** d-pad = Up/Down/Left/Right, **south = OK, east = back** (a
+  no-op on the main page: it never quits), left stick edge-triggered as a d-pad. Keyboard Tab/arrows as before;
+  on the editor pages the arrows use spatial navigation (nearest widget in that direction).
+- **Mouse bug fixed (found with the new window-id events):** with `SDL_RenderSetLogicalSize` active, SDL
+  converts the coordinates of real mouse events (those that carry the window id) in place; the UI then
+  converted them again, so real clicks missed in any window that was not exactly 480x320 (the earlier tests
+  only passed because they pushed events without a window id). The launcher no longer uses SDL's logical size:
+  the UI is drawn into a 480x320 target texture and copied to the window with its own integer/fit/stretch
+  rectangle, and `to_logical()` is the single, deterministic window->canvas mapping. Events whose window id is
+  not the launcher's are ignored.
+- **BOM (Poppy's QA finding 5):** `cfg_load` skips a UTF-8 BOM; tests added.
+- **Tests (`hw/tests/run_ui.ps1`, SDL dummy driver, every event carries `kl_test_window_id()`):**
+  `test_kirby_ui_edit.c` - keyboard remap, swap, F11/F1 refusal, Esc cancel, Enter to capture, RESET,
+  spatial navigation, tabs, foreign window id ignored; controller capture (simulated `SDL_CONTROLLERBUTTONDOWN`),
+  swap, keyboard ignored while waiting, stick checkbox, deadzone slider, live indicator pixels (outside /
+  inside the zone, no-controller text), RESET, d-pad/south/east navigation, left-stick navigation, south on
+  QUIT. `test_kirby_ui.c` / `test_config_ini.c` still pass; frames: `build/hw/ui_keyboard.png`, `ui_controller.png`.
+  Test hooks added: `kl_test_window_id`, `kl_test_capture`, `kl_test_note`, `kl_test_fake_pad`, `kl_test_pad_present`.
+- **Not done:** a real gamepad was not exercised (events were simulated; the dev machine may have one, the tests
+  force `fake_pad`); game (kirby.exe) input already reads the same ini via rt_input.c; capturing joystick
+  hats/axes (only SDL game-controller buttons) and non-SDL-mapped controllers.
+
 - Cuidado para o runtime: `hw_irq_pending` ja aplica IME e IE&IF; o runtime so decide o despacho.
   O registro BIOS_IF (0x03007FF8) e IWRAM, fica a cargo do runtime ao tratar VBlankIntrWait.
 
@@ -1449,6 +1542,30 @@ cache global do zig, +alguns s).
   | 1366x768 | 203,64 960x640 (4x) | 107,0 1152x768 (4,8x) | 0,0 1366x768 |
   Em tela cheia 1080p o `fit` so deixa as laterais (150 px de cada lado); `integer` deixa 60 px
   em cima/embaixo e 240 px nas laterais. Nao testei em monitor real.
+
+### Controle: um controle, analogico com histerese, hot-plug, recarga do ini (Nasus)
+- **Config**: `[keyboard]`/`[controller]` lidos por `cfg_load` (`hw/config_ini.c`, mesmo parser da UI).
+  **Recarga ao voltar do launcher:** F1 -> exit 77 -> o launcher reabre o `kirby.exe` (processo novo
+  => `cfg_load` de novo). Verificado: duas execucoes seguidas com ini diferente mostram em
+  `kirby.log` `settings loaded: ... A=Q ... scaling=stretch` e depois `A=E ... deadzone=12000 ...`.
+- **Um controle so**: o primeiro `SDL_GameController`; se desconectar, passa ao seguinte (failover);
+  um segundo controle conectado depois NAO rouba a entrada. Hot-plug: varredura a cada ~30 quadros
+  e deteccao de remocao a cada quadro (os eventos do SDL sao consumidos por `win_poll`).
+- **Analogico esquerdo como direcional** (`stick_as_dpad`, padrao 1): so o ESQUERDO (o direito nunca
+  vale); 8 direcoes por combinacao dos eixos; **histerese**: entra em 100% da zona morta, sai em 85%
+  (zona morta 8000: entra em 8000, solta abaixo de 6800); dpad fisico continua valendo; botoes por
+  posicao (GBA A = leste, B = sul). Teclado OU controle (combinam); Esc/F1/F11 reservadas.
+- **Log** (`kirby.log` ao lado do ini, tambem no stderr): `settings loaded: ...`, `controller
+  connected: <nome> (using it; others are ignored)`, `controller disconnected: <nome>`.
+- **Teste** `kirby.exe --selftest-input` (SDL dummy + joystick VIRTUAL do SDL 2.32,
+  `SDL_JoystickAttachVirtual/SetVirtualAxis/SetVirtualButton`, sem hardware): leste->A, sul->B,
+  L+Start, dpad, zona morta 7900 nada / 8100 direita / 7000 mantem / 6700 solta / 7500 nao reentra,
+  diagonais cima-esq e baixo-dir, analogico direito ignorado, `stick_as_dpad=0`, segundo controle
+  ignorado, desconectar o primeiro passa ao segundo, todos fora = parado sem travar, reconexao:
+  **OK**. Observacao: esta maquina tem um "Xbox 360 Controller" real; o teste ignora controles
+  reais (`SDL_JoystickIsVirtual`). Harness da Poppy (ParserParity/SharedIni/ScalingParity): verde.
+- Limite: `SDL_PushEvent` de CONTROLLERBUTTON nao muda o estado lido por `SDL_GameControllerGetButton`;
+  por isso o teste usa joysticks virtuais (caminho real de SDL, nao simulacao de eventos).
 
 ### O que falta / riscos
 - Interpretador de fallback: endereco de RAM sem overlay ainda **aborta**; ROM sem funcao
