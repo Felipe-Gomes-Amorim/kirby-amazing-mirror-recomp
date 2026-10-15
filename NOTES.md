@@ -1744,3 +1744,14 @@ como direcional opcional, captura de tecla/botao para o remapeamento; mesma conf
 **Riscos:** fonte 5x7 sem acentos (nao e problema em ingles); controles que o SDL nao reconhece (captura
 manual); DPI/escala do Windows; foco da janela; fronteira Python<->C (a UI roda o laco, Python so responde ao
 `poll`); `kirby.exe` como app grafico nao imprime no console (logs vao para arquivo).
+
+### Ajustes do launcher pedidos pelo usuario (Riven) - decisoes
+Feedback com capturas (tela cheia 1903x1079 mostrava o jogo em 1440x960 = 6x inteiro, bordas nos dois eixos):
+- **Escala**: tres modos em `[video] scaling=integer|fit|stretch`; **padrao = fit** (decisao do usuario).
+  `integer_scale=1` (v1/v2) -> integer; `integer_scale=0` -> fit. Fit mantem 3:2 (borda so nas laterais em 16:9);
+  stretch preenche a tela e distorce; integer = pixels perfeitos com bordas.
+- **Window size** desabilitado com Fullscreen marcado.
+- **Launcher reflete as opcoes**: janela = 240*scale x 160*scale, **minimo 480x320**; em 1x a UI aparece em 2x com a
+  legenda "1X PREVIEW (UI AT 2X)" (decisao do usuario); fullscreen aplica ao launcher.
+- **Select ROM** so aparece quando nao ha ROM carregada; com ROM mostra apenas "ROM: <nome> OK".
+- Donos: Gwen (UI + `config_ini`), Nasus (`kirby.exe` usa o MESMO parser e o modo de escala), Poppy (QA).
