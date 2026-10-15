@@ -151,6 +151,8 @@ WEAK uint16_t hw_irq_pending(void) { return 0; }
 WEAK void hw_set_keys(uint16_t k) { (void)k; }
 WEAK const uint32_t *hw_frame_ready(void) { return 0; }
 WEAK const uint32_t *hw_get_framebuffer(void) { return 0; }
+WEAK int hw_audio_read(int16_t *lr, int frames) { (void)lr; (void)frames; return 0; }
+WEAK int hw_audio_rate(void) { return 48000; }
 
 WEAK uint32_t hw_read(uint32_t a, int size) {
     uint32_t v = 0;

@@ -15,6 +15,16 @@
 #endif
 
 static Cpu cpu;
+extern Cpu *rt_cpu;
+int rt_measure;
+void rt_window_install(int window, int scale, int pace);
+void rt_window_close(void);
+void rt_report_speed(void);
+extern Cpu *rt_cpu;
+int rt_measure;
+void rt_window_install(int window, int scale, int pace);
+void rt_window_close(void);
+void rt_report_speed(void);
 static unsigned watchdog_s;
 
 static void watchdog_fire(void) {
@@ -56,10 +66,17 @@ int main(int argc, char **argv) {
     gba_load_rom(rom, (uint32_t)n);
     hw_reset();
     const char *ppm = NULL, *sav = NULL;
+    int window = 0, scale = 3, bench = 0;
     rt_opt_stop_at_vblank_wait = 1;
     hw_set_keys(0x03FF);
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--no-stop")) rt_opt_stop_at_vblank_wait = 0;
+        else if (!strcmp(argv[i], "--window")) {
+            window = 1;
+            if (i + 1 < argc && argv[i + 1][0] >= '1' && argv[i + 1][0] <= '9') scale = atoi(argv[++i]);
+        }
+        else if (!strcmp(argv[i], "--bench")) bench = 1;
+        else if (!strcmp(argv[i], "--bench-from") && i + 1 < argc) { extern uint64_t rt_bench_from; rt_bench_from = (uint64_t)atoll(argv[++i]); }
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) rt_dump_path = argv[++i];
         else if (!strcmp(argv[i], "--unresolved") && i + 1 < argc) rt_unresolved_path = argv[++i];
         else if (!strcmp(argv[i], "--keys") && i + 1 < argc) { if (rt_script_keys(argv[++i])) { fprintf(stderr, "--keys invalido"); return 1; } }
@@ -87,7 +104,13 @@ int main(int argc, char **argv) {
         }
         if (strcmp(sav, "none")) rt_script_sram(sav);
     }
+    rt_cpu = &cpu;
     rt_script_install();
+    if (window || bench) {
+        rt_measure = 1;
+        rt_window_install(window, scale, window);
+        if (window) rt_opt_stop_at_vblank_wait = 0;
+    }
     rt_cpu_reset(&cpu);
     if (watchdog_s) {
 #ifdef _WIN32
@@ -101,6 +124,8 @@ int main(int argc, char **argv) {
     cpu.thumb = 0;
     while (!cpu.stop) rt_call(&cpu);
 
+    rt_window_close();
+    if (window || bench) rt_report_speed();
     const char *why = cpu.stop == RT_STOP_FRAMES ? "frames"
                       : cpu.stop == RT_STOP_VBLANK_WAIT ? "primeira VBlankIntrWait"
                       : cpu.stop == RT_STOP_STOPCALL  ? "SWI Stop" : "erro";

@@ -9,6 +9,7 @@ import csv
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -116,22 +117,28 @@ def build(rom, funcs, bad=None, jobs=8, nshards=16, verbose=True):
     for name in sorted(os.listdir(RUNTIME)):
         if name == 'gba_cpu.h':   # unico header incluido pelo codigo gerado
             hdr.update(open(os.path.join(RUNTIME, name), 'rb').read())
+    hdr_all = hashlib.sha1()   # fontes do runtime: qualquer .h conta
+    for name in sorted(os.listdir(RUNTIME)):
+        if name.endswith('.h'):
+            hdr_all.update(open(os.path.join(RUNTIME, name), 'rb').read())
     objs = []
 
-    def compile_one(src):
+    def compile_one(src, flags=(), key=''):
         with open(src, 'rb') as fh:
-            h = hashlib.sha1(hdr.digest() + fh.read()).hexdigest()[:10]
+            base = hdr_all if os.path.dirname(src) != OUT else hdr
+            h = hashlib.sha1(base.digest() + key.encode() + fh.read()).hexdigest()[:10]
         os.makedirs(os.path.join(OUT, 'obj'), exist_ok=True)
-        obj = os.path.join(OUT, 'obj', os.path.basename(src)[:-2] + '_%s.o' % h)
+        obj = os.path.join(OUT, 'obj', os.path.basename(src)[:-2] + ('_w' if flags else '') + '_%s.o' % h)
         if not os.path.exists(obj):
-            r = subprocess.run(zig_cc() + ['-c', '-O1', '-w', '-I', RUNTIME, '-I', OUT, src, '-o', obj],
-                               capture_output=True, text=True)
+            r = subprocess.run(zig_cc() + ['-c', '-O1', '-w', '-I', RUNTIME, '-I', OUT,
+                                           '-I', os.path.join(ROOT, 'hw')] + list(flags) +
+                               [src, '-o', obj], capture_output=True, text=True)
             if r.returncode:
                 raise RuntimeError('compilando %s:\n%s' % (src, r.stderr[-3000:]))
         return obj
 
     rt_srcs = [os.path.join(RUNTIME, n) for n in ('gba_bus.c', 'gba_rt.c', 'gba_bios.c', 'rt_main.c',
-                                                    'rt_script.c')]
+                                                    'rt_script.c', 'rt_window.c')]
     rt_srcs.append(os.path.join(ROOT, 'hw', 'hw.c'))   # strong: substitui os stubs fracos
     t1 = time.time()
     with ThreadPoolExecutor(jobs) as ex:
@@ -142,6 +149,33 @@ def build(rom, funcs, bad=None, jobs=8, nshards=16, verbose=True):
     r = subprocess.run(zig_cc() + ['-o', exe] + objs, capture_output=True, text=True)
     if r.returncode:
         raise RuntimeError('link:\n' + r.stderr[-3000:])
+    build_window(objs, compile_one)
+    return exe
+
+
+SDL_DIR = os.environ.get('SDL2_DIR', 'C:/libs/SDL2-2.32.2/x86_64-w64-mingw32')
+
+
+def build_window(objs, compile_one):
+    """kirby.exe = o mesmo programa + janela SDL2 (hw/window_sdl.c). Precisa do SDL2 devel
+    MinGW (SDL2_DIR). Sem SDL2 so ignora; rt_boot.exe continua valido."""
+    inc = os.path.join(SDL_DIR, 'include', 'SDL2')
+    if not os.path.isdir(inc):
+        return None
+    flags = ['-DRT_WINDOW', '-I', inc]
+    w = [compile_one(os.path.join(RUNTIME, 'rt_window.c'), flags, 'win'),
+         compile_one(os.path.join(ROOT, 'hw', 'window_sdl.c'), flags, 'win')]
+    base = [o for o in objs if not os.path.basename(o).startswith('rt_window_')]
+    exe = os.path.join(OUT, 'kirby.exe' if os.name == 'nt' else 'kirby')
+    imp = os.path.join(SDL_DIR, 'lib', 'libSDL2.dll.a')   # import lib (nao a estatica)
+    r = subprocess.run(zig_cc() + ['-o', exe] + base + w +
+                       [imp], capture_output=True, text=True)
+    if r.returncode:
+        print('[janela] link falhou:\n' + r.stderr[-1500:])
+        return None
+    dll = os.path.join(SDL_DIR, 'bin', 'SDL2.dll')
+    if os.path.exists(dll):
+        shutil.copy(dll, OUT)
     return exe
 
 
@@ -216,7 +250,8 @@ def iterate(rom_path, csv_path, jobs=8, max_iter=40, verbose=True, boot_args=())
             rc, out, err = boot(exe, rom_path, dump, boot_args)
         if rc == 0:
             return rc, out, err, overlays
-        m = re.search(r'pc=([0-9A-F]{8}) lr=.*? (thumb|arm) ', err)
+        ms = list(re.finditer(r'pc=([0-9A-F]{8}) lr=.*? (thumb|arm) ', err))
+        m = ms[-1] if ms else None   # o ultimo dump e o da parada (ha dumps informativos antes)
         if 'sem funcao recompilada' not in err or not m:
             return rc, out, err, overlays
         pc, thumb = int(m.group(1), 16), m.group(2) == 'thumb'
@@ -252,6 +287,10 @@ def main():
     ap.add_argument('--keys', help='roteiro: "START@620,A@700+10"')
     ap.add_argument('--snap', help='quadros p/ salvar em build/recomp/frames: "600,2000"')
     ap.add_argument('--sav', help='arquivo de save (padrao: <rom>.sav; "none" desliga)')
+    ap.add_argument('--bench-from', type=int, default=0, help='marca o inicio do trecho medido')
+    ap.add_argument('--bench', action='store_true', help='mede quadros/s sem limite (use com --frames)')
+    ap.add_argument('--window', nargs='?', const=3, type=int, metavar='ESCALA',
+                    help='abre kirby.exe com janela SDL2 (escala 1-6)')
     a = ap.parse_args()
     frames_dir = os.path.join(ROOT, 'build', 'recomp', 'frames')
     os.makedirs(frames_dir, exist_ok=True)
@@ -262,6 +301,12 @@ def main():
         os.remove(ppm)
     if a.frames:
         args += ['--frames', str(a.frames)]
+    if a.bench:
+        args += ['--bench']
+        if a.bench_from:
+            args += ['--bench-from', str(a.bench_from)]
+    if a.window and not a.frames:
+        args += ['--frames', '700']   # converge o mapa (nao resolvidos) antes de abrir a janela
     for flag, val in (('--keys', a.keys), ('--snap', a.snap), ('--sav', a.sav)):
         if val:
             args += [flag, val]
@@ -271,6 +316,17 @@ def main():
         if line.startswith('[snap]'):
             print(line)
     print(err[-3000:])
+    if a.window and rc == 0:
+        exe = os.path.join(OUT, 'kirby.exe' if os.name == 'nt' else 'kirby')
+        if not os.path.exists(exe):
+            print('kirby.exe nao foi gerado (SDL2 em %s?)' % SDL_DIR)
+            return 1
+        cmd = [exe, a.rom, '--window', str(a.window), '--unresolved', os.path.join(OUT, 'unresolved.log')]
+        for flag, val in (('--keys', a.keys), ('--snap', a.snap), ('--sav', a.sav)):
+            if val:
+                cmd += [flag, val]
+        print('abrindo:', ' '.join(cmd))
+        return subprocess.run(cmd).returncode
     return rc
 
 

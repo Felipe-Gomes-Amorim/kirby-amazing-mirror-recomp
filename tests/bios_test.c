@@ -7,6 +7,11 @@
 
 const RcFunc rc_table[1] = {{0, 0, 0, 0, 0}};
 const unsigned rc_table_n = 0;
+/* simbolos que o rt_main/rt_window fornecem no executavel real */
+double rt_hwstep_us;
+uint64_t rt_hwstep_calls, rt_hwstep_cycles;
+int rt_measure;
+double rt_now_us(void) { return 0; }
 
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fails++; printf("FALHA: " __VA_ARGS__); printf("\n"); } } while (0)

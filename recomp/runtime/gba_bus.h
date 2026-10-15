@@ -62,6 +62,8 @@ uint8_t *gba_iwram(void);
 void gba_sram_set(const uint8_t *p32k);
 void gba_sram_get(uint8_t *p32k);
 const uint32_t *hw_get_framebuffer(void);
+int hw_audio_read(int16_t *lr, int frames);
+int hw_audio_rate(void);
 
 /* --- Ciclo de vida / tempo --- */
 void hw_reset(void);

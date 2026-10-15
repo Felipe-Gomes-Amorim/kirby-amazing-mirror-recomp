@@ -244,11 +244,27 @@ static void grab_frame(void) {
     }
 }
 
+extern double rt_hwstep_us, rt_now_us(void);
+extern uint64_t rt_hwstep_calls, rt_hwstep_cycles;
+extern int rt_measure;
+
+static void timed_step(uint32_t cycles) {
+    if (rt_measure) {   /* so mede com --bench/--window: QueryPerformanceCounter custa */
+        double t0 = rt_now_us();
+        hw_step(cycles);
+        rt_hwstep_us += rt_now_us() - t0;
+    } else {
+        hw_step(cycles);
+    }
+    rt_hwstep_calls++;
+    rt_hwstep_cycles += cycles;
+}
+
 void rt_tick(Cpu *c) {
     static uint32_t acc;
     acc += 24; /* estimativa grosseira de ciclos por chamada de funcao */
     if (acc < 1232) return;
-    hw_step(acc);
+    timed_step(acc);
     acc = 0;
     grab_frame();
     rt_irq_service(c);
@@ -258,7 +274,7 @@ uint32_t rt_loops, rt_loop_site;
 
 void rt_tick_loop(Cpu *c, uint32_t site) {
     rt_loop_site = site;
-    hw_step(8192); /* ~1024 voltas de um laco curto */
+    timed_step(8192); /* ~1024 voltas de um laco curto */
     grab_frame();
     rt_irq_service(c);
 }
@@ -274,7 +290,7 @@ static int vblank_intr_wait(Cpu *c, uint32_t next) {
     /* sem IE/DISPSTAT de VBlank o jogo travaria no hw real tambem */
     for (unsigned guard = 0; !(gba_read16(BIOS_IF) & 1); guard++) {
         if (guard > 228 * 3) rt_abort(c, "VBlankIntrWait: nenhum IRQ de VBlank em 3 quadros");
-        hw_step(1232);
+        timed_step(1232);
         grab_frame();
         rt_irq_service(c);
         if (c->stop) return 1;
@@ -282,6 +298,7 @@ static int vblank_intr_wait(Cpu *c, uint32_t next) {
     c->pc = next;
     rt_frames_counted++;
     if (rt_frame_hook) rt_frame_hook(rt_frames_counted);
+    if (c->stop) return 1;
     if (rt_frames_limit && rt_frames_counted >= rt_frames_limit) {
         c->stop = RT_STOP_FRAMES;
         return 1;
