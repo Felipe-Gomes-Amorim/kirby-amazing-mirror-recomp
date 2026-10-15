@@ -225,7 +225,7 @@ class Analyzer:
                 regs[r][1] if regs.get(r) and regs[r][0] == "c" else None for r in ("r0", "r1", "r2")))
             if self.add_func(tgt, tmode, "bl"):
                 work.append((tgt, tmode, "bl"))
-            regs.clear()
+            self.after_call(regs)
             return False
 
         # ---- indirect: bx rX / blx rX / mov pc,rX / ldr pc,... / add pc,... ----
@@ -269,6 +269,9 @@ class Analyzer:
         is_call = indirect == "blx" or mov_lr_pc
         ins.kind = "call" if is_call else "ind"
         val = regs.get(src) if src else None
+        if val and val[0] == "lr" and indirect == "bx":
+            ins.kind = "ret"
+            return not ins.cond
 
         # switch com tabela: add rd,rn,rm ; ldr rd,[rd] ; mov pc,rd / bx rd
         if val and val[0] == "e" and not is_call:
@@ -291,17 +294,23 @@ class Analyzer:
                 else:
                     ins.kind = "jump"
             if is_call:
-                regs.clear()
+                self.after_call(regs)
             return not (is_call or ins.cond)
         self.unresolved.append((addr, m + " " + " ".join(ops)))
         if is_call:
-            regs.clear()
+            self.after_call(regs)
         return not (is_call or ins.cond)
+
+    @staticmethod
+    def after_call(regs):
+        """Apos um `bl`: esquece constantes, mas mantem copias de lr (`mov ip,lr ... bx ip`)."""
+        for k in [k for k, v in regs.items() if v[0] != "lr"]:
+            del regs[k]
 
     def track(self, ins, regs, last_cmp):
         m, ops, addr = ins.mnem, ins.ops, ins.addr
         if m in ("pop",) or m.startswith(("ldm", "stm")):
-            regs.clear()
+            self.after_call(regs)
             return
         if not ops:
             return
@@ -329,6 +338,8 @@ class Analyzer:
                 regs.pop(rd, None)
                 if v:
                     regs[rd] = v
+                elif reg(ops[1]) == "lr":
+                    regs[rd] = ("lr", 0)   # copia de lr: `mov ip,lr ... bx ip` e retorno
             return
         if m == "adr" and ins.thumb and len(ops) == 2 and ops[1].startswith("#"):
             imm = parse_imm(ops[1])
@@ -612,6 +623,33 @@ class Analyzer:
                 return b["store"] + (addr - b["exec"])
         return None
 
+    def noreturn_kind(self, f, seen, tails, src, in_ram):
+        """Classifica funcoes sem `ret` alcancavel; '' se tem retorno; 'suspect' se nada explica."""
+        if any(self.insns[x].kind == "ret" for x in seen):
+            return ""
+        ins = [self.insns[x] for x in sorted(seen)]
+        if f == ROM_BASE:
+            return "header-branch"
+        if src == "entry":
+            return "crt0"
+        if src == "adr":
+            return "irq-handler"
+        if in_ram:
+            return "ram-code"
+        if len(ins) == 1 and ins[0].mnem == "bx":
+            return "bx-stub"
+        if len(ins) == 2 and ins[0].mnem == "adr" and ins[1].mnem == "bx":
+            return "mode-veneer"
+        if any(i.mnem in ("svc", "swi") and i.ops and i.ops[0] in ("#0", "#1", "#3") for i in ins):
+            return "softreset-stop"
+        if tails:
+            return "tail-call"
+        loops = [i for i in ins if i.kind == "jump" and not i.cond and i.target is not None
+                 and i.target <= i.addr and i.target in seen]
+        if loops:
+            return "infinite-loop"
+        return "suspect"
+
     # ---- funcoes ----
     def build_functions(self):
         res = []
@@ -622,11 +660,13 @@ class Analyzer:
         for f, (thumb, src) in sorted(self.funcs.items()):
             if f not in self.insns:
                 continue
-            seen, stack, calls = set(), [f], set()
+            seen, stack, calls, tails = set(), [f], set(), set()
             while stack:
                 a = stack.pop()
-                if a in seen or a not in self.insns or (
-                        a != f and a in self.funcs and f not in self.cont.get(a, ())):
+                if a in seen or a not in self.insns:
+                    continue
+                if a != f and a in self.funcs and f not in self.cont.get(a, ()):
+                    tails.add(a)   # salta/cai em outra funcao (tail call ou fallthrough)
                     continue
                 seen.add(a)
                 ins = self.insns[a]
@@ -647,6 +687,8 @@ class Analyzer:
                 "lo": lo, "hi": hi, "callers": len(callers.get(f, ())), "callees": len(calls),
                 "jumptable": has_tbl, "source": src,
                 "has_return": any(self.insns[x].kind == "ret" for x in seen),
+                "tails": len(tails),
+                "noreturn_kind": self.noreturn_kind(f, seen, tails, src, exec_addr != ""),
                 "continuations": sum(1 for t, o in self.cont.items() if f in o and t in seen), "tier": self.func_tier.get(f, ""),
                 "exec_addr": exec_addr, "ram_block": block,
             })
@@ -832,14 +874,20 @@ def main():
     with open(out / "functions.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["addr", "mode", "insns", "bytes", "lo", "hi", "callers", "callees", "jumptable", "source", "tier", "confidence",
-                    "store_addr", "exec_addr", "ram_block", "has_return", "continuations"])
+                    "store_addr", "exec_addr", "ram_block", "has_return", "continuations", "noreturn_kind"])
         for r in funcs:
             w.writerow([f"0x{r['addr']:08X}", r["mode"], r["insns"], r["bytes"], f"0x{r['lo']:08X}",
                         f"0x{r['hi']:08X}", r["callers"], r["callees"], int(r["jumptable"]), r["source"], r["tier"],
                         r["confidence"],
                         f"0x{r['addr']:08X}" if r["exec_addr"] != "" else "",
                         f"0x{r['exec_addr']:08X}" if r["exec_addr"] != "" else "", r["ram_block"],
-                        int(r["has_return"]), r["continuations"]])
+                        int(r["has_return"]), r["continuations"], r["noreturn_kind"]])
+    with open(out / "noreturn.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["addr", "mode", "bytes", "source", "kind"])
+        for r in funcs:
+            if r["noreturn_kind"]:
+                w.writerow([f"0x{r['addr']:08X}", r["mode"], r["bytes"], r["source"], r["noreturn_kind"]])
     with open(out / "continuations.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["addr_filho", "addr_pai", "motivo"])
@@ -879,11 +927,13 @@ def main():
                         f"0x{b['exec'] + b['size']:08X}", b["size"], int(b["compressed"]), b["mode"], len(inside),
                         " ".join(f"0x{e:08X}" for e in entries)])
     map_json = {
-        "rom": rom_path.name, "rom_base": ROM_BASE, "header": hdr,
+        "schema": "kirby-amm-map/1", "rom": rom_path.name, "rom_base": ROM_BASE, "header": hdr,
         "functions": [{
             "addr": r["addr"], "mode": r["mode"], "lo": r["lo"], "hi": r["hi"], "insns": r["insns"],
             "bytes": r["bytes"], "source": r["source"], "tier": r["tier"] or None,
             "confidence": r["confidence"], "jumptable": r["jumptable"], "has_return": r["has_return"],
+            "continuations": r["continuations"], "noreturn_kind": r["noreturn_kind"] or None,
+            "store_addr": r["addr"] if r["exec_addr"] != "" else None,
             "exec_addr": r["exec_addr"] if r["exec_addr"] != "" else None,
             "ram_block": r["ram_block"] if r["ram_block"] != "" else None,
         } for r in funcs],
@@ -917,7 +967,8 @@ def main():
     print(f"  codigo RAM: {len(blocks)} copias, {sum(1 for r in funcs if r['ram_block'] != '')} funcoes dentro")
     print(f"  continuacoes (bl como salto longo / extras dentro de funcao): "
           f"{sum(len(d) for d in a.cont.values())}  (extras absorvidos: {len(a.extra_conts)})")
-    print(f"  funcoes sem retorno alcancavel: {sum(1 for r in funcs if not r['has_return'])}")
+    print(f"  funcoes sem retorno alcancavel: {sum(1 for r in funcs if not r['has_return'])}  "
+          f"{dict(Counter(r['noreturn_kind'] for r in funcs if r['noreturn_kind']))}")
     print(f"\nArquivos em {out}/: header.json functions.csv jumptables.csv regions.csv unresolved.csv "
           f"ram_code.csv map.json continuations.csv")
 
