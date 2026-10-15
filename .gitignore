@@ -1,0 +1,9 @@
+﻿# ROMs e artefatos (nunca commitar material com copyright)
+*.gba
+*.sav
+*.sgm
+build/
+*.o
+*.elf
+*.map
+__pycache__/
