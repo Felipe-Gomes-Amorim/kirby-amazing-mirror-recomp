@@ -60,6 +60,20 @@ def read_ini_value(path, section, key, default=None):
     return default
 
 
+def read_scaling(ini_path):
+    """[video] scaling = integer | fit | stretch (default fit). Legacy files: integer_scale=1 -> integer,
+    integer_scale=0 -> fit; an explicit `scaling=` wins; invalid values fall back to fit."""
+    val = (read_ini_value(ini_path, 'video', 'scaling') or '').strip().lower()
+    if val in ('integer', 'fit', 'stretch'):
+        return val
+    if val:                                            # present but invalid
+        return 'fit'
+    legacy = (read_ini_value(ini_path, 'video', 'integer_scale') or '').strip()
+    if legacy == '1':
+        return 'integer'
+    return 'fit'
+
+
 class BuildMonitor:
     """Progress of the *detached* full build, derived from files only (it is another process)."""
 

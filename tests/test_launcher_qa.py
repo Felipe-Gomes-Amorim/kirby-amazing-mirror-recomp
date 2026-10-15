@@ -67,13 +67,14 @@ RT_HARNESS_C = r'''
 #include <stdio.h>
 extern int rt_cfg_load(const char *path);
 typedef struct { int scale, fullscreen, integer_scale, vsync, volume, mute, stick_as_dpad, deadzone;
-                 char kb[10][32]; char pad[10][32]; } RtCfg;
+                 char kb[10][32]; char pad[10][32]; int scaling; } RtCfg;
 extern RtCfg rt_cfg;
 int main(int argc, char **argv) {
     int rc = rt_cfg_load(argv[1]);
     printf("rc=%d\nscale=%d\nfullscreen=%d\ninteger_scale=%d\nvsync=%d\nvolume=%d\nmute=%d\n"
            "stick_as_dpad=%d\ndeadzone=%d\n", rc, rt_cfg.scale, rt_cfg.fullscreen, rt_cfg.integer_scale,
            rt_cfg.vsync, rt_cfg.volume, rt_cfg.mute, rt_cfg.stick_as_dpad, rt_cfg.deadzone);
+    printf("scaling=%s\n", rt_cfg.scaling == 0 ? "integer" : rt_cfg.scaling == 2 ? "stretch" : "fit");
     const char *bk[10] = {"a","b","select","start","right","left","up","down","r","l"};
     for (int i = 0; i < 10; i++) printf("kb_%s=%s\npad_%s=%s\n", bk[i], rt_cfg.kb[i], bk[i], rt_cfg.pad[i]);
     return 0;
@@ -328,7 +329,7 @@ class IniV1CompatTest(IniCase):
 # secao -> chave -> (tipo, parametros, padrao)
 V2_SPEC = {
     'video': {'scale': ('int', (1, 6), '3'), 'fullscreen': ('int', (0, 1), '0'),
-              'integer_scale': ('int', (0, 1), '1'), 'vsync': ('int', (0, 1), '0')},
+              'scaling': ('enum', ('integer', 'fit', 'stretch'), 'fit'), 'vsync': ('int', (0, 1), '0')},
     'audio': {'volume': ('int', (0, 100), '100'), 'mute': ('int', (0, 1), '0')},
     'keyboard': {'a': ('key', None, 'x'), 'b': ('key', None, 'z'), 'l': ('key', None, 'a'),
                  'r': ('key', None, 's'), 'start': ('key', None, 'return'),
@@ -450,7 +451,7 @@ class IniV2ContractTest(IniCase):
 
 
 # ----------------------------- paridade: UI (config_ini.c) x jogo (rt_input.c) x launcher (flow.py) ----
-FIELD_SECTION = {'scale': 'video', 'fullscreen': 'video', 'integer_scale': 'video', 'vsync': 'video',
+FIELD_SECTION = {'scale': 'video', 'fullscreen': 'video', 'scaling': 'video', 'vsync': 'video',
                  'volume': 'audio', 'mute': 'audio', 'stick_as_dpad': 'controller', 'deadzone': 'controller'}
 
 
@@ -514,17 +515,14 @@ class ParserParityTest(IniCase):
             with self.subTest(file=name):
                 self.assertEqual(self.diffs(text), [])
 
-    @unittest.expectedFailure
     def test_game_rejects_trailing_garbage_like_the_ui(self):
         """BUG (recomp/runtime/rt_input.c to_int): `scale=2x` vale 2 no jogo e 3 (padrao) na UI."""
         self.assertEqual(self.diffs('[video]\nscale=2x\n'), [])
 
-    @unittest.expectedFailure
     def test_game_accepts_the_full_deadzone_range(self):
         """BUG (rt_input.c): deadzone maximo 32000 no jogo; 32767 na UI/contrato."""
         self.assertEqual(self.diffs('[controller]\ndeadzone=32500\n'), [])
 
-    @unittest.expectedFailure
     def test_game_resets_reserved_and_duplicate_bindings_like_the_ui(self):
         """BUG (rt_input.c): `a=Escape` deixa o botao A SEM tecla no jogo e volta a X na UI; binding
         duplicado: o jogo mantem as duas (uma tecla = 2 botoes), a UI reseta o teclado inteiro."""
@@ -553,7 +551,6 @@ class SharedIniFileTest(unittest.TestCase):
         self.assertIn('kirby.ini', src)
         self.assertIn('--ini', src, 'the launcher must be able to point the game at an explicit file')
 
-    @unittest.expectedFailure
     def test_game_uses_the_shared_parser(self):
         """Design (causa das divergencias de ParserParityTest): o jogo tem parser proprio (rt_cfg_load em
         rt_input.c) em vez de hw/config_ini.c, que ja nao depende de SDL. Uma fonte so elimina as 4 divergencias."""
@@ -589,6 +586,313 @@ class SharedIniFileTest(unittest.TestCase):
             self.skipTest('launcher does not use kl_run yet (UI DLL phase 1 not delivered)')
         self.assertTrue(re.search(r'\b77\b', src) is not None,
                         'F1 must be handled: the game exits with code 77 and the launcher reopens')
+
+
+# ----------------------------- scaling=integer|fit|stretch e retangulo de destino -----------------------------
+# CONTRATO (hw/config_ini.h + NOTES "Ajustes do launcher"): [video] scaling=integer|fit|stretch, padrao FIT.
+#   integer : s = max(1, min(W // 240, H // 160)); tamanho 240*s x 160*s, centralizado (divisao inteira)
+#   fit     : escala real k = min(W/240, H/160); tamanho floor(240*k) x floor(160*k), centralizado
+#   stretch : a janela inteira (0, 0, W, H)
+# Legado: integer_scale=1 -> integer, integer_scale=0 -> fit; um `scaling=` valido sempre vence.
+GBA_W, GBA_H = 240, 160
+RECT_TABLE = {   # (W, H) -> {modo: (x, y, w, h)}  (calculado a mao, ver NOTES)
+    (1920, 1080): {'integer': (240, 60, 1440, 960), 'fit': (150, 0, 1620, 1080), 'stretch': (0, 0, 1920, 1080)},
+    (1366, 768):  {'integer': (203, 64, 960, 640),  'fit': (107, 0, 1152, 768),  'stretch': (0, 0, 1366, 768)},
+    (2560, 1440): {'integer': (200, 0, 2160, 1440), 'fit': (200, 0, 2160, 1440), 'stretch': (0, 0, 2560, 1440)},
+    (1280, 720):  {'integer': (160, 40, 960, 640),  'fit': (100, 0, 1080, 720),  'stretch': (0, 0, 1280, 720)},
+}
+
+
+def ref_dest_rect(win_w, win_h, mode):
+    """Implementacao de referencia do contrato (so inteiros; sem float para nao depender de arredondamento)."""
+    if mode == 'stretch':
+        return (0, 0, win_w, win_h)
+    if mode == 'integer':
+        k = max(1, min(win_w // GBA_W, win_h // GBA_H))
+        w, h = GBA_W * k, GBA_H * k
+    elif mode == 'fit':
+        # min(W/240, H/160) em inteiros: compara W*160 com H*240
+        if win_w * GBA_H <= win_h * GBA_W:
+            w, h = win_w, (win_w * GBA_H) // GBA_W
+        else:
+            w, h = (win_h * GBA_W) // GBA_H, win_h
+    else:
+        raise ValueError(mode)
+    return ((win_w - w) // 2, (win_h - h) // 2, w, h)
+
+
+class ScalingReferenceSpecTest(unittest.TestCase):
+    """Autoverificacao do contrato: a implementacao de referencia reproduz a tabela feita a mao."""
+
+    def test_reference_matches_hand_computed_table(self):
+        for (w, h), modes in RECT_TABLE.items():
+            for mode, want in modes.items():
+                with self.subTest(res=f'{w}x{h}', mode=mode):
+                    self.assertEqual(ref_dest_rect(w, h, mode), want)
+
+    def test_geometric_invariants(self):
+        for (w, h) in list(RECT_TABLE) + [(640, 480), (3840, 2160), (800, 600), (1024, 768)]:
+            for mode in ('integer', 'fit', 'stretch'):
+                x, y, rw, rh = ref_dest_rect(w, h, mode)
+                with self.subTest(res=f'{w}x{h}', mode=mode):
+                    self.assertTrue(0 <= x and 0 <= y and x + rw <= w and y + rh <= h, 'inside the window')
+                    self.assertLessEqual(abs((w - rw) - 2 * x), 1)      # centralizado (+-1 px)
+                    self.assertLessEqual(abs((h - rh) - 2 * y), 1)
+                    if mode == 'integer':
+                        self.assertEqual((rw % GBA_W, rh % GBA_H), (0, 0))
+                        self.assertEqual(rw // GBA_W, rh // GBA_H)
+                    if mode == 'fit':
+                        self.assertLessEqual(abs(rw * GBA_H - rh * GBA_W), GBA_W)   # 3:2 (+-1 px)
+                        self.assertTrue(rw == w or rh == h, 'touches two opposite edges')
+                    if mode == 'stretch':
+                        self.assertEqual((rw, rh), (w, h))
+
+    def test_integer_is_never_larger_than_fit(self):
+        for (w, h) in RECT_TABLE:
+            self.assertLessEqual(ref_dest_rect(w, h, 'integer')[2], ref_dest_rect(w, h, 'fit')[2])
+
+
+def _video_has_scaling(defaults):
+    return ('video', 'scaling') in defaults
+
+
+class ScalingParseUITest(IniCase):
+    """[video] scaling= no leitor da UI (hw/config_ini.c). Pula ate o campo existir."""
+
+    def setUp(self):
+        super().setUp()
+        if not _video_has_scaling(self.defaults()):
+            self.skipTest('[video] scaling= not implemented in hw/config_ini.c yet (only integer_scale=0/1); '
+                          'tests activate automatically when cfg_save writes it')
+
+    def scaling_of(self, text):  # noqa: D401
+        _, cfg = self.roundtrip(text)
+        return str(cfg.get(('video', 'scaling'))).lower()
+
+    def test_default_is_fit(self):
+        self.assertEqual(str(self.defaults().get(('video', 'scaling'))).lower(), 'fit')
+
+    def test_valid_values_case_insensitive(self):
+        for v in ('integer', 'fit', 'stretch', 'INTEGER', 'Fit', 'STRETCH'):
+            with self.subTest(v=v):
+                self.assertEqual(self.scaling_of(f'[video]\nscaling={v}\n'), v.lower())
+
+    def test_invalid_values_fall_back_to_fit(self):
+        for v in ('bilinear', '', '2', 'integer2', 'fit stretch', 'linear', '-1'):
+            with self.subTest(v=v):
+                self.assertEqual(self.scaling_of(f'[video]\nscaling={v}\n'), 'fit')
+
+    def test_invalid_scaling_does_not_hide_a_valid_legacy_key(self):
+        self.assertEqual(self.scaling_of('[video]\nscaling=bilinear\ninteger_scale=1\n'), 'integer')
+
+    def test_legacy_integer_scale_maps_to_scaling(self):
+        self.assertEqual(self.scaling_of('[video]\ninteger_scale=1\n'), 'integer')
+        self.assertEqual(self.scaling_of('[video]\ninteger_scale=0\n'), 'fit')
+        self.assertEqual(self.scaling_of('integer_scale=0\n'), 'fit')                # v1 solto
+        self.assertEqual(self.scaling_of('[kirby]\nscale=3\n'), 'fit')                # v1 sem a chave: padrao
+
+    def test_scaling_wins_over_legacy_key(self):
+        self.assertEqual(self.scaling_of('[video]\ninteger_scale=0\nscaling=stretch\n'), 'stretch')
+        self.assertEqual(self.scaling_of('[video]\nscaling=fit\ninteger_scale=1\n'), 'fit')
+
+    def test_roundtrip_is_stable(self):
+        for v in ('integer', 'fit', 'stretch'):
+            once = self.scaling_of(f'[video]\nscaling={v}\n')
+            with open(os.path.join(self.dir, 'out.ini'), encoding='utf-8') as f:
+                again = self.scaling_of(f.read())
+            self.assertEqual((once, again), (v, v))
+
+
+RT_SCALING_C = r"""
+#include <stdio.h>
+#include "RT_INPUT_C_PATH"
+int main(int argc, char **argv) {
+    rt_cfg_load(argv[1]);
+    printf("%s\n", _Generic((rt_cfg.scaling), int: "", default: (const char *)rt_cfg.scaling));
+    printf("%d\n", _Generic((rt_cfg.scaling), int: rt_cfg.scaling, default: -1));
+    return 0;
+}
+"""
+
+
+class ScalingParseParityTest(IniCase):
+    """scaling= no JOGO (rt_input.c) e no LAUNCHER (flow.py) tem que dar o valor da UI."""
+    CORPUS = ['[video]\nscaling=fit\n', '[video]\nscaling=STRETCH\n', '[video]\nscaling=bilinear\n',
+              '[video]\ninteger_scale=0\n', '[video]\ninteger_scale=1\n', 'scale=3\n',
+              '[video]\ninteger_scale=0\nscaling=stretch\n', '']
+
+    def setUp(self):
+        super().setUp()
+        if not _video_has_scaling(self.defaults()):
+            self.skipTest('[video] scaling= not implemented in hw/config_ini.c yet (reference reader missing)')
+
+    def ui(self, text):
+        _, cfg = self.roundtrip(text)
+        return str(cfg.get(('video', 'scaling'))).lower()
+
+    def test_game_reader_matches_ui(self):
+        with open(os.path.join(ROOT, 'recomp', 'runtime', 'rt_input.c'), encoding='utf-8', errors='replace') as f:
+            if 'scaling' not in f.read():
+                self.skipTest('rt_input.c (game) does not parse scaling= yet')
+        cc = _cc_candidates()
+        src = os.path.join(self.dir, 'rt_scaling.c')
+        path = os.path.join(ROOT, 'recomp', 'runtime', 'rt_input.c').replace('\\', '/')
+        with open(src, 'w') as f:
+            f.write(RT_SCALING_C.replace('RT_INPUT_C_PATH', path))
+        exe = os.path.join(self.dir, 'rt_scaling.exe')
+        for c in cc:
+            r = subprocess.run(c + ['-O1', '-w', src, '-o', exe], capture_output=True, text=True)
+            if r.returncode == 0:
+                break
+        else:
+            self.skipTest('could not compile the game reader with a scaling field: ' + r.stderr[-200:])
+        names = {0: 'integer', 1: 'fit', 2: 'stretch'}   # se for enum numerico: ordem integer, fit, stretch
+        for text in self.CORPUS:
+            with self.subTest(file=text):
+                p = self.write(text, 'g.ini')
+                out = subprocess.run([exe, p], capture_output=True, text=True).stdout.split('\n')
+                got = out[0].strip().lower() or names.get(int(out[1] or -1), '?')
+                self.assertEqual(got, self.ui(text))
+
+    def test_launcher_reader_matches_ui(self):
+        sys.path.insert(0, os.path.join(ROOT, 'launcher'))
+        try:
+            import flow
+        finally:
+            sys.path.pop(0)
+        fn = getattr(flow, 'read_scaling', None)
+        if fn is None:
+            self.skipTest('launcher/flow.py has no read_scaling(ini_path) yet')
+        for text in self.CORPUS:
+            with self.subTest(file=text):
+                self.assertEqual(str(fn(self.write(text, 'f.ini'))).lower(), self.ui(text))
+
+
+SDL_RECT_C = r"""
+#define SDL_MAIN_HANDLED
+#include <SDL.h>
+#include <stdio.h>
+#include <stdlib.h>
+/*FUNCS*/
+int main(int argc, char **argv) {
+    int W = atoi(argv[1]), H = atoi(argv[2]), mode = atoi(argv[3]);
+    SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) { printf("ERR init %s\n", SDL_GetError()); return 1; }
+    SDL_Window *w = SDL_CreateWindow("t", 0, 0, W, H, SDL_WINDOW_HIDDEN);
+    SDL_Renderer *r = w ? SDL_CreateRenderer(w, -1, SDL_RENDERER_SOFTWARE) : NULL;
+    if (!r) { printf("ERR renderer %s\n", SDL_GetError()); return 1; }
+    int ow, oh; SDL_GetRendererOutputSize(r, &ow, &oh);
+    rt_apply_scaling(r, mode);
+    int x, y, ww, hh;
+    dest_rect(r, &x, &y, &ww, &hh);
+    printf("%d %d %d %d %d %d\n", ow, oh, x, y, ww, hh);
+    return 0;
+}
+"""
+
+
+def _extract_c_function(text, signature_regex):
+    """Texto de uma funcao C (do inicio da assinatura ate a `}` na coluna 0)."""
+    m = re.search(signature_regex, text, re.M)
+    if not m:
+        return None
+    end = text.index('\n}\n', m.start()) + 3
+    return text[m.start():end]
+
+
+def _find_sdl():
+    cands = [os.environ.get('SDL2_DIR'), os.path.join(ROOT, 'sdl2'), os.path.join(ROOT, 'tools', 'sdl2'),
+             'C:/libs/SDL2-2.32.2/x86_64-w64-mingw32', 'C:/libs/SDL2-2.32.2']
+    for c in cands:
+        if not c:
+            continue
+        for inc in (os.path.join(c, 'include', 'SDL2'), os.path.join(c, 'include')):
+            if os.path.exists(os.path.join(inc, 'SDL.h')):
+                lib = os.path.join(c, 'lib')
+                dll = os.path.join(c, 'bin', 'SDL2.dll')
+                if os.path.isdir(lib):
+                    return inc, lib, os.path.dirname(dll) if os.path.exists(dll) else None
+    return None
+
+
+class GameDestRectTest(unittest.TestCase):
+    """Retangulo de destino do JOGO (recomp/runtime/rt_window.c: rt_apply_scaling + dest_rect, via SDL
+    com o driver `dummy`) contra a referencia, em 4 resolucoes x 3 modos. Tolerancia: 1 px (arredondamento
+    do SDL)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.exe, cls.skip = None, None
+        if SKIP_REASON:
+            cls.skip = SKIP_REASON
+            return
+        sdl = _find_sdl()
+        if not sdl:
+            cls.skip = 'SDL2 development files not found (set SDL2_DIR or install to C:/libs/SDL2-2.32.2)'
+            return
+        with open(os.path.join(ROOT, 'recomp', 'runtime', 'rt_window.c'), encoding='utf-8', errors='replace') as f:
+            text = f.read()
+        apply_fn = _extract_c_function(text, r'^void rt_apply_scaling\(')
+        rect_fn = _extract_c_function(text, r'^static void dest_rect\(')
+        if not apply_fn or not rect_fn:
+            cls.skip = 'rt_apply_scaling()/dest_rect() not found in recomp/runtime/rt_window.c (moved or renamed?)'
+            return
+        inc, lib, bindir = sdl
+        d = tempfile.mkdtemp(dir=TMP)
+        src = os.path.join(d, 'rect_sdl.c')
+        with open(src, 'w') as f:
+            f.write(SDL_RECT_C.replace('/*FUNCS*/', apply_fn + '\n' + rect_fn))
+        exe = os.path.join(d, 'rect_sdl.exe' if os.name == 'nt' else 'rect_sdl')
+        err = ''
+        for cc in _cc_candidates():
+            r = subprocess.run(cc + ['-O1', '-w', '-I', inc, src, '-L', lib, '-lSDL2', '-o', exe],
+                               capture_output=True, text=True)
+            if r.returncode == 0:
+                cls.exe, cls.bindir = exe, bindir
+                return
+            err = r.stderr[-200:]
+        cls.skip = 'could not compile the SDL rect harness: ' + err
+
+    def rect(self, w, h, mode):
+        env = dict(os.environ)
+        if self.bindir:
+            env['PATH'] = self.bindir + os.pathsep + env.get('PATH', '')
+        r = subprocess.run([self.exe, str(w), str(h), str(mode)], capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return tuple(int(v) for v in r.stdout.split())
+
+    def setUp(self):
+        if self.skip:
+            self.skipTest(self.skip)
+
+    def test_game_rect_matches_reference(self):
+        for (w, h), modes in RECT_TABLE.items():
+            for code, mode in enumerate(('integer', 'fit', 'stretch')):
+                with self.subTest(res=f'{w}x{h}', mode=mode):
+                    ow, oh, x, y, rw, rh = self.rect(w, h, code)
+                    self.assertEqual((ow, oh), (w, h), 'dummy window did not get the requested size')
+                    for got, want, name in zip((x, y, rw, rh), modes[mode], 'x y w h'.split()):
+                        self.assertLessEqual(abs(got - want), 1, f'{name}: SDL gave {(x, y, rw, rh)}, want {modes[mode]}')
+
+    def test_modes_are_distinct_where_the_contract_says_so(self):
+        # 1920x1080: integer (1440x960) != fit (1620x1080) != stretch (1920x1080)
+        sizes = {m: self.rect(1920, 1080, c)[4:6] for c, m in enumerate(('integer', 'fit', 'stretch'))}
+        self.assertEqual(len(set(sizes.values())), 3, sizes)
+        # 2560x1440 = 9x exato: integer == fit (nao ha borda extra em nenhum dos dois)
+        self.assertEqual(self.rect(2560, 1440, 0)[4:6], self.rect(2560, 1440, 1)[4:6])
+
+
+class UIScalingModeTest(unittest.TestCase):
+    """A UI do launcher tambem tem que refletir os 3 modos (hoje: so o checkbox INTEGER SCALING).
+    Pula ate `launcher_ui.c` conhecer `scaling`; entao exige que o desenho/preview use o MESMO modo."""
+
+    def test_launcher_ui_exposes_the_three_modes(self):
+        with open(os.path.join(HW, 'launcher_ui.c'), encoding='utf-8', errors='replace') as f:
+            src = f.read()
+        if 'scaling' not in src:
+            self.skipTest('launcher_ui.c still has only the INTEGER SCALING checkbox (3-mode selector pending)')
+        for word in ('integer', 'fit', 'stretch'):
+            self.assertIn(word, src.lower())
 
 
 if __name__ == '__main__':

@@ -9,7 +9,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'launcher'))
 
 from flow import (Controller, FakeUI, BuildMonitor, STATE_PREPARING, STATE_FAST, STATE_READY,  # noqa: E402
-                  STATE_ERROR, EXIT_BACK_TO_LAUNCHER, read_ini_value)
+                  STATE_ERROR, EXIT_BACK_TO_LAUNCHER, read_ini_value, read_scaling)
 
 
 class FakeEnv:
@@ -176,6 +176,30 @@ class IniTests(unittest.TestCase):
             self.assertEqual(read_ini_value(p, 'launcher', 'show'), '0')
             self.assertEqual(read_ini_value(p, 'launcher', 'nope', 'x'), 'x')
             self.assertEqual(read_ini_value(os.path.join(tmp, 'missing.ini'), 'a', 'b', 'd'), 'd')
+
+
+class ScalingTests(unittest.TestCase):
+    def _ini(self, tmp, body):
+        p = os.path.join(tmp, 'k.ini')
+        with open(p, 'w') as f:
+            f.write(body)
+        return p
+
+    def test_modes_defaults_and_legacy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cases = [
+                ('[video]\nscaling=integer\n', 'integer'),
+                ('[video]\nscaling=STRETCH\n', 'stretch'),
+                ('[video]\nscaling=fit\n', 'fit'),
+                ('[video]\n', 'fit'),                                  # default
+                ('[video]\nscaling=banana\n', 'fit'),                  # invalid -> fit
+                ('[video]\ninteger_scale=1\n', 'integer'),             # legacy
+                ('[video]\ninteger_scale=0\n', 'fit'),
+                ('[video]\nscaling=stretch\ninteger_scale=1\n', 'stretch'),   # explicit wins
+            ]
+            for body, want in cases:
+                self.assertEqual(read_scaling(self._ini(tmp, body)), want, body)
+            self.assertEqual(read_scaling(os.path.join(tmp, 'missing.ini')), 'fit')
 
 
 if __name__ == '__main__':
