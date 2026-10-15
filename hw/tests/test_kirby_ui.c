@@ -41,6 +41,12 @@ static void to_window(int lx, int ly, int *wx, int *wy) {
 static void click_win(int x, int y) {
     SDL_Event e;
     SDL_zero(e);
+    /* A REAL mouse event carries the window id, and SDL (SDL_RendererEventWatch) then converts x,y to the
+     * renderer's logical coordinates before the application sees them. Without windowID the event is
+     * left alone, which is how this test used to mask a double conversion in the launcher (clicks off
+     * by the scale factor, unusable in fullscreen). Mirror the real thing: first window has id 1.
+     * The test therefore pushes WINDOW coordinates and expects the UI to see logical ones. */
+    e.button.windowID = 1;
     e.type = SDL_MOUSEBUTTONDOWN; e.button.button = SDL_BUTTON_LEFT; e.button.state = SDL_PRESSED;
     e.button.x = x; e.button.y = y; e.button.clicks = 1;
     SDL_PushEvent(&e);

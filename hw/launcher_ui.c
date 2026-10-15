@@ -398,9 +398,10 @@ static void to_logical(int wx, int wy, int *lx, int *ly) {
         *ly = wh > 0 ? wy * KL_H / wh : wy;
         return;
     }
-    float fx, fy;
-    SDL_RenderWindowToLogical(ren, wx, wy, &fx, &fy);
-    *lx = (int)fx; *ly = (int)fy;
+    /* integer / fit: SDL_RenderSetLogicalSize makes SDL convert mouse EVENT coordinates to logical ones
+     * itself (SDL_RendererEventWatch). Converting again here put every click at 1/scale of the real
+     * position - invisible in a 480x320 window, unusable in fullscreen (scale ~3.4). Use them as they come. */
+    *lx = wx; *ly = wy;
 }
 
 static void on_key(SDL_Keycode k, int shift) {
