@@ -168,7 +168,7 @@ int rt_selftest_sram(Cpu *c) {
             rt_run_until(c, RT_IRQ_RET);
             uint32_t want = diff ? 0x0E00001Bu : 0;
             if (c->r[0] != want || c->r[13] != sp0) {
-                fprintf(stderr, "[selftest] Verify sp=%08X diff=%d: r0=%08X (esperado %08X) sp=%08X\n",
+                fprintf(stderr, "[selftest] Verify sp=%08X diff=%d: r0=%08X (expected %08X) sp=%08X\n",
                         at, diff, c->r[0], want, c->r[13]);
                 fails++;
             }
@@ -188,7 +188,7 @@ int rt_selftest_sram(Cpu *c) {
         for (uint32_t i = 0; i < 8; i++)
             if (gba_read8(0x03007F40u + i) != 0x30 + i) { fails++; fprintf(stderr, "[selftest] Read sp=%08X byte %u\n", at, i); break; }
     }
-    fprintf(stderr, "[selftest] SRAM na pilha: %s (%d falhas, %llu usos do alias)\n", fails ? "FALHOU" : "OK",
+    fprintf(stderr, "[selftest] SRAM on stack: %s (%d failures, %llu alias uses)\n", fails ? "FAILED" : "OK",
             fails, (unsigned long long)rt_sram_alias_hits);
     return fails;
 }
@@ -241,7 +241,7 @@ static int selftest_fallback_sram(Cpu *c) {
             }
             if (memcmp(res[0], res[1], sizeof res[0])) {
                 fails++;
-                fprintf(stderr, "[selftest-interp] Verify sp=%08X diff=%d: fallback r0=%08X nativo r0=%08X\n",
+                fprintf(stderr, "[selftest-interp] Verify sp=%08X diff=%d: fallback r0=%08X native r0=%08X\n",
                         at, diff, res[0][0], res[1][0]);
             }
         }
@@ -318,20 +318,20 @@ static int selftest_differential(Cpu *c, unsigned nfuncs, unsigned nstates) {
             if (bad) {
                 fails++;
                 if (fails <= 8) {
-                    fprintf(stderr, "[selftest-interp] DIVERGE em %08X (%s) estado %u: pc %08X/%08X NZCV %u%u%u%u/%u%u%u%u\n",
+                    fprintf(stderr, "[selftest-interp] DIVERGES at %08X (%s) state %u: pc %08X/%08X NZCV %u%u%u%u/%u%u%u%u\n",
                             f->lo, f->thumb ? "thumb" : "arm", st, out[0].pc, out[1].pc, out[0].n, out[0].z,
                             out[0].cc, out[0].v, out[1].n, out[1].z, out[1].cc, out[1].v);
                     for (int i = 0; i < 15; i++)
                         if (out[0].r[i] != out[1].r[i])
-                            fprintf(stderr, "    r%d compilado=%08X interpretado=%08X\n", i, out[0].r[i], out[1].r[i]);
-                    if (fnv(out[0].mem, 0x48000) != fnv(out[1].mem, 0x48000)) fprintf(stderr, "    memoria difere\n");
+                            fprintf(stderr, "    r%d compiled=%08X interpreted=%08X\n", i, out[0].r[i], out[1].r[i]);
+                    if (fnv(out[0].mem, 0x48000) != fnv(out[1].mem, 0x48000)) fprintf(stderr, "    memory differs\n");
                 }
             }
         }
     }
     rt_test_budget = 0;
-    fprintf(stderr, "[selftest-interp] diferencial: %d execucoes comparadas (%d com limite de laco, ignoradas), "
-            "%llu instrucoes interpretadas, %d divergencias\n", ran - limited, limited,
+    fprintf(stderr, "[selftest-interp] differential: %d runs compared (%d hit the loop limit, ignored), "
+            "%llu instructions interpreted, %d divergences\n", ran - limited, limited,
             (unsigned long long)(rt_interp_steps - steps0), fails);
     return fails;
 }
@@ -372,15 +372,15 @@ static int selftest_outside_set(Cpu *c) {
             c->stop = 0;
         }
     }
-    fprintf(stderr, "[selftest-interp] entradas no meio de funcoes: %d tentativas, %llu caiam fora do conjunto "
-            "(interpretadas), %d abortos por salto para regiao invalida\n", tries,
+    fprintf(stderr, "[selftest-interp] entries in the middle of functions: %d tries, %llu fell outside the set "
+            "(interpreted), %d aborts from jumps to invalid regions\n", tries,
             (unsigned long long)(rt_outside_hits - h0), aborted);
     return rt_outside_hits == h0 && tries > 0;   /* tem que ter exercitado o caminho */
 }
 
 int rt_selftest_interp(Cpu *c) {
     int f = selftest_fallback_sram(c);
-    fprintf(stderr, "[selftest-interp] corpos SRAM em 3 enderecos da pilha: %s\n", f ? "FALHOU" : "OK");
+    fprintf(stderr, "[selftest-interp] SRAM bodies at 3 stack addresses: %s\n", f ? "FAILED" : "OK");
     f += selftest_differential(c, 150, 6);
     f += selftest_outside_set(c);
     return f;

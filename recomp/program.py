@@ -151,7 +151,7 @@ def build(rom, funcs, bad=None, jobs=8, nshards=None, verbose=True, opt=None):
         return obj
 
     rt_srcs = [os.path.join(RUNTIME, n) for n in ('gba_bus.c', 'gba_rt.c', 'gba_bios.c', 'rt_main.c',
-                                                    'rt_script.c', 'rt_window.c', 'rt_interp.c')]
+                                                    'rt_script.c', 'rt_window.c', 'rt_interp.c', 'rt_input.c')]
     rt_srcs.append(os.path.join(ROOT, 'hw', 'hw.c'))   # strong: substitui os stubs fracos
     t1 = time.time()
     with ThreadPoolExecutor(jobs) as ex:
@@ -177,9 +177,11 @@ def build_window(objs, compile_one):
     inc = os.path.join(SDL_DIR, 'include', 'SDL2')
     flags = ['-DRT_WINDOW', '-I', inc]
     w = [compile_one(os.path.join(RUNTIME, 'rt_window.c'), flags, 'win'),
+         compile_one(os.path.join(RUNTIME, 'rt_input.c'), flags, 'win'),
          compile_one(os.path.join(ROOT, 'hw', 'window_sdl.c'), flags, 'win'),
-         compile_one(os.path.join(ROOT, 'hw', 'audio_sdl.c'), flags, 'win')]
-    base = [o for o in objs if not os.path.basename(o).startswith('rt_window_')]
+         compile_one(os.path.join(ROOT, 'hw', 'audio_sdl.c'), flags, 'win'),
+         compile_one(os.path.join(ROOT, 'hw', 'font5x7.c'), flags, 'win')]   # usado por window_sdl.c
+    base = [o for o in objs if not os.path.basename(o).startswith(('rt_window_', 'rt_input_'))]
     exe = os.path.join(OUT, 'kirby.exe' if os.name == 'nt' else 'kirby')
     imp = os.path.join(SDL_DIR, 'lib', 'libSDL2.dll.a')   # import lib (nao a estatica)
     # -mwindows: subsistema GUI (sem janela de console atras do jogo)
@@ -271,7 +273,7 @@ def iterate(rom_path, csv_path, jobs=8, max_iter=40, verbose=True, boot_args=())
             return rc, out, err, overlays
         ms = list(re.finditer(r'pc=([0-9A-F]{8}) lr=.*? (thumb|arm) ', err))
         m = ms[-1] if ms else None   # o ultimo dump e o da parada (ha dumps informativos antes)
-        if 'sem funcao recompilada' not in err or not m:
+        if 'no recompiled function' not in err or not m:
             return rc, out, err, overlays
         pc, thumb = int(m.group(1), 16), m.group(2) == 'thumb'
         if pc >= 0x08000000:

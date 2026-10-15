@@ -207,11 +207,11 @@ static void irq_deliver(Cpu *c, uint16_t pend) {
     c->pc = vec & ~1u;
     rt_irq_delivered++;
     in_irq++;
-    { extern int rt_trace_psr; if (rt_trace_psr) fprintf(stderr, "[irq] entrega pend=%04X vec=%08X de modo %02X pc=%08X\n", pend, vec, smode, spc); }
+    { extern int rt_trace_psr; if (rt_trace_psr) fprintf(stderr, "[irq] deliver pend=%04X vec=%08X from mode %02X pc=%08X\n", pend, vec, smode, spc); }
     int ok_ret = rt_run_until(c, RT_IRQ_RET);
     in_irq--;
-    if (!ok_ret) rt_abort(c, "handler de IRQ voltou a um frame externo");
-    { extern int rt_trace_psr; if (rt_trace_psr) fprintf(stderr, "[irq] handler voltou pc=%08X modo=%02X\n", c->pc, c->mode); }
+    if (!ok_ret) rt_abort(c, "IRQ handler returned to an outer frame");
+    { extern int rt_trace_psr; if (rt_trace_psr) fprintf(stderr, "[irq] handler returned pc=%08X mode=%02X\n", c->pc, c->mode); }
     if (c->stop) return;
     /* a BIOS nao reconhece IF; o handler do jogo normalmente faz. Se nao fez, o
      * runtime garante (senao a IRQ dispara de novo para sempre). */
@@ -319,7 +319,7 @@ static int vblank_intr_wait(Cpu *c, uint32_t next) {
     }
     /* sem IE/DISPSTAT de VBlank o jogo travaria no hw real tambem */
     for (unsigned guard = 0; !(gba_read16(BIOS_IF) & 1); guard++) {
-        if (guard > 228 * 3) rt_abort(c, "VBlankIntrWait: nenhum IRQ de VBlank em 3 quadros");
+        if (guard > 228 * 3) rt_abort(c, "VBlankIntrWait: no VBlank IRQ within 3 frames");
         run_cycles(c, 1232);
         if (c->stop) return 1;
     }
@@ -372,7 +372,7 @@ int rt_swi(Cpu *c, uint32_t num, uint32_t next) {
     }
     }
     char msg[64];
-    snprintf(msg, sizeof msg, "SWI 0x%02X nao implementado no HLE", num);
+    snprintf(msg, sizeof msg, "SWI 0x%02X not implemented in the BIOS HLE", num);
     c->pc = next;
     rt_abort(c, msg);
     return 1;

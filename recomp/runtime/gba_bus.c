@@ -25,7 +25,7 @@ uint8_t *gba_iwram(void) { return iwram; }
 WEAK void gba_bus_unmapped(uint32_t addr, int size, int is_write) {
     static int n;
     if (n++ < 8)
-        fprintf(stderr, "[bus] %s%d em endereco sem regiao 0x%08X\n", is_write ? "write" : "read",
+        fprintf(stderr, "[bus] %s%d at unmapped address 0x%08X\n", is_write ? "write" : "read",
                 size * 8, addr);
 }
 

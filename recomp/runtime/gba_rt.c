@@ -48,7 +48,7 @@ void rt_set_mode(Cpu *c, uint32_t nm) {
 int rt_trace_psr;
 void rc_msr(Cpu *c, uint32_t mask, uint32_t v) {
     if (rt_trace_psr && rt_trace_psr-- > 0)
-        fprintf(stderr, "[psr] msr mask=%u v=%08X (modo %02X sp=%08X lr=%08X) call=%08X\n", mask, v, c->mode, c->r[13], c->r[14], hist[(hist_n + HISTM1) % HISTN]);
+        fprintf(stderr, "[psr] msr mask=%u v=%08X (mode %02X sp=%08X lr=%08X) call=%08X\n", mask, v, c->mode, c->r[13], c->r[14], hist[(hist_n + HISTM1) % HISTN]);
     if (mask & 1) {
         rt_set_mode(c, v);
         c->psr_if = v & 0xC0;
@@ -101,17 +101,17 @@ static const RcFunc *lookup(uint32_t a, uint32_t thumb) {
     return 0;
 }
 
-const char *rt_dump_label = "PARADA";   /* "AVISO" para contextos informativos */
+const char *rt_dump_label = "HALT";   /* "WARNING" para contextos informativos */
 
 void rt_dump(Cpu *c, const char *why) {
     fprintf(stderr, "\n[rt] %s: %s\n", rt_dump_label, why);
-    fprintf(stderr, "[rt] pc=%08X lr=%08X sp=%08X %s modo=%02X NZCV=%u%u%u%u calls=%llu\n", c->pc,
+    fprintf(stderr, "[rt] pc=%08X lr=%08X sp=%08X %s mode=%02X NZCV=%u%u%u%u calls=%llu\n", c->pc,
             c->r[14], c->r[13], c->thumb ? "thumb" : "arm", c->mode, c->n, c->z, c->c, c->v,
             (unsigned long long)rt_ncalls);
     for (int i = 0; i < 13; i += 4)
         fprintf(stderr, "[rt] r%-2d=%08X r%-2d=%08X r%-2d=%08X r%-2d=%08X\n", i, c->r[i], i + 1,
                 c->r[i + 1], i + 2, c->r[i + 2], i + 3, c->r[i + 3]);
-    fprintf(stderr, "[rt] ultimas chamadas (antigas -> recentes):");
+    fprintf(stderr, "[rt] last calls (oldest -> newest):");
     for (unsigned k = 0; k < HIST; k++) {
         uint32_t a = hist[(hist_n + k) % HIST];
         if (a) fprintf(stderr, " %08X", a);
@@ -252,25 +252,25 @@ void rt_call(Cpu *c) {
             /* o que sobra de abort: 64 bytes no pc + hash p/ a Poppy/Riven decidirem
              * (overlay novo? alias como o SRAM?) */
             char hex[129];
-            if (rt_quiet) rt_abort(c, "sem funcao");
+            if (rt_quiet) rt_abort(c, "no function");
             body_hex(hex, a, 64);
-            fprintf(stderr, "\n[rt] SEM FUNCAO em %08X (%s): 64 bytes=%s\n", a, c->thumb ? "thumb" : "arm", hex);
-            fprintf(stderr, "[rt] hash do corpo (FNV-1a, 64 bytes)=%08X; 32 bytes=%08X\n", body_hash(a, 64),
+            fprintf(stderr, "\n[rt] NO FUNCTION at %08X (%s): 64 bytes=%s\n", a, c->thumb ? "thumb" : "arm", hex);
+            fprintf(stderr, "[rt] body hash (FNV-1a, 64 bytes)=%08X; 32 bytes=%08X\n", body_hash(a, 64),
                     body_hash(a, 32));
-            rt_abort(c, "endereco sem funcao recompilada (RAM/overlay ou ROM sem saida)");
+            rt_abort(c, "address with no recompiled function (RAM overlay or ROM exit)");
         }
         /* fallback: interpreta ate cair em funcao conhecida / retorno esperado */
         extern int rt_interp_run(Cpu *, uint32_t, uint32_t, uint64_t);
         static int warned;
         if (rt_interp_run(c, 0, 0, 50000000ull) && !warned++ && !rt_quiet)
-            fprintf(stderr, "[rt] interpretador: 50M passos sem sair (pc=%08X); continua\n", c->pc);
+            fprintf(stderr, "[rt] interpreter: 50M steps without leaving (pc=%08X); continuing\n", c->pc);
         return;
     }
     hist[hist_n++ % HIST] = a;
     if (rt_trace_psr && rt_irq_delivered) {
         static int n;
         if (n++ < 80)
-            fprintf(stderr, "[call] %08X %s lr=%08X modo=%02X\n", a, c->thumb ? "T" : "A", c->r[14],
+            fprintf(stderr, "[call] %08X %s lr=%08X mode=%02X\n", a, c->thumb ? "T" : "A", c->r[14],
                     c->mode);
     }
     rt_ncalls++;
@@ -283,7 +283,7 @@ void rt_call(Cpu *c) {
         rt_outside_hits++;
         extern int rt_interp_run(Cpu *, uint32_t, uint32_t, uint64_t);
         if (rt_stop_on_unresolved)
-            rt_abort(c, "funcao saiu sem avancar o pc (alvo fora do conjunto)");
+            rt_abort(c, "function left pc unchanged (target outside the compiled set)");
         rt_interp_run(c, f->lo, f->hi, 50000000ull);
     }
 }

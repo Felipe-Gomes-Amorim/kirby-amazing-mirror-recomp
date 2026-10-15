@@ -17,6 +17,10 @@
 static Cpu cpu;
 extern Cpu *rt_cpu;
 int rt_measure;
+extern int rt_exit_code;
+int rt_cfg_load(const char *path);
+int rt_cfg_get(int which);
+void rt_cfg_defaults(void);
 void rt_window_install(int window, int scale, int pace);
 void rt_window_close(void);
 void rt_report_speed(void);
@@ -28,7 +32,7 @@ void rt_report_speed(void);
 static unsigned watchdog_s;
 
 static void watchdog_fire(void) {
-    fprintf(stderr, "\n[rt] WATCHDOG: %us sem terminar. ultimo desvio-para-tras=%08X loops=%u\n",
+    fprintf(stderr, "\n[rt] WATCHDOG: %us without finishing. last backward branch=%08X loops=%u\n",
             watchdog_s, rt_loop_site, rt_loops);
     rt_abort(&cpu, "watchdog");
     fflush(stderr);
@@ -138,8 +142,8 @@ int main(int argc, char **argv) {
     int gui_defaults = argc <= 2;   /* so a ROM (ou nada): modo jogo, janela escala 3 */
     if (!rom_path) {
         if (!find_rom(found, sizeof found)) {
-            fatal_msg("ROM nao encontrada.\nArraste o arquivo .gba sobre kirby.exe, ou coloque "
-                      "baserom.gba na mesma pasta.");
+            fatal_msg("ROM not found.\nDrag the .gba file onto kirby.exe, or put "
+                      "baserom.gba in the same folder.");
             return 1;
         }
         rom_path = found;
@@ -156,7 +160,8 @@ int main(int argc, char **argv) {
     gba_load_rom(rom, (uint32_t)n);
     hw_reset();
     const char *ppm = NULL, *sav = NULL;
-    int window = 0, scale = 3, bench = 0, selftest = 0;
+    int window = 0, scale = 3, bench = 0, selftest = 0, scale_explicit = 0;
+    const char *ini_arg = NULL;
     rt_opt_stop_at_vblank_wait = 1;
     if (gui_defaults) {
         window = 1;
@@ -168,11 +173,13 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--no-stop")) rt_opt_stop_at_vblank_wait = 0;
         else if (!strcmp(argv[i], "--window")) {
             window = 1;
-            if (i + 1 < argc && argv[i + 1][0] >= '1' && argv[i + 1][0] <= '9') scale = atoi(argv[++i]);
+            if (i + 1 < argc && argv[i + 1][0] >= '1' && argv[i + 1][0] <= '9') { scale = atoi(argv[++i]); scale_explicit = 1; }
         }
         else if (!strcmp(argv[i], "--bench")) bench = 1;
+        else if (!strcmp(argv[i], "--ini") && i + 1 < argc) ini_arg = argv[++i];
         else if (!strcmp(argv[i], "--selftest-sram")) selftest = 1;
         else if (!strcmp(argv[i], "--selftest-interp")) selftest = 2;
+        else if (!strcmp(argv[i], "--selftest-ini")) { extern int rt_selftest_ini(void); return rt_selftest_ini() ? 1 : 0; }
         else if (!strcmp(argv[i], "--no-sram-alias")) { extern int rt_no_alias; rt_no_alias = 1; }
         else if (!strcmp(argv[i], "--interp-all")) { extern int rt_force_interp; rt_force_interp = 1; }
         else if (!strcmp(argv[i], "--no-overlays")) { extern int rt_skip_overlays; rt_skip_overlays = 1; }
@@ -181,7 +188,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--bench-from") && i + 1 < argc) { extern uint64_t rt_bench_from; rt_bench_from = (uint64_t)atoll(argv[++i]); }
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) rt_dump_path = argv[++i];
         else if (!strcmp(argv[i], "--unresolved") && i + 1 < argc) rt_unresolved_path = argv[++i];
-        else if (!strcmp(argv[i], "--keys") && i + 1 < argc) { if (rt_script_keys(argv[++i])) { fprintf(stderr, "--keys invalido"); return 1; } }
+        else if (!strcmp(argv[i], "--keys") && i + 1 < argc) { if (rt_script_keys(argv[++i])) { fprintf(stderr, "--keys: invalid script"); return 1; } }
         else if (!strcmp(argv[i], "--snap") && i + 1 < argc) rt_script_snaps(argv[++i]);
         else if (!strcmp(argv[i], "--frames-dir") && i + 1 < argc) rt_script_dir(argv[++i]);
         else if (!strcmp(argv[i], "--sav") && i + 1 < argc) sav = argv[++i];
@@ -205,6 +212,21 @@ int main(int argc, char **argv) {
             sav = def;
         }
         if (strcmp(sav, "none")) rt_script_sram(sav);
+    }
+    {   /* kirby.ini: --ini FILE | ao lado do save | ao lado da ROM */
+        char ini[1100];
+        if (ini_arg) snprintf(ini, sizeof ini, "%s", ini_arg);
+        else {
+            snprintf(ini, sizeof ini, "%s", strcmp(sav, "none") ? sav : rom_path);
+            char *sl = strrchr(ini, '/');
+            char *bs = strrchr(ini, '\\');
+            if (bs && (!sl || bs > sl)) sl = bs;
+            if (sl) strcpy(sl + 1, "kirby.ini");
+            else strcpy(ini, "kirby.ini");
+        }
+        rt_cfg_load(ini);
+        if (!scale_explicit) scale = rt_cfg_get(0);
+        if (rt_cfg_get(5)) { extern int rt_mute; rt_mute = 1; }
     }
     rt_cpu = &cpu;
     if (selftest) {
@@ -234,16 +256,16 @@ int main(int argc, char **argv) {
     rt_window_close();
     if (window || bench) rt_report_speed();
     const char *why = cpu.stop == RT_STOP_FRAMES ? "frames"
-                      : cpu.stop == RT_STOP_VBLANK_WAIT ? "primeira VBlankIntrWait"
+                      : cpu.stop == RT_STOP_VBLANK_WAIT ? "first VBlankIntrWait"
                       : cpu.stop == RT_STOP_STOPCALL  ? "SWI Stop" : "erro";
     printf("RT_STOP %s pc=%08X lr=%08X sp=%08X calls=%llu\n", why, cpu.pc, cpu.r[14], cpu.r[13],
            (unsigned long long)rt_ncalls);
     { extern uint64_t rt_interp_entries, rt_interp_steps;
-      printf("INTERPRETADOR: %llu entradas, %llu instrucoes\n", (unsigned long long)rt_interp_entries,
+      printf("INTERPRETER: %llu entries, %llu instructions\n", (unsigned long long)rt_interp_entries,
              (unsigned long long)rt_interp_steps); }
-    { extern uint64_t rt_sram_alias_hits; printf("SRAM na pilha (alias p/ ROM): %llu usos\n", (unsigned long long)rt_sram_alias_hits); }
-    printf("IRQ entregues=%llu (BIOS_IF pelo handler=%llu, pelo runtime=%llu; IF limpo pelo "
-           "runtime=%llu) frames_hw=%llu nao_resolvidos=%llu\n",
+    { extern uint64_t rt_sram_alias_hits; printf("SRAM routines on stack (ROM alias): %llu uses\n", (unsigned long long)rt_sram_alias_hits); }
+    printf("IRQs delivered=%llu (BIOS_IF by handler=%llu, by runtime=%llu; IF cleared by "
+           "runtime=%llu) frames_hw=%llu unresolved=%llu\n",
            (unsigned long long)rt_irq_delivered, (unsigned long long)rt_irq_biosif_by_handler,
            (unsigned long long)rt_irq_biosif_by_runtime, (unsigned long long)rt_irq_ack_by_runtime,
            (unsigned long long)rt_frames_done, (unsigned long long)rt_unresolved_count);
@@ -260,5 +282,5 @@ int main(int argc, char **argv) {
     }
     for (int i = 0; i < 256; i++)
         if (rt_swi_count[i]) printf("SWI 0x%02X x%d\n", i, rt_swi_count[i]);
-    return cpu.stop == RT_STOP_ERROR ? 2 : 0;
+    return rt_exit_code ? rt_exit_code : (cpu.stop == RT_STOP_ERROR ? 2 : 0);
 }

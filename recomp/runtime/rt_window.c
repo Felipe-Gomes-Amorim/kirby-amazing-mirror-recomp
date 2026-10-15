@@ -18,7 +18,13 @@
 #include <SDL.h>
 #include "window_sdl.h"
 #include "audio_sdl.h"
+uint16_t rt_input_poll(void);
+int rt_input_hotkeys(void);
+void rt_input_init(void);
+void rt_input_close(void);
 #endif
+int rt_cfg_get(int which);
+int rt_exit_code;   /* 0 normal; 77 = F1 (voltar ao launcher) */
 
 int hw_audio_read(int16_t *lr, int frames);
 int hw_audio_rate(void);
@@ -81,21 +87,26 @@ static void win_hook(uint64_t frame) {
             rt_cpu->stop = RT_STOP_FRAMES; /* usuario fechou: o save e gravado no atexit */
             return;
         }
-        {   /* F11: alterna tela cheia (borda de subida) */
-            static int f11_prev;
-            const Uint8 *ks = SDL_GetKeyboardState(NULL);
-            int f11 = ks && ks[SDL_SCANCODE_F11];
-            if (f11 && !f11_prev) {
-                SDL_Window *wnd = SDL_GetWindowFromID(1);
-                if (wnd) {
-                    Uint32 fl = SDL_GetWindowFlags(wnd);
-                    SDL_SetWindowFullscreen(wnd, (fl & SDL_WINDOW_FULLSCREEN_DESKTOP) ? 0
-                                                    : SDL_WINDOW_FULLSCREEN_DESKTOP);
-                }
-            }
-            f11_prev = f11;
+        int hk = rt_input_hotkeys();
+        {   /* gancho de teste: KIRBY_TEST_HOTKEY="F1@120" (ou F11@N) simula a tecla no quadro N */
+            const char *t = getenv("KIRBY_TEST_HOTKEY");
+            const char *at = t ? strchr(t, '@') : NULL;
+            if (at && (uint64_t)atoll(at + 1) == frame) hk |= (t[1] == '1' && t[2] == '@') ? 1 : 2;
         }
-        hw_set_keys(win_keys());
+        if (hk & 2) {   /* F11: alterna tela cheia */
+            SDL_Window *wnd = SDL_GetWindowFromID(1);
+            if (wnd) {
+                Uint32 fl = SDL_GetWindowFlags(wnd);
+                SDL_SetWindowFullscreen(wnd, (fl & SDL_WINDOW_FULLSCREEN_DESKTOP) ? 0
+                                                : SDL_WINDOW_FULLSCREEN_DESKTOP);
+            }
+        }
+        if (hk & 1) {   /* F1: volta ao launcher (codigo de saida 77); o save e gravado no atexit */
+            rt_exit_code = 77;
+            rt_cpu->stop = RT_STOP_FRAMES;
+            return;
+        }
+        hw_set_keys(rt_input_poll());
         const uint32_t *fb = hw_get_framebuffer();
         if (fb) win_present(fb);
     }
@@ -109,7 +120,12 @@ static void win_hook(uint64_t frame) {
         if (raw_f) fwrite(buf, 4, (size_t)n, raw_f);
     }
 #ifdef RT_WINDOW
-    if (n > 0 && audio_on) audio_push(buf, n);
+    if (n > 0 && audio_on) {
+        int vol = rt_cfg_get(4);
+        if (vol < 100)
+            for (int i = 0; i < n * 2; i++) buf[i] = (int16_t)(buf[i] * vol / 100);
+        audio_push(buf, n);
+    }
 #else
     if (n > 0 && audio_push) audio_push(buf, n);
 #endif
@@ -132,7 +148,7 @@ static void win_hook(uint64_t frame) {
             static int last_u, logged;
             int u = audio_underruns();
             if (u != last_u && logged++ < 12)
-                fprintf(stderr, "[audio] underrun no quadro %llu (total %d, fila %d)\n",
+                fprintf(stderr, "[audio] underrun at frame %llu (total %d, queue %d)\n",
                         (unsigned long long)frame, u, audio_queued());
             last_u = u;
         }
@@ -164,17 +180,24 @@ void rt_window_install(int window, int scale, int pace) {
     paced = pace;
     t_start = rt_now_us();
 #ifdef RT_WINDOW
-    if (window && win_open("Kirby & The Amazing Mirror", scale) < 0) {
-        fprintf(stderr, "janela: falha ao abrir (SDL)\n");
+    if (window && win_open_ex("Kirby & The Amazing Mirror", scale, rt_cfg_get(3)) < 0) {
+        fprintf(stderr, "window: failed to open (SDL)\n");
         exit(1);
     }
-    if (window && !rt_mute) {
-        if (audio_open() < 0) fprintf(stderr, "audio: sem saida (continuando sem som)\n");
+    if (window) {   /* kirby.ini: tela cheia inicial e escala inteira */
+        SDL_Window *wnd = SDL_GetWindowFromID(1);
+        SDL_Renderer *rr = wnd ? SDL_GetRenderer(wnd) : NULL;
+        if (rr) SDL_RenderSetIntegerScale(rr, rt_cfg_get(2) ? SDL_TRUE : SDL_FALSE);
+        if (wnd && rt_cfg_get(1)) SDL_SetWindowFullscreen(wnd, SDL_WINDOW_FULLSCREEN_DESKTOP);
+        rt_input_init();
+    }
+    if (window && !rt_mute && !rt_cfg_get(5)) {
+        if (audio_open() < 0) fprintf(stderr, "audio: no output device (continuing without sound)\n");
         else audio_on = 1;
     }
 #else
     if (window) {
-        fprintf(stderr, "este executavel foi compilado sem janela (RT_WINDOW)\n");
+        fprintf(stderr, "this executable was built without a window (RT_WINDOW)\n");
         exit(1);
     }
 #endif
@@ -186,35 +209,38 @@ void rt_window_close(void) {
     if (raw_f) fclose(raw_f);
 #ifdef RT_WINDOW
     if (audio_on) {
-        printf("AUDIO: underruns=%d descartados=%d (fila %d)\n", audio_underruns(), audio_dropped(),
+        printf("AUDIO: underruns=%d dropped=%d (queue %d)\n", audio_underruns(), audio_dropped(),
                audio_queued());
         audio_close();
     }
-    if (use_window) win_close();
+    if (use_window) {
+        rt_input_close();
+        win_close();
+    }
 #endif
 }
 
 void rt_report_speed(void) {
     double s = (rt_now_us() - t_start) / 1e6;
     if (total_frames == 0 || s <= 0) return;
-    printf("VELOCIDADE: %llu quadros em %.2fs = %.1f quadros/s (%.2fx tempo real)%s\n",
+    printf("SPEED: %llu frames in %.2fs = %.1f frames/s (%.2fx real time)%s\n",
            (unsigned long long)total_frames, s, (double)total_frames / s,
-           (double)total_frames / s / 59.7275, paced ? " [com ritmo]" : " [sem limite]");
-    printf("hw_step: %.2fs (%.0f%% do tempo), %llu chamadas, %.0f ciclos/chamada; "
-           "restante (codigo do jogo): %.2fs\n",
+           (double)total_frames / s / 59.7275, paced ? " [paced]" : " [unlimited]");
+    printf("hw_step: %.2fs (%.0f%% of the time), %llu calls, %.0f cycles/call; "
+           "rest (game code): %.2fs\n",
            rt_hwstep_us / 1e6, 100.0 * rt_hwstep_us / (s * 1e6), (unsigned long long)rt_hwstep_calls,
            rt_hwstep_calls ? (double)rt_hwstep_cycles / (double)rt_hwstep_calls : 0.0,
            s - rt_hwstep_us / 1e6);
     if (mark_frame && total_frames > mark_frame) {
         double ms = rt_now_us() - mark_us, hw = rt_hwstep_us - mark_hw_us;
-        printf("TRECHO q.%llu..q.%llu: %.1f quadros/s (%.2fx), hw_step %.0f%% do tempo\n",
+        printf("SEGMENT f.%llu..f.%llu: %.1f frames/s (%.2fx), hw_step %.0f%% of the time\n",
                (unsigned long long)mark_frame, (unsigned long long)total_frames,
                (double)(total_frames - mark_frame) / (ms / 1e6),
                (double)(total_frames - mark_frame) / (ms / 1e6) / 59.7275, 100.0 * hw / ms);
     }
-    if (paced) printf("quadros atrasados (mais lento que o tempo real): %llu\n",
+    if (paced) printf("late frames (slower than real time): %llu\n",
                       (unsigned long long)late_frames);
-    printf("audio lido: %llu amostras estereo (%.1f s a 48 kHz)\n", (unsigned long long)audio_frames,
+    printf("audio read: %llu stereo samples (%.1f s at 48 kHz)\n", (unsigned long long)audio_frames,
            (double)audio_frames / 48000.0);
 }
 
@@ -223,23 +249,23 @@ void gba_bus_unmapped(uint32_t addr, int size, int is_write) {
     static int n;
     extern int rt_quiet;
     if (rt_quiet || n++) return;
-    fprintf(stderr, "[bus] PRIMEIRO acesso sem regiao: %s%d em 0x%08X\n", is_write ? "write" : "read",
+    fprintf(stderr, "[bus] FIRST access to an unmapped address: %s%d at 0x%08X\n", is_write ? "write" : "read",
             size * 8, addr);
     if (!rt_cpu) return;
     Cpu *c = rt_cpu;
-    fprintf(stderr, "[bus] lr=%08X sp=%08X modo=%s ultimo desvio-para-tras=%08X\n", c->r[14], c->r[13],
+    fprintf(stderr, "[bus] lr=%08X sp=%08X mode=%s last backward branch=%08X\n", c->r[14], c->r[13],
             c->thumb ? "thumb" : "arm", rt_loop_site);
     for (int i = 0; i < 13; i += 4)
         fprintf(stderr, "[bus] r%-2d=%08X r%-2d=%08X r%-2d=%08X r%-2d=%08X\n", i, c->r[i], i + 1,
                 c->r[i + 1], i + 2, c->r[i + 2], i + 3, c->r[i + 3]);
-    fprintf(stderr, "[bus] pilha de retornos esperados (interna -> externa):");
+    fprintf(stderr, "[bus] expected-return stack (inner -> outer):");
     uint32_t d = rt_depth;
     for (uint32_t k = 0; k < 14 && k < d; k++) fprintf(stderr, " %08X", rt_rets[(d - 1 - k) & 4095u]);
     fprintf(stderr, "\n");
     {   /* informativo: o jogo segue (nao e parada) */
         extern const char *rt_dump_label;
-        rt_dump_label = "AVISO";
-        rt_dump(c, "contexto do acesso sem regiao (pc exato nao e mantido; ver pilha acima)");
-        rt_dump_label = "PARADA";
+        rt_dump_label = "WARNING";
+        rt_dump(c, "context of the unmapped access (exact pc is not tracked; see the stack above)");
+        rt_dump_label = "HALT";
     }
 }
