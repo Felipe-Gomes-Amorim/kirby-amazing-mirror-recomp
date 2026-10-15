@@ -24,9 +24,11 @@ not an emulator. Think of it as translating the compiled game once, ahead of tim
 | ARM/Thumb → C recompiler | working — the game boots and runs 8,000+ frames without aborting |
 | Hardware model | wired in: tiled/affine backgrounds, sprites, windows, blending, DMA, timers, PCM audio |
 | Picture | the title screen, the opening cutscene and the first level render correctly (saved as images) |
-| Window and keyboard | works: `python -m recomp.program --window 3` (Z/X = A/B, Enter = Start, arrows) |
-| Sound output | PCM and PSG audio are generated and an SDL2 audio output exists, but it is not yet linked into the game executable |
-| Save | works: 32 KiB `baserom.sav` |
+| Launcher | window with build status, size 1x-6x, fullscreen, Integer/Fit/Stretch scaling, volume, Play; F1 returns to it |
+| Window and keyboard | works (X = A, Z = B, Enter = Start, Backspace = Select, arrows, A/S = L/R); remapping screen is next |
+| Controller | implemented by button position; not yet tested with a physical controller |
+| Sound output | PCM and PSG through SDL2 audio |
+| Save | works: 32 KiB `<rom>.sav` |
 
 Numbers, decisions and open problems: an English summary in [`NOTES.en.md`](NOTES.en.md), and the
 full working log in [`NOTES.md`](NOTES.md) (Portuguese).
@@ -71,13 +73,13 @@ baserom.gba ──► analysis ──► function map ──► recompiler ─�
 
 ## Quick start (no Python needed)
 
-Build the release folder once with `python tools/package_release.py --zip` (about 95 MB zipped), or
-download a release when one is published. Then:
+Download `KirbyRecomp.zip` from the [Releases](../../releases) page (about 95 MB), or build it yourself with
+`python tools/package_release.py --zip`. Then:
 
 1. Have your own ROM (USA, game code `B8KE`).
-2. **Drag the ROM onto `KirbyRecomp.exe`.**
-3. The first run builds the game on your machine (about 5 minutes, with a progress window). The next
-   runs start in under a second.
+2. **Drag the ROM onto `KirbyRecomp.exe`.** The launcher opens: choose size, scaling, volume, then **Play**.
+3. The first run is playable within seconds (interpreter) while the compiled version builds in the
+   background (a few minutes). The next runs start in under a second.
 
 The generated game lives in `%LOCALAPPDATA%\KirbyRecomp`; the package itself contains no game data.
 Controls: Z = A, X = B, Enter = Start, Backspace = Select, arrows, A/S = L/R, F11 = fullscreen, Esc = quit.
