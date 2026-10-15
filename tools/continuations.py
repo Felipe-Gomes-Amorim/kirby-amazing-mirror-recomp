@@ -12,6 +12,17 @@ from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB
 BASE = 0x08000000
 
 
+def not_a_split(rom, p):
+    """False positives of the 'neighbour without return' rule: a fragment of <= 2
+    instructions (stray halfwords before a real function), or a parent ending in `svc`
+    (SoftReset/Stop never return, so the next function is unrelated)."""
+    md = Cs(CS_ARCH_ARM, CS_MODE_THUMB)
+    lo, hi = int(p['lo'], 16), int(p['hi'], 16)
+    ins = list(md.disasm(rom[lo - BASE:hi - BASE], lo))
+    # the byte range may end in a literal pool, so look for any svc, not only the last insn
+    return len(ins) <= 2 or any(i.mnemonic in ('svc', 'swi') for i in ins)
+
+
 def main():
     rom = open(sys.argv[1], 'rb').read()
     md = Cs(CS_ARCH_ARM, CS_MODE_THUMB); md.detail = True
@@ -21,7 +32,7 @@ def main():
     parent = {}
     for p, n in zip(F, F[1:]):
         if p['mode'] == n['mode'] == 'thumb' and int(p['hi'], 16) == int(n['addr'], 16) \
-                and 'has_return' in conf[p['addr']]['failed_checks']:
+                and 'has_return' in conf[p['addr']]['failed_checks'] and not not_a_split(rom, p):
             parent[n['addr']] = p['addr']
 
     def root(a):

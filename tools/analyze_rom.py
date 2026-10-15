@@ -754,13 +754,38 @@ def runs(cov):
     return out
 
 
+REPO = Path(__file__).resolve().parent.parent
+DEFAULT_EXTRAS = [
+    str(REPO / "build/indirect/new_functions.csv"),         # folhas de ponteiro (Riven)
+    str(REPO / "build/indirect/m4a_handlers.csv"),          # handlers do M4A (tabela de saltos)
+    str(REPO / "build/recomp/program/extra_functions.csv"), # descobertas em execucao (runtime do Nasus)
+]
+
+
+def read_extra_rows(path):
+    """Linhas {addr:int, mode, source, tier}. Aceita com cabecalho ou sem (addr[,mode])."""
+    with open(path, newline="") as f:
+        rows = [r for r in csv.reader(f) if r and r[0].strip()]
+    if rows and rows[0][0].strip().lower() == "addr":
+        head = [h.strip() for h in rows[0]]
+        recs = [dict(zip(head, r)) for r in rows[1:]]
+    else:
+        recs = [{"addr": r[0], "mode": r[1] if len(r) > 1 else "thumb"} for r in rows]
+    out = []
+    for r in recs:
+        out.append({"addr": int(r["addr"].strip(), 16), "mode": (r.get("mode") or "thumb").strip().lower(),
+                    "source": (r.get("source") or "runtime").strip(), "tier": (r.get("tier") or "").strip()})
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("rom", nargs="?", help="caminho da ROM (padrao: baserom.gba ou o unico *.gba da pasta)")
     ap.add_argument("-o", "--out", default="build/analysis")
-    ap.add_argument("--extra-functions", default="build/indirect/new_functions.csv",
-                    help="CSV addr,mode,source,tier com funcoes extras (ex.: do resolve_indirect.py); "
-                         "'' desliga")
+    ap.add_argument("--extra-functions", action="append", default=None, metavar="CSV",
+                    help="CSV de funcoes extras (addr,mode,source,tier; ou sem cabecalho: addr,mode); "
+                         "repetivel. Padrao: new_functions.csv, m4a_handlers.csv e o "
+                         "extra_functions.csv que o runtime grava. '' desliga")
     ap.add_argument("--confidence", default="build/indirect/confidence.csv",
                     help="CSV addr,confidence (tools/score_functions.py); '' desliga")
     ap.add_argument("--no-ptr-scan", action="store_true", help="nao usar a heuristica de ponteiros")
@@ -803,26 +828,33 @@ def main():
         print(f"  passo 2 (ponteiros p/ prologos): +{len(a.insns) - n1} instrucoes "
               f"de {len(seeds)} candidatos")
 
-    if args.extra_functions and Path(args.extra_functions).exists():
-        added = known = 0
-        with open(args.extra_functions, newline="") as f:
-            for row in csv.DictReader(f):
-                addr, thumb = int(row["addr"], 16), row["mode"] == "thumb"
-                if addr in a.funcs:
-                    known += 1
-                    continue
-                own = a.insn_owner.get(addr)
-                if addr in a.insns and own is not None and own != addr:
-                    # ja decodificado como parte de outra funcao: continuacao, nao funcao nova
-                    a.extra_conts.append((addr, own))
-                    a.cont.setdefault(addr, {})[own] = "addr-taken-inside-parent"
-                    continue
-                if a.add_func(addr, thumb, row["source"]):
-                    if row.get("tier"):
-                        a.func_tier[addr] = row["tier"]
-                    a.run([(addr, thumb, row["source"])])
-                    added += 1
-        print(f"  extras ({args.extra_functions}): +{added} funcoes novas, {known} ja conhecidas")
+    extra_files = DEFAULT_EXTRAS if args.extra_functions is None else args.extra_functions
+    if "" in extra_files:
+        extra_files = []
+    for path in extra_files:
+        if not Path(path).exists():
+            continue  # ex.: o runtime ainda nao gravou extra_functions.csv
+        added = known = inside = 0
+        for row in read_extra_rows(path):
+            addr, thumb = row["addr"], row["mode"] == "thumb"
+            if addr in a.funcs:
+                known += 1
+                continue
+            own = a.insn_owner.get(addr)
+            if row["source"] == "addr-taken-leaf" and addr in a.insns and own is not None and own != addr:
+                # ponteiro "solto" que cai dentro de outra funcao: continuacao, nao funcao nova.
+                # (fontes confiaveis - jump table do M4A, runtime - sao sempre entradas de funcao)
+                a.extra_conts.append((addr, own))
+                a.cont.setdefault(addr, {})[own] = "addr-taken-inside-parent"
+                inside += 1
+                continue
+            if a.add_func(addr, thumb, row["source"]):
+                if row.get("tier"):
+                    a.func_tier[addr] = row["tier"]
+                a.run([(addr, thumb, row["source"])])
+                added += 1
+        print(f"  extras ({Path(path).name}): +{added} funcoes novas, {known} ja conhecidas"
+              + (f", {inside} dentro de outra funcao" if inside else ""))
 
     # codigo ROM -> RAM: acha as rotinas de copia e segue o codigo armazenado na ROM
     blocks = a.find_ram_code()
