@@ -236,7 +236,7 @@ static void psg_advance(uint32_t cycles) {
     seq_acc += cycles;
     while (seq_acc >= 32768) { seq_acc -= 32768; psg_seq_tick(seq_step); seq_step = (seq_step + 1) & 7; }
 }
-/* soma os canais PSG em L/R (escala: nivel*vol_mestre*razao*32; PCM 8 bit = 256/unidade) */
+/* soma os canais PSG em L/R (escala: nivel*vol_mestre*razao*16; PCM 8 bit = 256/unidade; PSG = 1/4 da escala, GBATek) */
 static void psg_mix(int *L, int *R) {
     uint16_t cl = R16(0x80), ch = R16(0x82);
     int ratio = (ch & 3) == 0 ? 1 : (ch & 3) == 1 ? 2 : 4;
@@ -258,8 +258,8 @@ static void psg_mix(int *L, int *R) {
         if (cl >> (12 + c) & 1) sl += v;
         if (cl >> (8 + c) & 1) sr += v;
     }
-    *L += sl * ((cl >> 4 & 7) + 1) * ratio * 32;
-    *R += sr * ((cl & 7) + 1) * ratio * 32;
+    *L += sl * ((cl >> 4 & 7) + 1) * ratio * 16;
+    *R += sr * ((cl & 7) + 1) * ratio * 16;
 }
 
 static int16_t clip16(int v) { return (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v); }

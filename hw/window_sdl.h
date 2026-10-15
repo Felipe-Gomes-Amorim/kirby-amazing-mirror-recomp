@@ -12,8 +12,11 @@
 #define WINDOW_SDL_H
 #include <stdint.h>
 
-int win_open(const char *title, int scale);   /* 0 = ok, <0 = erro (mensagem em stderr) */
-int win_poll(void);                           /* 1 = continua, 0 = fechar */
+int win_open(const char *title, int scale);   /* 0 = ok, <0 = erro (mensagem em stderr); sem vsync */
+int win_open_ex(const char *title, int scale, int vsync);  /* vsync=1 (ou env HW_WIN_VSYNC=1): PRESENTVSYNC */
+int win_poll(void);                           /* 1 = continua, 0 = fechar; trata minimizar/restaurar sem bloquear */
+int win_visible(void);                        /* 0 = minimizada/oculta (win_present nao faz nada) */
+void win_test_minimize(int on);               /* so para teste/automacao: minimiza (1) ou restaura (0) */
 uint16_t win_keys(void);                      /* formato do KEYINPUT (ativo em 0) */
 void win_present(const uint32_t *xrgb8888_240x160);
 void win_close(void);

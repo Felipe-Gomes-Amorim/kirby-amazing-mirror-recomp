@@ -2,6 +2,7 @@
 # Requer o SDL2 devel MinGW extraido em C:\libs\SDL2-2.32.2 (ou passe -Sdl).
 #   .\run_demo.ps1                 janela (setas, Z fundo, X nota PSG, Esc fecha)
 #   .\run_demo.ps1 -Demo audio     toca ~2 s de onda PCM + pulso PSG
+#   .\run_demo.ps1 -Demo minimize -Seconds 60   minimiza/restaura 5x e confere underruns
 # -Frames N (janela) ou -Seconds S (audio) para sair sozinho.
 param([string]$Sdl = "C:\libs\SDL2-2.32.2\x86_64-w64-mingw32", [string]$Demo = "window",
       [int]$Frames = 0, [double]$Seconds = 2.0)
@@ -13,7 +14,10 @@ $out = Join-Path $root "build\hw"
 New-Item -ItemType Directory -Force $out | Out-Null
 $common = @("-std=c11", "-O1", "-Wall", "-Wextra", "-I$Sdl\include\SDL2")
 $srcs = @("$root\hw\hw.c", "$root\hw\audio_sdl.c")
-if ($Demo -eq "audio") {
+if ($Demo -eq "minimize") {
+    & $gcc @common -o "$out\test_minimize.exe" @srcs "$root\hw\window_sdl.c" "$root\hw\tests\test_minimize.c" "-L$Sdl\lib" -lSDL2
+    $exe = "$out\test_minimize.exe"; $arg = [Math]::Max(12, $Seconds)
+} elseif ($Demo -eq "audio") {
     & $gcc @common -o "$out\demo_audio.exe" @srcs "$root\hw\tests\demo_audio.c" "-L$Sdl\lib" -lSDL2
     $exe = "$out\demo_audio.exe"; $arg = $Seconds
 } else {
