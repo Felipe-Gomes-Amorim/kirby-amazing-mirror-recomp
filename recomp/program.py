@@ -143,7 +143,7 @@ def build(rom, funcs, bad=None, jobs=8, nshards=None, verbose=True, opt=None):
         os.makedirs(os.path.join(OUT, 'obj'), exist_ok=True)
         obj = os.path.join(OUT, 'obj', os.path.basename(src)[:-2] + ('_w' if flags else '') + '_%s.o' % h)
         if not os.path.exists(obj):
-            r = subprocess.run(zig_cc() + ['-c', opt, '-w', '-I', RUNTIME, '-I', OUT,
+            r = toolchain.run(zig_cc() + ['-c', opt, '-w', '-I', RUNTIME, '-I', OUT,
                                            '-I', os.path.join(ROOT, 'hw')] + list(flags) +
                                [src, '-o', obj], capture_output=True, text=True)
             if r.returncode:
@@ -159,7 +159,7 @@ def build(rom, funcs, bad=None, jobs=8, nshards=None, verbose=True, opt=None):
     if verbose:
         print('compilado em %.0fs' % (time.time() - t1))
     exe = os.path.join(OUT, 'rt_boot.exe' if os.name == 'nt' else 'rt_boot')
-    r = subprocess.run(zig_cc() + ['-o', exe] + objs, capture_output=True, text=True)
+    r = toolchain.run(zig_cc() + ['-o', exe] + objs, capture_output=True, text=True)
     if r.returncode:
         raise RuntimeError('link:\n' + r.stderr[-3000:])
     build_window(objs, compile_one)
@@ -182,7 +182,8 @@ def build_window(objs, compile_one):
     base = [o for o in objs if not os.path.basename(o).startswith('rt_window_')]
     exe = os.path.join(OUT, 'kirby.exe' if os.name == 'nt' else 'kirby')
     imp = os.path.join(SDL_DIR, 'lib', 'libSDL2.dll.a')   # import lib (nao a estatica)
-    r = subprocess.run(zig_cc() + ['-o', exe] + base + w +
+    # -mwindows: subsistema GUI (sem janela de console atras do jogo)
+    r = toolchain.run(zig_cc() + ['-Wl,--subsystem,windows', '-o', exe] + base + w +
                        [imp], capture_output=True, text=True)
     if r.returncode:
         print('[janela] link falhou:\n' + r.stderr[-1500:])
@@ -194,7 +195,7 @@ def build_window(objs, compile_one):
 
 
 def boot(exe, rom_path, dump, extra=()):
-    r = subprocess.run([exe, rom_path, '--dump', dump] + list(extra), capture_output=True, text=True)
+    r = toolchain.run([exe, rom_path, '--dump', dump] + list(extra), capture_output=True, text=True)
     return r.returncode, r.stdout, r.stderr
 
 
@@ -364,12 +365,12 @@ def main():
             cmd = [kexe, a.rom, '--window', str(a.window)]
             if a.sav:
                 cmd += ['--sav', a.sav]
-            return subprocess.run(cmd).returncode
+            return toolchain.run(cmd).returncode
         if a.frames:
             cmd = [exe, a.rom, '--frames', str(a.frames), '--bench', '--sav', a.sav or 'none']
             if a.keys:
                 cmd += ['--keys', a.keys]
-            return subprocess.run(cmd).returncode
+            return toolchain.run(cmd).returncode
         return 0
     frames_dir = os.path.join(OUT, 'frames')
     os.makedirs(frames_dir, exist_ok=True)
@@ -409,7 +410,7 @@ def main():
             if val:
                 cmd += [flag, val]
         print('abrindo:', ' '.join(cmd))
-        return subprocess.run(cmd).returncode
+        return toolchain.run(cmd).returncode
     return rc
 
 

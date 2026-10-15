@@ -82,3 +82,16 @@ def find_rom(explicit=None):
         if c and os.path.isfile(c):
             return c
     return explicit or os.path.join(ROOT, 'baserom.gba')
+
+
+def run(cmd, **kw):
+    """subprocess.run sem abrir janela de console no Windows (zig.exe e cia sao apps de console;
+    chamados de um launcher grafico apareciam e sumiam varias janelas de cmd)."""
+    import subprocess
+    if os.name == 'nt':
+        kw.setdefault('creationflags', 0x08000000)   # CREATE_NO_WINDOW
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0                            # SW_HIDE
+        kw.setdefault('startupinfo', si)
+    return subprocess.run(cmd, **kw)

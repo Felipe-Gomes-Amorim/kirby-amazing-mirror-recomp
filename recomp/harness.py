@@ -58,6 +58,11 @@ class Rom:
 
 
 # ------------------------------------------------------------ build do C
+def _toolchain_run(cmd, **kw):
+    from .toolchain import run
+    return run(cmd, **kw)
+
+
 def zig_cc():
     from .toolchain import find_zig_cmd
     return find_zig_cmd()
@@ -79,7 +84,7 @@ def build_lib(c_source, outdir):
             f.write(c_source)
         cmd = zig_cc() + ['-shared', '-O1', '-w', '-I', RUNTIME, '-o', out,
                           os.path.join(RUNTIME, 'gba_cpu.c'), gen]
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = _toolchain_run(cmd, capture_output=True, text=True)
         if r.returncode:
             raise RuntimeError('falha ao compilar C gerado:\n' + r.stderr[-4000:])
     lib = C.CDLL(out)
