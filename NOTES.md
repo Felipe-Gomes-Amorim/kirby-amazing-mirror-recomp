@@ -279,7 +279,7 @@ Thumb (`add;ldr;mov pc`, tamanho pelo `cmp #n`) -> varre a ROM por ponteiros par
 Resultado atual (B8KE v0): header ok (logo, 0x96, checksum), ~607k instrucoes (294 ARM,
 resto Thumb), **5671 funcoes**: 2140 `bl`, 3110 `ptr-scan`, 386 `addr-taken-leaf` (extras do
 Riven, tier A/B), 16 `m4a-jump-table`, 1 `runtime`, 1 `runtime-log`, 6 `bx-const`, 3 `ram-code`, 5 `ram-ptr`, 1 `adr`, 2 `entry`. 146 tabelas de
-salto (1539 entradas), ~7.4% da ROM e Thumb. Indiretos nao resolvidos: 12 (stubs
+salto (1749 entradas), ~7.4% da ROM e Thumb. Indiretos nao resolvidos: 12 (stubs
 `_call_via_rN` e `bx` soltos; `pop {rN}; bx rN` e retorno). 0 pontos nao decodificam; 4
 conflitos ARM/Thumb (bloco RAM 2, ver abaixo). Confianca: 5252 high, 389 medium, 30 low.
 Opcoes: `--extra-functions CSV` (padrao build/indirect/new_functions.csv; `''` desliga),
@@ -358,6 +358,21 @@ quando o runtime apaga/reescreve seus logs (aconteceu com 0x0801870C: `unresolve
 sumiu antes do merge; funcao valida, struct-init com LCG, `bx lr` em 0x08018746). A invariante
 do `check_map.py` cobre `extra_functions.csv` e `unresolved*.log` (so enderecos ROM).
 
+### Tamanho das tabelas de salto: limite do `cmp` atravessa o desvio condicional
+Bug: `cmp r0,#0xD5; bls L; b default; L: lsls; ldr; mov pc,r0`. A descida linear acaba no `b`
+(incondicional) e `L` e analisado depois, numa nova `walk()` sem `last_cmp`; `add_table` cortava
+em 64. Correcao: ao TOMAR um desvio condicional que implica "indice dentro do limite" (`bls`,
+`blo/bcc`, `ble`, `blt`), o `imm` do `cmp` e guardado em `cmp_at[alvo]` e a `walk()` que comeca
+ali o herda. (`bhi/bcs/bgt/bge` tomados = fora do limite: NAO propagam, para o `default` nao
+herdar o limite de outro switch.) A tabela ganha `bounded=True` (coluna em `jumptables.csv`,
+campo em `map.json`). Resultado: 0x0809DA48 64->214, 0x0809A324 64->85, 0x0800B4E0 64->100,
+0x08076248 64->67 (batem com `build/indirect/jumptable_cap_fix.csv`); 1539 -> 1749 entradas;
+alvos distintos 719 -> 724 (5 novos); cresceram as funcoes donas 0x0809DA30 (+139 insns),
+0x08075EDC (+66) e 0x0800B414 (+5); 0 orfaos. Todas as 146 tabelas agora tem `cmp`.
+Invariante (`check_map.py`): nenhuma tabela com exatamente 64 entradas e `bounded=False`.
+Limite: tabela SEM `cmp` visivel (limite checado em outro lugar/por dados) continua cortando
+em 64 e dispara a invariante em vez de passar em silencio.
+
 ### Alvos de switch x funcoes (`orphan_switch_targets.csv`)
 Para cada alvo de `jumptables.csv` o analisador checa se alguma funcao do mapa contem a
 instrucao no seu fluxo (nao so `lo<=x<hi`) e se e a MESMA funcao do `site` do switch. Hoje:
@@ -397,7 +412,7 @@ Enderecos sao inteiros (decimal). Mudancas incompativeis incrementam o numero do
   ram_code: [ {block, site, method, store, exec, size, compressed, mode} ],
   ram_aliases: [ {addr, mode, seen_in[]} ],        # PCs em RAM/pilha vistos pelo runtime (NAO sao funcoes)
   continuations: [ {child, parent, why} ],          # filho e parte da funcao `parent`
-  jump_tables: [ {site, table, mode, targets[]} ],
+  jump_tables: [ {site, table, mode, bounded(bool), targets[]} ],  # bounded = limite veio de um cmp
   unresolved_indirect: [ {addr, insn} ] }
 ```
 Semantica: `lo`/`hi` cobrem a funcao inclusive blocos de continuacao e literal pools
@@ -702,6 +717,35 @@ PCM. Nos dois canais acontece; so e audivel no B porque o que vem depois do buff
   SAD/DAD (recarregado do registrador em 0->1 nos dois), contagem de palavras (4 por pedido, ignora CNT_L).
   O `0x8440` do `CNT=0x84400004` com o DMA ja armado nao dispara transferencia (so troca o campo de timing),
   igual ao mGBA; o `0x0400` desarma e `0xB600` rearma recarregando SAD.
+
+### 9. Escala do PSG corrigida para 1/4 da escala do PCM (Gwen)
+- Pedido do Riven (NOTES 'Analise do estalo e do volume', item 2): GBATek diz que cada FIFO cobre a escala
+  cheia (+-0x200) e cada PSG um quarto (+-0x80). Antes: `nivel * (vol_mestre+1) * razao * 32`, com vol 15,
+  master 7 e razao 100% => +-15360 (0,47 do PCM, +-32768); o PSG saia ~1,9x (6 dB) alto demais.
+- Agora o fator e **16**: o mesmo caso da +-7680 (0,23 do PCM; 0,25 seria +-8192, o vol 15 nao e o
+  fundo de escala do DAC de 4 bit). `hw.c` (`psg_mix`) e `hw/tests/test_psg.c` (7680, 9*512 no envelope,
+  4608 em ~100 ms) atualizados. **PCM nao mudou**: `test_audio` igual (A = 100*256 = 25600, B a 50% = 5120,
+  568 periodos); a conta do PCM (`amostra*256`, volume 50/100%) nao foi tocada.
+- Escala atual por canal PSG (L ou R, antes do clip): `+-vol(0..15) * (vol_mestre 1..8) * razao(1,2,4 p/ 25,
+  50, 100%) * 16`. Maximo teorico de 4 canais no mesmo lado: 4*7680 = 30720 (pode saturar junto com o PCM).
+- Nao verificado de ouvido que o 'som de dano' e PSG (a hipotese e do Riven).
+
+### 10. Janela minimizada nao trava mais (Gwen)
+- Sintoma: ao minimizar, o jogo travava e o audio engasgava (underruns). Causa: `window_sdl.c` criava o
+  renderer com `SDL_RENDERER_PRESENTVSYNC` e chamava `SDL_RenderPresent` todo quadro; com a janela
+  minimizada o present bloqueia.
+- `hw/window_sdl.c`: (1) `win_present` retorna na hora se `SDL_GetWindowFlags` tem MINIMIZED/HIDDEN
+  (`win_visible()`); (2) sem PRESENTVSYNC por padrao (o relogio do audio ja paceia o jogo); opcao:
+  `win_open_ex(titulo, escala, 1)` ou env `HW_WIN_VSYNC=1`; 'nearest' mantido; (3) `win_poll` trata
+  MINIMIZED/HIDDEN e RESTORED/SHOWN/EXPOSED so atualizando um flag (sem bloquear); ao restaurar volta a
+  apresentar sem compensar tempo (o relogio e o do audio; nada e "recuperado").
+- API nova (as antigas intactas): `win_open_ex`, `win_visible`, `win_test_minimize(on)` (gancho de teste).
+  O `kirby.exe` do Nasus usa `win_open/win_poll/win_present` com as mesmas assinaturas: basta recompilar.
+- Teste `hw/tests/test_minimize.c` (build: `hw/tests/run_demo.ps1 -Demo minimize`): 60 s com 5 ciclos
+  minimizar/restaurar (10 trocas), pacing pelo relogio do audio como o runtime. Resultado nesta maquina:
+  3586 quadros (59,76 q/s; esperado 59,73), 1627 quadros com a janela minimizada, present maximo 10,8 ms
+  (0,01 ms minimizada), espera pelo audio max 62 ms, **underruns apos o aquecimento = 0, descartados = 0**.
+  Nao testei a janela do jogo real (so a de teste); com o runtime, o ritmo continua sendo o do audio.
 
 - Cuidado para o runtime: `hw_irq_pending` ja aplica IME e IE&IF; o runtime so decide o despacho.
   O registro BIOS_IF (0x03007FF8) e IWRAM, fica a cargo do runtime ao tratar VBlankIntrWait.
@@ -1022,6 +1066,30 @@ hardware de blend. Nenhuma mudanca foi feita para "passar".
   divergencias. Nao medi o numero de pedidos de FIFO por periodo (99) nem ouvi: isso e do lado
   da Gwen (precisa do build novo `kirby.exe`).
 
+### Tabelas de salto completas, AVISO e alvo fora do conjunto (Nasus)
+- **Mapa regerado (Poppy):** `jumptables.csv` com `bounded`; 4 tabelas antes truncadas em 64.
+  Conferido com `discover(..., indirect=jt)` (loader ja le o CSV): **todos os alvos de cada tabela
+  estao no conjunto de instrucoes da funcao dona**:
+  | tabela | entradas (distintos) | funcao dona | insns | alvos fora do conjunto |
+  |---|---|---|---|---|
+  | 0x0809DA50 | 214 (6) | 0x0809DA30 | 648 | 0 |
+  | 0x0809A348 | 85 (3) | 0x0809A1C4 | 265 | 0 |
+  | 0x0800B4F0 | 100 (13) | 0x0800B414 | 215 | 0 |
+  | 0x08076254 | 67 (9) | 0x08075EDC | 1147 | 0 |
+  `0x0809DE38` (onde a sessao de espada + celular parava) **esta no conjunto** da 0x0809DA30.
+  Recompilado (5669 funcoes, 608.168 insns): 3600 quadros, 0 abortos, 0 nao resolvidos,
+  `--selftest-interp` 0 divergencias. **Nao reproduzi a sessao "espada + amigos" por teclas**
+  (nao sei o trajeto): a verificacao acima e estatica + regressao; confirmar jogando.
+- **AVISO:** o contexto da leitura em 0x100F0D55 agora sai como `[rt] AVISO: contexto do acesso
+  sem regiao ...` (`rt_dump_label`); "PARADA" so quando o processo realmente para.
+- **"funcao saiu sem avancar o pc (alvo fora do conjunto)" nao aborta mais:** loga 1x em
+  `unresolved.log` (`ADDR,modo,lr=,sp=,body=,kind=outside-set,fn=LO..HI`) e entrega o `pc` ao
+  interpretador, que nao sai da faixa da funcao ate o fluxo voltar a uma funcao/retorno
+  conhecido. `--stop-on-unresolved` (construcao) continua abortando. Teste
+  (`--selftest-interp`): 400 entradas no meio de 60 funcoes, 17 cairam fora do conjunto e foram
+  interpretadas sem derrubar o processo (os 334 abortos contados sao saltos aleatorios para
+  regiao invalida, esperado com registradores lixo).
+
 ### O que falta / riscos
 - Interpretador de fallback: endereco de RAM sem overlay ainda **aborta**; ROM sem funcao
   vira "retorna" (logado). Codigo em RAM que mude depois nao e achado sozinho fora do
@@ -1181,3 +1249,47 @@ Dados: 70,5 s de jogo gravados pelo usuario com `--audio-raw` (`build/hw/pcm.raw
   = +-15360 => razao 0,47 (deveria ser 0,25, +-7680). Logo o PSG sai ~1,9x (6 dB) mais alto.
 - Nao verificado que o som de dano e PSG; e a explicacao mais provavel para o relato.
 - Pico medido: |L|,|R| max ~23000 (70% da escala), sem clipping.
+
+## Crash ao chamar os amigos com a espada; travada ao minimizar (Riven)
+Relato do usuario com log (`PARADA: funcao saiu sem avancar o pc (alvo fora do conjunto)`,
+`pc=0809DE38 lr=080A390F r1=0809DA50`).
+**1. Tabela de salto truncada em 64 entradas (bug do mapa).**
+- `0x0809DA30..0x0809DA48`: `ldrb [r0+0x82]; subs r0,#5; cmp r0,#0xD5; bls ...; ldr r0,[tab+4*i]; mov pc,r0`
+  => o limite real e `0xD5`, ou seja **214 entradas**. `jumptables.csv` registrou **64**: o
+  analisador corta em 64. O alvo `0x0809DE38` e a entrada de um indice > 63, ausente do conjunto
+  de rotulos da funcao, entao o runtime parou.
+- Mesmo corte em **4 tabelas** (so as 4 com exatamente 64 entradas; ver `build/indirect/jumptable_cap_fix.csv`):
+  | site | tabela | tem | limite real |
+  |---|---|---|---|
+  | 0x0809DA48 | 0x0809DA50 | 64 | **214** (funcao 0x0809DA30) |
+  | 0x0809A324 | 0x0809A348 | 64 | 85 (0 alvos novos) |
+  | 0x0800B4E0 | 0x0800B4F0 | 64 | 100 (1 novo) |
+  | 0x08076248 | 0x08076254 | 64 | 67 (2 novos) |
+- Causa no codigo: `add_table(..., last_cmp)` em `tools/analyze_rom.py` usa `limit = 64 if last_cmp is None`.
+  Nestes 4 casos o `cmp rN,#imm` fica **antes de um `bls` cujo alvo e o bloco do switch**
+  (`cmp r0,#0xd5; bls L; b default; L: lsls..; ldr..; mov pc,r0`): o limite nao e levado pelo
+  desvio condicional, `last_cmp` chega `None` e cai no teto de 64.
+- Todas as entradas extras apontam para dentro da propria funcao (validado). Total: 5 alvos
+  distintos novos. Correcao: no analisador, usar o `cmp #imm` do limite em vez de capar em 64.
+**2. Travada ao minimizar.** `hw/window_sdl.c` cria o renderer com `SDL_RENDERER_PRESENTVSYNC`
+  e chama `SDL_RenderPresent` todo quadro; com a janela minimizada o present bloqueia, e como
+  o ritmo do jogo segue a fila de audio, a fila esvazia (underruns seguidos nos quadros
+  3776-3788 do log). Correcao: nao apresentar quando minimizada e dispensar o vsync (o relogio
+  do audio ja pace o jogo).
+**3. Mensagem enganosa.** O contexto do acesso a 0x100F0D55 sai como `PARADA`, mas e so aviso.
+
+## Teste de estresse com entrada aleatoria (Riven) - `tools/fuzz_run.py`
+`python tools/fuzz_run.py --seeds 1-124 --frames 9000 --jobs 6` roda `rt_boot.exe` sem janela e sem
+save, com um roteiro de teclas aleatorio por semente (prologo fixo ate a 1a fase + caminhada com
+direita dominante, A/B, L/R, START/SELECT). Uma execucao e OK se termina em `RT_STOP frames`, sai
+com codigo 0 e tem `nao_resolvidos=0`. Falhas guardam o log completo em `build/fuzz/seed_N.log`.
+- **Resultado (mapa com 5671 funcoes, tabelas de salto corrigidas): 124 de 124 limpas.**
+- **Controle negativo:** a mesma semente com `--no-sram-alias` da `nao_resolvidos=70` e o runner
+  a classifica como falha; logo o detector funciona.
+- **Limite honesto do que isto cobre:** `--keys` do runtime aceita <= 128 eventos e <= 1023 caracteres,
+  entao cada roteiro tem ~83 eventos e a entrada acaba por volta do quadro ~5100; o resto e
+  parado. Sao ~50 s de jogo aleatorio por execucao, ~100 min no total, **todos na area inicial**
+  (conferido em quadros: Kirby fica perto do inicio da 1a fase). Nao ha profundidade: fases
+  posteriores, chefes, outros poderes e ajudantes nao foram exercitados.
+- Para ir alem (pedido ao Nasus): `--fuzz SEMENTE` dentro do runtime (sem limite de roteiro) e/ou
+  `--keys-file`; e uma forma de partir de um save com progresso (o `baserom.sav` do jogador).
