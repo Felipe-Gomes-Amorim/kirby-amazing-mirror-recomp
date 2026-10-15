@@ -64,7 +64,7 @@ compactada) ou baixe uma versão quando houver. Depois:
    Nas próximas abre em menos de um segundo.
 
 O jogo gerado fica em `%LOCALAPPDATA%\KirbyRecomp`; o pacote não contém nada do jogo.
-Controles: Z = A, X = B, Enter = Start, Backspace = Select, setas, A/S = L/R, F11 = tela cheia, Esc = sair.
+Controles: X = A, Z = B, Enter = Start, Backspace = Select, setas, A/S = L/R, F1 = launcher, F11 = tela cheia, Esc = sair.
 O Windows pode avisar sobre programa não assinado: o launcher executa um compilador e o programa que ele gera.
 
 ## Como rodar a partir do código-fonte

@@ -82,7 +82,7 @@ Download `KirbyRecomp.zip` from the [Releases](../../releases) page (about 95 MB
    background (a few minutes). The next runs start in under a second.
 
 The generated game lives in `%LOCALAPPDATA%\KirbyRecomp`; the package itself contains no game data.
-Controls: Z = A, X = B, Enter = Start, Backspace = Select, arrows, A/S = L/R, F11 = fullscreen, Esc = quit.
+Controls: X = A, Z = B, Enter = Start, Backspace = Select, arrows, A/S = L/R, F1 = launcher, F11 = fullscreen, Esc = quit.
 Windows may warn about an unsigned program: the launcher runs a compiler and the program it produces.
 
 ## Running it from the source tree
