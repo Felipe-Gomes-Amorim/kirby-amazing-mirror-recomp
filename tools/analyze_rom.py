@@ -12,6 +12,7 @@ Etapas:
 Uso: python tools/analyze_rom.py [rom.gba] [-o build/analysis]
 """
 import argparse
+import bisect
 import csv
 import json
 import re
@@ -99,9 +100,21 @@ class Analyzer:
         self.tables = []           # dicts: site, base, targets, thumb
         self.unresolved = []       # (addr, mnemonic) saltos/chamadas indiretos sem alvo
         self.ram_targets = Counter()
+        self.call_args = []        # (site, alvo, r0, r1, r2) de `bl` direto; None = nao constante
+        self.ram_entries = set()   # (endereco RAM, thumb) alvos de bx/blx constantes em RAM
+        self.ram_blocks = []       # codigo copiado ROM -> RAM (ver find_ram_code)
+        self.prev_pop = None       # registrador do `pop {rN}` anterior (p/ pop;bx = retorno)
+        self.func_tier = {}        # addr -> 'A'/'B' (confianca das funcoes extras)
         self.adr_seeds = []        # alvos de `add rX,pc,#imm` (ARM)
         self.bad = []              # enderecos que nao decodificaram
         self.mode_conflicts = 0
+        self.conflict_sites = []   # enderecos onde ARM e Thumb se sobrepoem
+        self.cur_owner = None      # funcao (entrada) a que a descida em curso pertence
+        self.owner = {}            # alvo empilhado -> funcao dona (branch/switch/salto longo)
+        self.insn_owner = {}       # endereco de instrucao -> funcao dona
+        self.cont = {}             # alvo -> {dona: motivo}: blocos de continuacao (bl como salto longo)
+        self._lj_cache = {}
+        self.extra_conts = []      # extras que caem dentro de outra funcao
 
     # ---- acesso a ROM ----
     def off(self, addr):
@@ -137,6 +150,7 @@ class Analyzer:
             addr, thumb, src = work.popleft()
             if self.off(addr) is None:
                 continue
+            self.cur_owner = self.owner.get(addr, addr)
             self.walk(addr, thumb, work)
             while self.adr_seeds:  # `add rX,pc,#imm` em ARM: ponteiro de codigo (ex.: handler de IRQ)
                 t = self.adr_seeds.pop()
@@ -147,11 +161,13 @@ class Analyzer:
         regs = {}
         last_cmp = None
         mov_lr_pc = False
+        self.prev_pop = None
         step = 2 if thumb else 4
         while True:
             if addr in self.insns:
                 if self.insns[addr].thumb != thumb:
                     self.mode_conflicts += 1
+                    self.conflict_sites.append(addr)
                 return
             if self.off(addr) is None or addr % step:
                 return
@@ -161,6 +177,7 @@ class Analyzer:
                 return
             ins = Insn(addr, d.size, thumb, d.mnemonic, split_ops(d.op_str))
             self.insns[addr] = ins
+            self.insn_owner[addr] = self.cur_owner
             nxt = addr + d.size
             stop = self.classify(ins, regs, last_cmp, mov_lr_pc, work)
             m, ops = ins.mnem, ins.ops
@@ -168,6 +185,8 @@ class Analyzer:
                 imm = parse_imm(ops[1])
                 last_cmp = imm if imm is not None else last_cmp
             mov_lr_pc = (m == "mov" and ops == ["lr", "pc"])
+            pm = re.fullmatch(r"\{(r\d+)\}", ops[0]) if (m == "pop" and len(ops) == 1) else None
+            self.prev_pop = pm.group(1) if pm else None
             if not stop:
                 ins.succ.append(nxt)
             if ins.kind == "jump" and ins.target is not None:
@@ -187,12 +206,23 @@ class Analyzer:
             ins.target = tgt
             if base == "b":
                 ins.kind = "jump"
+                self.owner.setdefault(tgt, self.cur_owner)
                 work.append((tgt, thumb, "branch"))
                 return not cond
             flip = base == "blx"
             tmode = (not thumb) if flip else thumb
+            if thumb and base == "bl" and not cond:
+                why = self.long_jump_reason(tgt)
+                if why:  # agbcc: `bl` como salto longo para o epilogo/continuacao da MESMA funcao
+                    ins.kind = "jump"
+                    self.cont.setdefault(tgt, {})[self.cur_owner] = why
+                    self.owner.setdefault(tgt, self.cur_owner)
+                    work.append((tgt, thumb, "longjump"))
+                    return True
             ins.kind = "call"
             ins.calls.append(tgt)
+            self.call_args.append((addr, tgt) + tuple(
+                regs[r][1] if regs.get(r) and regs[r][0] == "c" else None for r in ("r0", "r1", "r2")))
             if self.add_func(tgt, tmode, "bl"):
                 work.append((tgt, tmode, "bl"))
             regs.clear()
@@ -233,6 +263,9 @@ class Analyzer:
         if src in RETURN_REGS and indirect != "blx":
             ins.kind = "ret"
             return not ins.cond
+        if indirect == "bx" and src is not None and src == self.prev_pop:
+            ins.kind = "ret"       # pop {rN}; bx rN: retorno interworking (agbcc)
+            return not ins.cond
         is_call = indirect == "blx" or mov_lr_pc
         ins.kind = "call" if is_call else "ind"
         val = regs.get(src) if src else None
@@ -248,6 +281,8 @@ class Analyzer:
             v = val[1]
             tthumb = bool(v & 1) if indirect in ("bx", "blx") else thumb
             tgt = v & ~1 if tthumb else v & ~3
+            if self.off(tgt) is None and tgt >> 24 in (2, 3):
+                self.ram_entries.add((tgt, tthumb))   # codigo em RAM: resolvido em find_ram_code
             if self.add_func(tgt, tthumb, "bx-const"):
                 work.append((tgt, tthumb, "bx-const"))
                 ins.target = tgt
@@ -295,6 +330,12 @@ class Analyzer:
                 if v:
                     regs[rd] = v
             return
+        if m == "adr" and ins.thumb and len(ops) == 2 and ops[1].startswith("#"):
+            imm = parse_imm(ops[1])
+            regs.pop(rd, None)
+            if imm is not None:
+                regs[rd] = ("c", ((addr + 4) & ~3) + imm)  # veneer Thumb->ARM: adr rN,#0; bx rN
+            return
         if m == "add" and not ins.thumb and len(ops) == 3 and reg(ops[1]) == "pc" and ops[2].startswith("#"):
             imm = parse_imm(ops[2])
             if imm is not None and rd != "pc":
@@ -303,6 +344,12 @@ class Analyzer:
                     self.adr_seeds.append(tgt)
                     regs[rd] = ("c", tgt)
                     return
+        fold = self.fold(m, ops, regs)
+        if fold is not None:
+            regs.pop(rd, None)
+            if fold is not False:
+                regs[rd] = ("c", fold & 0xFFFFFFFF)
+            return
         if m in ("add", "adds") and len(ops) in (2, 3) and not ops[-1].startswith("#"):
             a, b = (reg(ops[0]), reg(ops[1])) if len(ops) == 2 else (reg(ops[1]), reg(ops[2]))
             for x in (a, b):
@@ -322,6 +369,50 @@ class Analyzer:
                 return
         if m in WRITES or m.startswith("ldr"):
             regs.pop(rd, None)
+
+    @staticmethod
+    def fold(m, ops, regs):
+        """Dobra constantes em ALU simples. None = nao e dobravel aqui; False = resultado desconhecido."""
+        def cv(o):
+            if o.startswith("#"):
+                return parse_imm(o)
+            v = regs.get(reg(o))
+            return v[1] if v and v[0] == "c" else None
+        n = len(ops)
+        if m in ("add", "adds", "sub", "subs", "and", "ands", "orr", "orrs", "eor", "eors", "bic", "bics",
+                 "lsl", "lsls", "lsr", "lsrs") and n in (2, 3):
+            if m in ("add", "adds", "sub", "subs") and n >= 2 and not ops[-1].startswith("#"):
+                return None  # add reg,reg: tratado em track (tabelas)
+            a, b = (cv(ops[0]), cv(ops[1])) if n == 2 else (cv(ops[1]), cv(ops[2]))
+            if a is None or b is None:
+                return False
+            k = m.rstrip("s") if m not in ("bics", "ands") else m[:-1]
+            if k in ("add",):
+                return a + b
+            if k == "sub":
+                return a - b
+            if k == "and":
+                return a & b
+            if k == "orr":
+                return a | b
+            if k == "eor":
+                return a ^ b
+            if k == "bic":
+                return a & ~b
+            if k == "lsl":
+                return a << b if b < 32 else 0
+            if k == "lsr":
+                return a >> b if b < 32 else 0
+        if m in ("rsb", "rsbs") and n == 3 and ops[2] == "#0":
+            a = cv(ops[1])
+            return False if a is None else -a
+        if m in ("neg", "negs") and n == 2:
+            a = cv(ops[1])
+            return False if a is None else -a
+        if m in ("mvn", "mvns") and n == 2:
+            a = cv(ops[1])
+            return False if a is None else ~a
+        return None
 
     # ---- tabelas de salto ----
     def add_table(self, ins, base, last_cmp, work):
@@ -344,6 +435,7 @@ class Analyzer:
         ins.kind = "ind"
         ins.succ.extend(targets)
         for t in targets:
+            self.owner.setdefault(t, self.cur_owner)
             work.append((t, ins.thumb, "jumptable"))
 
     def add_arm_branch_table(self, ins, last_cmp, work):
@@ -385,6 +477,141 @@ class Analyzer:
                     seeds[w] = False
         return [(w, is_thumb) for w, is_thumb in seeds.items()]
 
+    # ---- `bl` Thumb usado como salto longo ----
+    LONGJUMP_WINDOW = 0x2000
+
+    def long_jump_reason(self, tgt):
+        """Motivo (str) se `bl tgt` e continuacao da funcao atual; None se for chamada."""
+        owner = self.cur_owner
+        if owner is None or not (owner < tgt <= owner + self.LONGJUMP_WINDOW) or tgt & 1:
+            return None
+        if tgt not in self._lj_cache:
+            self._lj_cache[tgt] = self.probe_continuation(tgt)
+        return self._lj_cache[tgt]
+
+    def probe_continuation(self, tgt):
+        """Alvo sem `push` proprio que comeca com epilogo ou que retorna via pop => continuacao."""
+        d = self.decode(tgt, True)
+        if d is None or d.mnemonic == "push":
+            return None
+        ops0 = split_ops(d.op_str)
+        first = None
+        if d.mnemonic in ("add", "adds") and len(ops0) == 2 and ops0[0] == "sp" and ops0[1].startswith("#"):
+            first = "starts-add-sp"
+        elif d.mnemonic == "pop":
+            first = "starts-pop"
+        seen, stack = set(), [tgt]
+        has_push = stack_ret = lr_ret = False
+        while stack and len(seen) < 600:
+            a = stack.pop()
+            prev_pop = None
+            while a not in seen and self.off(a) is not None and len(seen) < 600:
+                seen.add(a)
+                d = self.decode(a, True)
+                if d is None:
+                    break
+                m, ops = d.mnemonic, split_ops(d.op_str)
+                if m == "push":
+                    has_push = True
+                base, cond = split_branch(m)
+                if base == "b" and ops and ops[0].startswith("#"):
+                    stack.append(parse_imm(ops[0]))
+                    if not cond:
+                        break
+                elif m == "bx":
+                    if ops == ["lr"]:
+                        lr_ret = True
+                    elif ops and ops[0] == prev_pop:
+                        stack_ret = True
+                    break
+                elif m == "pop" and ops and re.search(r"\bpc\b", ops[-1]):
+                    stack_ret = True
+                    break
+                pm = re.fullmatch(r"\{(r\d+)\}", ops[0]) if (m == "pop" and ops) else None
+                prev_pop = pm.group(1) if pm else None
+                a += d.size
+        if has_push:
+            return None
+        if stack_ret and not lr_ret:
+            return "no-push+stack-return" + ("," + first if first else "")
+        if first:
+            return first
+        return None
+
+    # ---- codigo copiado da ROM para a RAM ----
+    SWI_COPY = {0x0B: "CpuSet", 0x0C: "CpuFastSet", 0x11: "LZ77WRAM", 0x14: "RLWRAM"}
+
+    def find_copy_routines(self):
+        """addr -> nome: wrappers de SWI (`svc #n; bx lr`) e funcoes tipo memcpy (ldm/stm unitarios)."""
+        out = {}
+        for ins in self.insns.values():
+            if ins.mnem in ("svc", "swi") and ins.ops and ins.thumb:
+                nxt = self.insns.get(ins.addr + ins.size)
+                name = self.SWI_COPY.get(parse_imm(ins.ops[0]))
+                if name and nxt and nxt.mnem == "bx" and nxt.ops == ["lr"]:
+                    out[ins.addr] = name
+        for f in self.funcs:
+            seen, stack, ld, st = set(), [f], False, False
+            while stack and len(seen) < 400:
+                x = stack.pop()
+                if x in seen or x not in self.insns or (x != f and x in self.funcs):
+                    continue
+                seen.add(x)
+                i = self.insns[x]
+                ld |= i.mnem == "ldm" and i.thumb and i.ops[-1].count(",") == 0 and i.ops[0].endswith("!")
+                st |= i.mnem == "stm" and i.thumb and i.ops[-1].count(",") == 0 and i.ops[0].endswith("!")
+                stack.extend(i.succ)
+            if ld and st:
+                out.setdefault(f, "memcpy")
+        return out
+
+    def find_ram_code(self):
+        """Chamadas CpuSet/CpuFastSet/LZ77/memcpy com origem em ROM e destino em EWRAM/IWRAM."""
+        routines = self.find_copy_routines()
+        seen = set()
+        for site, tgt, r0, r1, r2 in self.call_args:
+            kind = routines.get(tgt)
+            if kind is None or (site, kind) in seen:
+                continue
+            seen.add((site, kind))
+            if kind == "memcpy":
+                dst, src, n, comp = r0, r1, r2, False
+            else:
+                dst, src, comp = r1, r0, kind in ("LZ77WRAM", "RLWRAM")
+                if r0 is None or r1 is None:
+                    continue
+                if kind in ("CpuSet", "CpuFastSet"):
+                    if r2 is None or r2 >> 24 & 1:      # r2 desconhecido ou fill
+                        continue
+                    unit = 4 if (kind == "CpuFastSet" or r2 >> 26 & 1) else 2
+                    n = (r2 & 0x1FFFFF) * unit
+                else:
+                    hdr = self.word(src & ~1)
+                    n = (hdr >> 8) if hdr is not None else None
+            if None in (dst, src) or not (dst >> 24 in (2, 3)) or self.off(src & ~1) is None or not n:
+                continue
+            src &= ~1
+            self.ram_blocks.append({
+                "site": site, "method": kind, "store": src, "exec": dst & ~1, "size": n, "compressed": comp,
+            })
+        self.ram_blocks.sort(key=lambda b: b["site"])
+        for b in self.ram_blocks:
+            if b["compressed"]:
+                b["mode"] = "compressed"
+                continue
+            o = b["store"] - ROM_BASE
+            ws = struct.unpack_from("<%dI" % (b["size"] // 4), self.rom, o)
+            al = sum(1 for w in ws if w >> 28 == 0xE)  # ARM: quase tudo com cond=AL
+            frac = al / len(ws) if ws else 0
+            b["mode"] = "arm" if frac >= 0.6 else "thumb" if frac < 0.2 else "mixed"  # mixed = Thumb + ARM
+        return self.ram_blocks
+
+    def ram_to_rom(self, addr):
+        for b in self.ram_blocks:
+            if not b["compressed"] and b["exec"] <= addr < b["exec"] + b["size"]:
+                return b["store"] + (addr - b["exec"])
+        return None
+
     # ---- funcoes ----
     def build_functions(self):
         res = []
@@ -398,7 +625,8 @@ class Analyzer:
             seen, stack, calls = set(), [f], set()
             while stack:
                 a = stack.pop()
-                if a in seen or a not in self.insns or (a != f and a in self.funcs):
+                if a in seen or a not in self.insns or (
+                        a != f and a in self.funcs and f not in self.cont.get(a, ())):
                     continue
                 seen.add(a)
                 ins = self.insns[a]
@@ -409,10 +637,18 @@ class Analyzer:
             nbytes = sum(self.insns[a].size for a in seen)
             lo, hi = min(seen), max(seen) + self.insns[max(seen)].size
             has_tbl = any(t["site"] in seen for t in self.tables)
+            exec_addr, block = "", ""
+            for k, b in enumerate(self.ram_blocks):
+                if not b["compressed"] and b["store"] <= f < b["store"] + b["size"]:
+                    exec_addr, block = b["exec"] + (f - b["store"]), k
+                    break
             res.append({
                 "addr": f, "mode": "thumb" if thumb else "arm", "insns": len(seen), "bytes": nbytes,
                 "lo": lo, "hi": hi, "callers": len(callers.get(f, ())), "callees": len(calls),
                 "jumptable": has_tbl, "source": src,
+                "has_return": any(self.insns[x].kind == "ret" for x in seen),
+                "continuations": sum(1 for t, o in self.cont.items() if f in o and t in seen), "tier": self.func_tier.get(f, ""),
+                "exec_addr": exec_addr, "ram_block": block,
             })
         return res
 
@@ -480,6 +716,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("rom", nargs="?", help="caminho da ROM (padrao: baserom.gba ou o unico *.gba da pasta)")
     ap.add_argument("-o", "--out", default="build/analysis")
+    ap.add_argument("--extra-functions", default="build/indirect/new_functions.csv",
+                    help="CSV addr,mode,source,tier com funcoes extras (ex.: do resolve_indirect.py); "
+                         "'' desliga")
+    ap.add_argument("--confidence", default="build/indirect/confidence.csv",
+                    help="CSV addr,confidence (tools/score_functions.py); '' desliga")
     ap.add_argument("--no-ptr-scan", action="store_true", help="nao usar a heuristica de ponteiros")
     args = ap.parse_args()
 
@@ -520,7 +761,67 @@ def main():
         print(f"  passo 2 (ponteiros p/ prologos): +{len(a.insns) - n1} instrucoes "
               f"de {len(seeds)} candidatos")
 
+    if args.extra_functions and Path(args.extra_functions).exists():
+        added = known = 0
+        with open(args.extra_functions, newline="") as f:
+            for row in csv.DictReader(f):
+                addr, thumb = int(row["addr"], 16), row["mode"] == "thumb"
+                if addr in a.funcs:
+                    known += 1
+                    continue
+                own = a.insn_owner.get(addr)
+                if addr in a.insns and own is not None and own != addr:
+                    # ja decodificado como parte de outra funcao: continuacao, nao funcao nova
+                    a.extra_conts.append((addr, own))
+                    a.cont.setdefault(addr, {})[own] = "addr-taken-inside-parent"
+                    continue
+                if a.add_func(addr, thumb, row["source"]):
+                    if row.get("tier"):
+                        a.func_tier[addr] = row["tier"]
+                    a.run([(addr, thumb, row["source"])])
+                    added += 1
+        print(f"  extras ({args.extra_functions}): +{added} funcoes novas, {known} ja conhecidas")
+
+    # codigo ROM -> RAM: acha as rotinas de copia e segue o codigo armazenado na ROM
+    blocks = a.find_ram_code()
+    n0, f0 = len(a.insns), len(a.funcs)
+    for addr, thumb in sorted(a.ram_entries):
+        rom_addr = a.ram_to_rom(addr)
+        if rom_addr is not None and a.add_func(rom_addr, thumb, "ram-code"):
+            a.run([(rom_addr, thumb, "ram-code")])
+    words = array("I")
+    words.frombytes(bytes(rom[: len(rom) - len(rom) % 4]))
+    for b in blocks:  # blocos ARM: o inicio da copia e uma funcao
+        if b["mode"] == "arm" and a.add_func(b["store"], False, "ram-code"):
+            a.run([(b["store"], False, "ram-code")])
+    for idx, w in enumerate(words):  # ponteiros para dentro do codigo em RAM: tabelas de callbacks
+        if w >> 24 not in (2, 3):
+            continue
+        waddr = ROM_BASE + idx * 4
+        if waddr in a.insns or waddr in a.pool or any(
+                b["store"] <= waddr < b["store"] + b["size"] for b in blocks):
+            continue  # instrucao, literal pool ou o proprio codigo guardado: nao e tabela de ponteiros
+        rom_addr = a.ram_to_rom(w & ~1)
+        if rom_addr is None:
+            continue
+        blk = next(b for b in blocks if b["store"] <= rom_addr < b["store"] + b["size"])
+        thumb = bool(w & 1)
+        if (blk["mode"] == "thumb" and thumb) or (blk["mode"] == "arm" and not thumb and w % 4 == 0):
+            if a.add_func(rom_addr, thumb, "ram-ptr"):
+                a.run([(rom_addr, thumb, "ram-ptr")])
+    print(f"  codigo RAM: {len(blocks)} copias ROM->RAM; seguindo o codigo guardado: "
+          f"+{len(a.insns) - n0} instrucoes, +{len(a.funcs) - f0} funcoes")
+
+    conf = {}
+    if args.confidence and Path(args.confidence).exists():
+        with open(args.confidence, newline="") as f:
+            for row in csv.DictReader(f):
+                conf[row["addr"].upper().replace("0X", "0x")] = row["confidence"]
+        # confidence.csv usa 0x08xxxxxx com digitos em maiusculas ou minusculas: normaliza
+        conf = {f"0x{int(k, 16):08X}": v for k, v in conf.items()}
     funcs = a.build_functions()
+    for r in funcs:
+        r["confidence"] = conf.get(f"0x{r['addr']:08X}", "unscored")
     cov = a.coverage()
     cnt = Counter(cov)
     n_arm = sum(1 for i in a.insns.values() if not i.thumb)
@@ -530,10 +831,21 @@ def main():
     (out / "header.json").write_text(json.dumps(hdr, indent=2), encoding="utf-8")
     with open(out / "functions.csv", "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["addr", "mode", "insns", "bytes", "lo", "hi", "callers", "callees", "jumptable", "source"])
+        w.writerow(["addr", "mode", "insns", "bytes", "lo", "hi", "callers", "callees", "jumptable", "source", "tier", "confidence",
+                    "store_addr", "exec_addr", "ram_block", "has_return", "continuations"])
         for r in funcs:
             w.writerow([f"0x{r['addr']:08X}", r["mode"], r["insns"], r["bytes"], f"0x{r['lo']:08X}",
-                        f"0x{r['hi']:08X}", r["callers"], r["callees"], int(r["jumptable"]), r["source"]])
+                        f"0x{r['hi']:08X}", r["callers"], r["callees"], int(r["jumptable"]), r["source"], r["tier"],
+                        r["confidence"],
+                        f"0x{r['addr']:08X}" if r["exec_addr"] != "" else "",
+                        f"0x{r['exec_addr']:08X}" if r["exec_addr"] != "" else "", r["ram_block"],
+                        int(r["has_return"]), r["continuations"]])
+    with open(out / "continuations.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["addr_filho", "addr_pai", "motivo"])
+        for t in sorted(a.cont):
+            for owner, why in sorted(a.cont[t].items()):
+                w.writerow([f"0x{t:08X}", f"0x{owner:08X}", why])
     with open(out / "jumptables.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["site", "table", "entries", "mode", "targets"])
@@ -551,6 +863,40 @@ def main():
         for ad, txt in a.unresolved:
             w.writerow([f"0x{ad:08X}", txt])
 
+    sorted_f = sorted(r["addr"] for r in funcs)
+    with open(out / "ram_code.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["block", "method", "call_site", "caller_function", "store_rom", "store_end", "exec_ram",
+                    "exec_end", "size", "compressed", "mode", "functions_inside", "entry_points_exec"])
+        for k, b in enumerate(blocks):
+            k_f = bisect.bisect_right(sorted_f, b["site"]) - 1
+            caller_fn = sorted_f[k_f] if k_f >= 0 else None
+            inside = [r for r in funcs if r["ram_block"] == k]
+            entries = sorted(e for e, _ in a.ram_entries if b["exec"] <= e < b["exec"] + b["size"])
+            w.writerow([k, b["method"], f"0x{b['site']:08X}",
+                        f"0x{caller_fn:08X}" if caller_fn is not None else "",
+                        f"0x{b['store']:08X}", f"0x{b['store'] + b['size']:08X}", f"0x{b['exec']:08X}",
+                        f"0x{b['exec'] + b['size']:08X}", b["size"], int(b["compressed"]), b["mode"], len(inside),
+                        " ".join(f"0x{e:08X}" for e in entries)])
+    map_json = {
+        "rom": rom_path.name, "rom_base": ROM_BASE, "header": hdr,
+        "functions": [{
+            "addr": r["addr"], "mode": r["mode"], "lo": r["lo"], "hi": r["hi"], "insns": r["insns"],
+            "bytes": r["bytes"], "source": r["source"], "tier": r["tier"] or None,
+            "confidence": r["confidence"], "jumptable": r["jumptable"], "has_return": r["has_return"],
+            "exec_addr": r["exec_addr"] if r["exec_addr"] != "" else None,
+            "ram_block": r["ram_block"] if r["ram_block"] != "" else None,
+        } for r in funcs],
+        "regions": [{"start": s0, "end": e0, "size": e0 - s0, "kind": k0} for s0, e0, k0 in runs(cov)],
+        "ram_code": [{"block": k, **b} for k, b in enumerate(blocks)],
+        "continuations": [{"child": t, "parent": o, "why": w} for t, d in sorted(a.cont.items())
+                          for o, w in sorted(d.items())],
+        "jump_tables": [{"site": t["site"], "table": t["base"], "mode": "thumb" if t["thumb"] else "arm",
+                         "targets": t["targets"]} for t in a.tables],
+        "unresolved_indirect": [{"addr": ad, "insn": txt} for ad, txt in a.unresolved],
+    }
+    (out / "map.json").write_text(json.dumps(map_json, separators=(",", ":")), encoding="utf-8")
+
     mb = lambda c: f"{c / 1024:9.1f} KiB ({100 * c / len(rom):4.1f}%)"
     print("\nResumo")
     print(f"  instrucoes: {n_arm} ARM, {n_thumb} Thumb")
@@ -567,7 +913,13 @@ def main():
     print(f"  chamadas para RAM (codigo copiado p/ IWRAM/EWRAM?): {sum(a.ram_targets.values())} "
           f"em {len(a.ram_targets)} enderecos")
     print(f"  falhas de decodificacao: {len(a.bad)}  conflitos ARM/Thumb: {a.mode_conflicts}")
-    print(f"\nArquivos em {out}/: header.json functions.csv jumptables.csv regions.csv unresolved.csv")
+    print(f"  confianca: {dict(Counter(r['confidence'] for r in funcs))}")
+    print(f"  codigo RAM: {len(blocks)} copias, {sum(1 for r in funcs if r['ram_block'] != '')} funcoes dentro")
+    print(f"  continuacoes (bl como salto longo / extras dentro de funcao): "
+          f"{sum(len(d) for d in a.cont.values())}  (extras absorvidos: {len(a.extra_conts)})")
+    print(f"  funcoes sem retorno alcancavel: {sum(1 for r in funcs if not r['has_return'])}")
+    print(f"\nArquivos em {out}/: header.json functions.csv jumptables.csv regions.csv unresolved.csv "
+          f"ram_code.csv map.json continuations.csv")
 
 
 if __name__ == "__main__":
