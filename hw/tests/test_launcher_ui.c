@@ -74,6 +74,17 @@ int main(int argc, char **argv) {
     win_poll();
     dp = win_dropped_path();
     CHECK(dp && strcmp(dp, "D:\\outra.gba") == 0, "segundo drop substitui");
+    CHECK(win_get_scaling() == 1, "default scaling is fit");
+    {
+        static uint32_t fb[240 * 160];
+        for (int m = 0; m < 3; m++) {
+            win_set_scaling(m);
+            CHECK(win_get_scaling() == m, "win_set_scaling stores the mode");
+            win_present(fb);                                  /* must not crash in any mode */
+        }
+        win_set_scaling(9);
+        CHECK(win_get_scaling() == 1, "invalid mode falls back to fit");
+    }
     win_set_fullscreen(1);
     win_poll();
     int fs = win_is_fullscreen();

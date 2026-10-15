@@ -12,6 +12,7 @@ static SDL_Window *win;
 static SDL_Renderer *ren;
 static SDL_Texture *tex;
 static int hidden;            /* 1 = minimizada ou oculta: nao apresenta */
+static int scaling_mode = 1;  /* 0 integer, 1 fit (padrao), 2 stretch - mesmos valores de CFG_SCALING_* */
 static char drop_path[1024];
 static int drop_pending;
 static SDL_Window *pwin;       /* tela de progresso */
@@ -78,7 +79,7 @@ int win_open_ex(const char *title, int scale, int vsync) {
     if (!ren) ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
     if (!ren) { fprintf(stderr, "SDL_CreateRenderer: %s\n", SDL_GetError()); return -3; }
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
-    SDL_RenderSetLogicalSize(ren, 240, 160);
+    win_set_scaling(scaling_mode);
     tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 240, 160);
     if (!tex) { fprintf(stderr, "SDL_CreateTexture: %s\n", SDL_GetError()); return -4; }
     SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
@@ -87,6 +88,22 @@ int win_open_ex(const char *title, int scale, int vsync) {
 }
 
 int win_open(const char *title, int scale) { return win_open_ex(title, scale, 0); }
+
+/* integer = whole-number zoom with black bars; fit = aspect preserved; stretch = fills the window */
+void win_set_scaling(int mode) {
+    if (mode < 0 || mode > 2) mode = 1;
+    scaling_mode = mode;
+    if (!ren) return;
+    if (mode == 2) {
+        SDL_RenderSetIntegerScale(ren, SDL_FALSE);
+        SDL_RenderSetLogicalSize(ren, 0, 0);          /* RenderCopy with a NULL destination fills the target */
+    } else {
+        SDL_RenderSetLogicalSize(ren, 240, 160);
+        SDL_RenderSetIntegerScale(ren, mode == 0 ? SDL_TRUE : SDL_FALSE);
+    }
+}
+
+int win_get_scaling(void) { return scaling_mode; }
 
 void win_set_fullscreen(int on) {
     if (!win) return;

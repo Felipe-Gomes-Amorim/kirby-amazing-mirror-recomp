@@ -20,7 +20,7 @@ int main(int argc, char **argv) {
 
     /* ---- contract defaults ---- */
     cfg_defaults(&d);
-    CHECK(d.scale == 3 && d.fullscreen == 0 && d.integer_scale == 1 && d.vsync == 0, "[video] defaults");
+    CHECK(d.scale == 3 && d.fullscreen == 0 && d.scaling == CFG_SCALING_FIT && d.vsync == 0, "[video] defaults (scaling=fit)");
     CHECK(d.volume == 100 && d.mute == 0, "[audio] defaults");
     CHECK(!strcmp(d.key[CFG_BTN_A], "X") && !strcmp(d.key[CFG_BTN_B], "Z"), "keyboard by position: A=X B=Z");
     CHECK(!strcmp(d.key[CFG_BTN_L], "A") && !strcmp(d.key[CFG_BTN_R], "S"), "keyboard: L=A R=S");
@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
     CHECK(cfg_load(ini, &c) == 0 && cfg_equal(&c, &d), "defaults round trip");
     KirbyConfig w;
     cfg_defaults(&w);
-    w.scale = 5; w.fullscreen = 1; w.integer_scale = 0; w.vsync = 1; w.volume = 37; w.mute = 1;
+    w.scale = 5; w.fullscreen = 1; w.scaling = CFG_SCALING_STRETCH; w.vsync = 1; w.volume = 37; w.mute = 1;
     strcpy(w.key[CFG_BTN_A], "Q"); strcpy(w.key[CFG_BTN_B], "E"); strcpy(w.key[CFG_BTN_START], "Space");
     strcpy(w.key[CFG_BTN_UP], "W"); strcpy(w.key[CFG_BTN_DOWN], "Keypad 2");   /* names with a space */
     strcpy(w.pad[CFG_BTN_A], "x"); strcpy(w.pad[CFG_BTN_B], "y"); strcpy(w.pad[CFG_BTN_L], "lefttrigger");
@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
         const char *v = strstr(buf, "[video]"), *a = strstr(buf, "[audio]"), *k = strstr(buf, "[keyboard]"),
                    *p = strstr(buf, "[controller]"), *l = strstr(buf, "[launcher]");
         CHECK(v && a && k && p && l && v < a && a < k && k < p && p < l, "sections [video][audio][keyboard][controller][launcher]");
-        CHECK(strstr(buf, "integer_scale=0") && strstr(buf, "volume=37") && strstr(buf, "a=Q") && strstr(buf, "stick_as_dpad=0"),
+        CHECK(strstr(buf, "scaling=stretch") && !strstr(buf, "integer_scale") && strstr(buf, "volume=37") && strstr(buf, "a=Q") && strstr(buf, "stick_as_dpad=0"),
               "keys written as in the contract");
     }
 
@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
     write_text(ini, "scale=5\r\nmute=1\r\nfullscreen=1\r\nvsync=1\r\n");
     CHECK(cfg_load(ini, &c) == 0, "v1 flat file loads");
     CHECK(c.scale == 5 && c.mute == 1 && c.fullscreen == 1 && c.vsync == 1, "v1 flat values land in video/audio");
-    CHECK(c.volume == 100 && c.integer_scale == 1 && !strcmp(c.key[CFG_BTN_A], "X"), "v1: new fields take defaults");
+    CHECK(c.volume == 100 && c.scaling == CFG_SCALING_FIT && !strcmp(c.key[CFG_BTN_A], "X"), "v1: new fields take defaults");
     write_text(ini, "[kirby]\r\n; comment\r\nscale=2\r\nmute=1\r\nfullscreen=0\r\nvsync=1\r\n");
     cfg_load(ini, &c);
     CHECK(c.scale == 2 && c.mute == 1 && c.vsync == 1, "v1 [kirby] section loads");
@@ -94,12 +94,12 @@ int main(int argc, char **argv) {
           "A=Return duplicates Start=Return -> keyboard map reset to defaults");
 
     /* ---- validation ---- */
-    write_text(ini, "[video]\r\nscale=9\r\nfullscreen=2\r\nintegerscale=1\r\ninteger_scale=x\r\nvsync=-1\r\n"
+    write_text(ini, "[video]\r\nscale=9\r\nfullscreen=2\r\nintegerscale=1\r\nscaling=zoom\r\nvsync=-1\r\n"
                     "[audio]\r\nvolume=250\r\nmute=maybe\r\n[controller]\r\ndeadzone=99999\r\nstick_as_dpad=7\r\n"
                     "[launcher]\r\nshow=5\r\nlanguage=this-is-way-too-long\r\n");
     cfg_load(ini, &c);
     CHECK(c.scale == 3 && c.fullscreen == 0 && c.vsync == 0, "video out of range -> defaults");
-    CHECK(c.integer_scale == 1, "non-number -> default");
+    CHECK(c.scaling == CFG_SCALING_FIT, "unknown scaling value -> default (fit)");
     CHECK(c.volume == 100 && c.mute == 0, "audio out of range -> defaults");
     CHECK(c.deadzone == 8000 && c.stick_as_dpad == 1, "controller out of range -> defaults");
     CHECK(c.launcher_show == 1 && !strcmp(c.language, "en"), "launcher invalid -> defaults");
@@ -126,6 +126,62 @@ int main(int argc, char **argv) {
     CHECK(!strcmp(c.key[CFG_BTN_L], "Left Shift"), "SDL names with a space are accepted");
     CHECK(!strcmp(c.key[CFG_BTN_R], "Tab"), "trailing ; comment is cut from a value");
 
+    /* ---- scaling = integer | fit | stretch, and the integer_scale compatibility rules ---- */
+    CHECK(!strcmp(cfg_scaling_name(CFG_SCALING_INTEGER), "integer") && !strcmp(cfg_scaling_name(CFG_SCALING_FIT), "fit") &&
+          !strcmp(cfg_scaling_name(CFG_SCALING_STRETCH), "stretch"), "scaling names");
+    for (int sc = 0; sc < 3; sc++) {
+        KirbyConfig t;
+        cfg_defaults(&t);
+        t.scaling = sc;
+        cfg_save(ini, &t);
+        KirbyConfig u;
+        cfg_load(ini, &u);
+        CHECK(u.scaling == sc, "scaling round trip");
+    }
+    write_text(ini, "[video]\r\nscaling=Integer");
+    cfg_load(ini, &c);
+    CHECK(c.scaling == CFG_SCALING_INTEGER, "scaling=Integer (any case)");
+    write_text(ini, "[video]\r\nscaling = STRETCH ; comment");
+    cfg_load(ini, &c);
+    CHECK(c.scaling == CFG_SCALING_STRETCH, "scaling=STRETCH with spaces and comment");
+    write_text(ini, "[video]\r\nscale=4");
+    cfg_load(ini, &c);
+    CHECK(c.scaling == CFG_SCALING_FIT, "no scaling key -> fit (default)");
+    write_text(ini, "[video]\r\ninteger_scale=1");
+    cfg_load(ini, &c);
+    CHECK(c.scaling == CFG_SCALING_INTEGER, "v1/v2: only integer_scale=1 -> integer");
+    write_text(ini, "[video]\r\ninteger_scale=0");
+    cfg_load(ini, &c);
+    CHECK(c.scaling == CFG_SCALING_FIT, "v1/v2: only integer_scale=0 -> fit");
+    write_text(ini, "integer_scale=1\r\nscale=2");
+    cfg_load(ini, &c);
+    CHECK(c.scaling == CFG_SCALING_INTEGER && c.scale == 2, "v1 flat file with integer_scale=1 -> integer");
+    write_text(ini, "[video]\r\ninteger_scale=1\r\nscaling=stretch");
+    cfg_load(ini, &c);
+    CHECK(c.scaling == CFG_SCALING_STRETCH, "explicit scaling wins over integer_scale (any order)");
+    write_text(ini, "[video]\r\nscaling=stretch\r\ninteger_scale=1");
+    cfg_load(ini, &c);
+    CHECK(c.scaling == CFG_SCALING_STRETCH, "explicit scaling wins over integer_scale (reverse order)");
+    write_text(ini, "[video]\r\nscaling=zoom\r\ninteger_scale=1");
+    cfg_load(ini, &c);
+    CHECK(c.scaling == CFG_SCALING_INTEGER, "invalid scaling falls back to integer_scale");
+    write_text(ini, "[video]\r\nscaling=zoom\r\ninteger_scale=7");
+    cfg_load(ini, &c);
+    CHECK(c.scaling == CFG_SCALING_FIT, "invalid scaling + invalid integer_scale -> fit");
+    write_text(ini, "[audio]\r\nscaling=stretch");
+    cfg_load(ini, &c);
+    CHECK(c.scaling == CFG_SCALING_FIT, "scaling outside [video] is ignored");
+    KirbyConfig oob;
+    cfg_defaults(&oob);
+    oob.scaling = 9;
+    CHECK(cfg_validate(&oob) > 0 && oob.scaling == CFG_SCALING_FIT, "out-of-range scaling -> fit");
+    /* a v1 file saved by v2 no longer carries integer_scale but keeps the meaning */
+    write_text(ini, "integer_scale=1");
+    cfg_load(ini, &c);
+    cfg_save(ini, &c);
+    cfg_load(ini, &d);
+    CHECK(d.scaling == CFG_SCALING_INTEGER, "integer_scale=1 survives a re-save as scaling=integer");
+
     /* ---- save normalises garbage ---- */
     KirbyConfig bad;
     memset(&bad, 0, sizeof bad);
@@ -136,7 +192,7 @@ int main(int argc, char **argv) {
           "out-of-range numbers are written as their defaults");
     CHECK(!strcmp(c.key[CFG_BTN_A], "X") && !strcmp(c.pad[CFG_BTN_B], "a") && !strcmp(c.language, "en"),
           "empty names are written as defaults");
-    CHECK(c.integer_scale == 0 && c.stick_as_dpad == 0 && c.launcher_show == 0, "valid zeros are kept");
+    CHECK(c.scaling == CFG_SCALING_INTEGER && c.stick_as_dpad == 0 && c.launcher_show == 0, "valid zeros are kept");
 
     /* old v1-style positional initializer still compiles and means scale/mute/fullscreen/vsync */
     KirbyConfig legacy = { 5, 1, 1, 1 };

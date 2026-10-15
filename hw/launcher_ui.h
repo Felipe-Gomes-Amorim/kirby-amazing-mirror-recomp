@@ -8,7 +8,11 @@
  *          2 fast mode ready + full build running (you can play), 3 compiled version ready, 4 error.
  *   kl_run returns KL_PLAY, KL_QUIT or KL_PICK_ROM (the user clicked "Select ROM..." or dropped a file
  *   on the window; the dropped path, if any, is in kl_dropped_path()).
- * All UI text is English; the font has no accents. */
+ *
+ * The window follows the video options: size = 240*scale x 160*scale (never below 480x320, the logical
+ * canvas of the UI), "Fullscreen" applies to the launcher too, and "Scaling" picks how the canvas is
+ * mapped to the window: integer (whole-number zoom, black bars), fit (aspect preserved) or stretch
+ * (fills the window). All UI text is English; the font has no accents. */
 #ifndef LAUNCHER_UI_H
 #define LAUNCHER_UI_H
 #include <stdint.h>
@@ -37,12 +41,14 @@ KL_API const char *kl_dropped_path(void);        /* path dropped on the window (
 /* ---- test hooks (headless tests drive the UI with simulated events) ---- */
 KL_API void kl_set_poll_interval(int ms);         /* default 100 */
 KL_API int kl_test_widget(const char *id, int *x, int *y, int *w, int *h);  /* 1 = found; logical coords */
+KL_API int kl_test_enabled(const char *id);       /* 1 = exists and is enabled */
 KL_API const char *kl_test_focus(void);           /* id of the focused widget */
 KL_API void kl_test_set_focus(const char *id);
-KL_API int kl_test_snapshot(uint32_t *out, int cap, int *w, int *h);       /* ARGB of the last frame */
+KL_API int kl_test_snapshot(uint32_t *out, int cap, int *w, int *h);       /* ARGB of the last frame (KL_W x KL_H) */
 KL_API const char *kl_test_page(void);            /* "main" or "keyboard" / "controller" info page */
+KL_API void kl_test_video(int *win_w, int *win_h, int *fullscreen);        /* actual window size / state */
 
-#define KL_W 640
-#define KL_H 420
+#define KL_W 480    /* logical canvas */
+#define KL_H 320
 
 #endif

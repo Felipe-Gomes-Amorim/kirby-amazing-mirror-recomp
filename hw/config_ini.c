@@ -12,6 +12,9 @@ static const char *const DEF_PAD[CFG_BTN_COUNT] = { "b", "a", "leftshoulder", "r
 
 const char *cfg_button_name(int btn) { return btn >= 0 && btn < CFG_BTN_COUNT ? BTN[btn] : ""; }
 
+static const char *const SCALING[3] = { "integer", "fit", "stretch" };
+const char *cfg_scaling_name(int s) { return s >= 0 && s < 3 ? SCALING[s] : "fit"; }
+
 static void set_str(char *dst, size_t cap, const char *src) {
     strncpy(dst, src, cap - 1);
     dst[cap - 1] = 0;
@@ -31,7 +34,7 @@ void cfg_reset_controller(KirbyConfig *c) {
 void cfg_defaults(KirbyConfig *c) {
     memset(c, 0, sizeof *c);
     c->scale = 3; c->mute = 0; c->fullscreen = 0; c->vsync = 0;
-    c->integer_scale = 1; c->volume = 100;
+    c->scaling = CFG_SCALING_FIT; c->volume = 100;
     cfg_reset_keyboard(c);
     cfg_reset_controller(c);
     c->launcher_show = 1;
@@ -66,7 +69,7 @@ int cfg_validate(KirbyConfig *c) {
     fixes += clampi(&c->mute, 0, 1, 0);
     fixes += clampi(&c->fullscreen, 0, 1, 0);
     fixes += clampi(&c->vsync, 0, 1, 0);
-    fixes += clampi(&c->integer_scale, 0, 1, 1);
+    fixes += clampi(&c->scaling, 0, 2, CFG_SCALING_FIT);
     fixes += clampi(&c->volume, 0, 100, 100);
     fixes += clampi(&c->stick_as_dpad, 0, 1, 1);
     fixes += clampi(&c->deadzone, 0, 32767, 8000);
@@ -111,6 +114,9 @@ static int button_index(const char *k) {
     return -1;
 }
 
+/* v1/v2 compatibility: integer_scale seen without a valid scaling= */
+static int g_have_scaling, g_have_int, g_int_val;
+
 static void apply(KirbyConfig *c, const char *sec, const char *key, const char *val) {
     int n;
     int in_video = !*sec || !strcmp(sec, "kirby") || !strcmp(sec, "video");
@@ -119,7 +125,14 @@ static void apply(KirbyConfig *c, const char *sec, const char *key, const char *
     if (in_video && !strcmp(key, "scale")) { if (parse_int(val, &n)) c->scale = n; return; }
     if (in_video && !strcmp(key, "fullscreen")) { if (parse_int(val, &n)) c->fullscreen = n; return; }
     if (in_video && !strcmp(key, "vsync")) { if (parse_int(val, &n)) c->vsync = n; return; }
-    if (in_video && !strcmp(key, "integer_scale")) { if (parse_int(val, &n)) c->integer_scale = n; return; }
+    if (in_video && !strcmp(key, "integer_scale")) {
+        if (parse_int(val, &n) && (n == 0 || n == 1)) { g_have_int = 1; g_int_val = n; }
+        return;
+    }
+    if (in_video && !strcmp(key, "scaling")) {
+        for (int i = 0; i < 3; i++) if (ieq(val, SCALING[i])) { c->scaling = i; g_have_scaling = 1; }
+        return;
+    }
     if (in_audio && !strcmp(key, "mute")) { if (parse_int(val, &n)) c->mute = n; return; }
     if (in_audio && !strcmp(key, "volume")) { if (parse_int(val, &n)) c->volume = n; return; }
     if (!strcmp(sec, "keyboard")) {
@@ -145,6 +158,7 @@ int cfg_load(const char *ini_path, KirbyConfig *c) {
     FILE *f = fopen(ini_path, "rb");
     if (!f) return 1;
     char line[256], sec[32] = "";
+    g_have_scaling = g_have_int = g_int_val = 0;
     while (fgets(line, sizeof line, f)) {
         char *p = line;
         while (*p == ' ' || *p == '\t') p++;
@@ -173,6 +187,7 @@ int cfg_load(const char *ini_path, KirbyConfig *c) {
         apply(c, sec, key, val);
     }
     fclose(f);
+    if (!g_have_scaling && g_have_int) c->scaling = g_int_val ? CFG_SCALING_INTEGER : CFG_SCALING_FIT;
     cfg_validate(c);
     return 0;
 }
@@ -188,11 +203,11 @@ int cfg_save(const char *ini_path, const KirbyConfig *in) {
                "scale=%d\r\n"
                "; fullscreen: 1 = full screen (F11 toggles in game)\r\n"
                "fullscreen=%d\r\n"
-               "; integer_scale: 1 = scale by whole numbers only (sharp pixels)\r\n"
-               "integer_scale=%d\r\n"
+               "; scaling: integer = whole-number scale, fit = keep aspect ratio, stretch = fill the window\r\n"
+               "scaling=%s\r\n"
                "; vsync: 1 = sync presents with the monitor\r\n"
                "vsync=%d\r\n",
-            c.scale, c.fullscreen, c.integer_scale, c.vsync);
+            c.scale, c.fullscreen, SCALING[c.scaling], c.vsync);
     fprintf(f, "\r\n[audio]\r\n"
                "; volume: 0..100\r\n"
                "volume=%d\r\n"
@@ -228,7 +243,7 @@ void cfg_path_beside(const char *file_path, char *out, size_t cap) {
 
 int cfg_equal(const KirbyConfig *a, const KirbyConfig *b) {
     if (a->scale != b->scale || a->mute != b->mute || a->fullscreen != b->fullscreen || a->vsync != b->vsync ||
-        a->integer_scale != b->integer_scale || a->volume != b->volume || a->stick_as_dpad != b->stick_as_dpad ||
+        a->scaling != b->scaling || a->volume != b->volume || a->stick_as_dpad != b->stick_as_dpad ||
         a->deadzone != b->deadzone || a->launcher_show != b->launcher_show || strcmp(a->language, b->language))
         return 0;
     for (int i = 0; i < CFG_BTN_COUNT; i++)

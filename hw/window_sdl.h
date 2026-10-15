@@ -34,6 +34,11 @@ void win_close(void);
  * O ponteiro vale ate o proximo drop. */
 const char *win_dropped_path(void);
 
+/* mode: 0 integer (whole-number zoom, black bars), 1 fit (aspect preserved; default), 2 stretch (fills the
+ * window) - the CFG_SCALING_* values of config_ini.h. Can be called before or after win_open. */
+void win_set_scaling(int mode);
+int win_get_scaling(void);
+
 void win_set_fullscreen(int on);              /* tela cheia "desktop" (sem mudar a resolucao) */
 int win_is_fullscreen(void);
 const char *win_get_title(void);              /* titulo atual da janela do jogo */

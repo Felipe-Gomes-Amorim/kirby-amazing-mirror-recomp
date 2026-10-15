@@ -1,7 +1,7 @@
 /* config_ini.h - kirby.ini (v2): the single settings file read by the launcher UI and by kirby.exe.
  * No SDL dependency (key/button names are stored as strings; the SDL side validates them).
  *
- *   [video]       scale=3   fullscreen=0   integer_scale=1   vsync=0
+ *   [video]       scale=3   fullscreen=0   scaling=fit   vsync=0
  *   [audio]       volume=100   mute=0
  *   [keyboard]    a=X b=Z l=A r=S start=Return select=Backspace up=Up down=Down left=Left right=Right
  *   [controller]  a=b b=a l=leftshoulder r=rightshoulder start=start select=back
@@ -14,6 +14,10 @@
  * by physical POSITION: GBA A = X, GBA B = Z (like mGBA). Reserved keys (Escape, F11, F1) cannot be
  * bound; duplicate bindings reset the whole keyboard map to the defaults.
  *
+ * scaling = integer | fit | stretch (default fit): integer = whole-number scale with black bars, fit = keep the
+ * aspect ratio (letterbox), stretch = fill the whole window. Older files with only integer_scale=1 mean
+ * scaling=integer, integer_scale=0 means fit; an explicit valid scaling= always wins.
+ *
  * Compatibility with v1 (flat file or [kirby] section with scale/mute/fullscreen/vsync): those keys are
  * accepted in the root, in [kirby], and in their v2 section. The v1 field names are unchanged. */
 #ifndef CONFIG_INI_H
@@ -25,6 +29,8 @@ enum {   /* GBA button indexes for KirbyConfig.key[] / .pad[] */
     CFG_BTN_UP, CFG_BTN_DOWN, CFG_BTN_LEFT, CFG_BTN_RIGHT, CFG_BTN_COUNT
 };
 
+enum { CFG_SCALING_INTEGER = 0, CFG_SCALING_FIT = 1, CFG_SCALING_STRETCH = 2 };
+
 #define CFG_NAME_MAX 32
 
 typedef struct {
@@ -33,7 +39,7 @@ typedef struct {
     int mute;             /* 0/1, default 0 */
     int fullscreen;       /* 0/1, default 0 */
     int vsync;            /* 0/1, default 0 */
-    int integer_scale;    /* 0/1, default 1 */
+    int scaling;          /* CFG_SCALING_*, default CFG_SCALING_FIT */
     int volume;           /* 0..100, default 100 */
     /* [keyboard] SDL key names, indexed by CFG_BTN_* */
     char key[CFG_BTN_COUNT][CFG_NAME_MAX];
@@ -58,6 +64,8 @@ int cfg_load(const char *ini_path, KirbyConfig *c);
 int cfg_save(const char *ini_path, const KirbyConfig *c);
 /* "<dir of file_path>kirby.ini": C:\\games\\kirby.sav -> C:\\games\\kirby.ini */
 void cfg_path_beside(const char *file_path, char *out, size_t cap);
+/* "integer", "fit", "stretch" */
+const char *cfg_scaling_name(int scaling);
 /* "a", "b", "l", "r", "start", "select", "up", "down", "left", "right" */
 const char *cfg_button_name(int btn);
 /* 1 if the key name is reserved (Escape, F11, F1; case-insensitive) */
