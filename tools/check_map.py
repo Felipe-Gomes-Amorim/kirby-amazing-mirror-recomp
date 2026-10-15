@@ -10,7 +10,8 @@ Falha (exit 1) se:
   - o conjunto de continuacoes (filho,pai) perder pares
   - sumirem funcoes do baseline alem da tolerancia
 Invariantes absolutos (sem baseline): checksum do header ok, 0 funcoes `suspect` sem
-retorno, todo pai de continuacao e funcao do mapa, todo bloco RAM tem funcoes dentro.
+retorno, todo pai de continuacao e funcao do mapa, todo bloco RAM tem funcoes dentro,
+toda funcao de build/recomp/program/extra_functions.csv (runtime) esta no mapa.
 
 Uso:
   python tools/check_map.py [rom.gba]            # verifica
@@ -62,6 +63,22 @@ def invariants(m):
     if orphans:
         errs.append(f"{len(orphans)} continuacoes com pai que nao e funcao: "
                     f"{[(hex(c['child']), hex(c['parent'])) for c in orphans[:5]]}")
+    rt = ROOT / "build" / "recomp" / "program" / "extra_functions.csv"
+    if rt.exists():  # tudo que o runtime executou e o mapa nao tinha tem que estar no mapa
+        missing = []
+        for line in rt.read_text(encoding="utf-8", errors="replace").splitlines():
+            cell = line.split(",")[0].strip()
+            if not cell or cell.lower() == "addr":
+                continue
+            try:
+                a = int(cell, 16)
+            except ValueError:
+                continue
+            if 0x08000000 <= a < 0x0A000000 and a not in funcs:
+                missing.append(a)
+        if missing:
+            errs.append(f"{len(missing)} funcoes do runtime (extra_functions.csv) fora do mapa: "
+                        f"{[hex(a) for a in sorted(set(missing))[:8]]}")
     empty = [b["block"] for b in m["ram_code"]
              if not b["compressed"] and not any(f["ram_block"] == b["block"] for f in m["functions"])]
     if empty:

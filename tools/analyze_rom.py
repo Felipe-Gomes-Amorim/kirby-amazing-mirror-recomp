@@ -115,6 +115,7 @@ class Analyzer:
         self.cont = {}             # alvo -> {dona: motivo}: blocos de continuacao (bl como salto longo)
         self._lj_cache = {}
         self.extra_conts = []      # extras que caem dentro de outra funcao
+        self.func_members = {}     # endereco de instrucao -> primeira funcao que o contem (build_functions)
 
     # ---- acesso a ROM ----
     def off(self, addr):
@@ -674,6 +675,8 @@ class Analyzer:
                 stack.extend(ins.succ)
             if not seen:
                 continue
+            for x in seen:
+                self.func_members.setdefault(x, f)
             nbytes = sum(self.insns[a].size for a in seen)
             lo, hi = min(seen), max(seen) + self.insns[max(seen)].size
             has_tbl = any(t["site"] in seen for t in self.tables)
@@ -778,6 +781,46 @@ def read_extra_rows(path):
     return out
 
 
+def merge_runtime(args, out, prev_map, new_map, funcs):
+    """Relatorio do que o runtime trouxe + atualiza o baseline do check_map.py se nada regrediu."""
+    import datetime
+    rt = REPO / "build/recomp/program/extra_functions.csv"
+    prev = {f["addr"] for f in prev_map["functions"]} if prev_map else set()
+    rows = read_extra_rows(str(rt)) if rt.exists() else []
+    rt_addrs = {r["addr"] for r in rows if ROM_BASE <= r["addr"] < ROM_BASE + 0x2000000}
+    new_funcs = [f for f in new_map["functions"] if f["addr"] not in prev]
+    by_src = Counter(f["source"] for f in new_funcs)
+    rt_new = sorted(a for a in rt_addrs if a not in prev)
+    print(f"merge-runtime: {len(rt_addrs)} enderecos do runtime ({len(rt_new)} ainda nao estavam no mapa); "
+          f"+{len(new_funcs)} funcoes novas no total {dict(by_src)}")
+    for f in new_funcs:
+        print(f"    +0x{f['addr']:08X} {f['mode']} {f['source']}")
+    log = out / "merge_log.csv"
+    new_file = not log.exists()
+    with open(log, "a", newline="") as fh:
+        w = csv.writer(fh)
+        if new_file:
+            w.writerow(["when", "runtime_addrs", "runtime_new", "functions_new", "total_functions",
+                        "new_by_source", "new_addrs"])
+        w.writerow([datetime.datetime.now().isoformat(timespec="seconds"), len(rt_addrs), len(rt_new),
+                    len(new_funcs), len(new_map["functions"]), json.dumps(dict(by_src), sort_keys=True),
+                    " ".join(f"0x{f['addr']:08X}" for f in new_funcs)])
+    # baseline: so avanca se nada regrediu (a contagem pode crescer sem limite aqui)
+    import check_map
+    new_snap = check_map.snapshot(new_map)
+    if check_map.BASELINE.exists():
+        old = json.loads(check_map.BASELINE.read_text(encoding="utf-8"))
+        errs, _ = check_map.compare(old, new_snap, 1e9)
+        if errs:
+            print("merge-runtime: baseline NAO atualizado (regressao):")
+            for e in errs:
+                print("   -", e)
+            return
+    check_map.BASELINE.parent.mkdir(parents=True, exist_ok=True)
+    check_map.BASELINE.write_text(json.dumps(new_snap, separators=(",", ":")), encoding="utf-8")
+    print(f"merge-runtime: baseline atualizado ({len(new_snap['functions'])} funcoes)")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("rom", nargs="?", help="caminho da ROM (padrao: baserom.gba ou o unico *.gba da pasta)")
@@ -789,6 +832,10 @@ def main():
     ap.add_argument("--confidence", default="build/indirect/confidence.csv",
                     help="CSV addr,confidence (tools/score_functions.py); '' desliga")
     ap.add_argument("--no-ptr-scan", action="store_true", help="nao usar a heuristica de ponteiros")
+    ap.add_argument("--merge-runtime", action="store_true",
+                    help="absorve build/recomp/program/extra_functions.csv (descobertas em execucao), "
+                         "regera o mapa, registra o que entrou em merge_log.csv e atualiza o baseline "
+                         "do check_map.py (se nada regrediu)")
     args = ap.parse_args()
 
     rom_path = Path(args.rom) if args.rom else None
@@ -800,6 +847,9 @@ def main():
     rom = rom_path.read_bytes()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    prev_map = None
+    if args.merge_runtime and (out / "map.json").exists():
+        prev_map = json.loads((out / "map.json").read_text(encoding="utf-8"))
 
     hdr = parse_header(rom)
     print(f"ROM: {rom_path.name}  ({len(rom) / 1048576:.1f} MiB)")
@@ -979,6 +1029,34 @@ def main():
     }
     (out / "map.json").write_text(json.dumps(map_json, separators=(",", ":")), encoding="utf-8")
 
+    # alvos de switch (jumptables.csv) que nao pertencem a nenhuma funcao do mapa
+    orphans = []
+    n_targets = 0
+    for t in a.tables:
+        site_f = a.func_members.get(t["site"])
+        for tg in sorted(set(t["targets"])):
+            n_targets += 1
+            o = a.func_members.get(tg)
+            if o is None:
+                kind = "orphan"
+            elif site_f is not None and o != site_f:
+                kind = "other-function"
+            else:
+                continue
+            orphans.append((t["site"], t["base"], tg, site_f, o, kind))
+    with open(out / "orphan_switch_targets.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["site", "table", "target", "site_function", "target_function", "kind"])
+        for site, base, tg, sf, of, kind in orphans:
+            w.writerow([f"0x{site:08X}", f"0x{base:08X}", f"0x{tg:08X}",
+                        f"0x{sf:08X}" if sf is not None else "", f"0x{of:08X}" if of is not None else "", kind])
+    n_orph = sum(1 for o in orphans if o[5] == "orphan")
+    print(f"  switch: {n_targets} alvos distintos em {len(a.tables)} tabelas; {n_orph} orfaos, "
+          f"{len(orphans) - n_orph} em outra funcao (orphan_switch_targets.csv)")
+
+    if args.merge_runtime:
+        merge_runtime(args, out, prev_map, map_json, funcs)
+
     mb = lambda c: f"{c / 1024:9.1f} KiB ({100 * c / len(rom):4.1f}%)"
     print("\nResumo")
     print(f"  instrucoes: {n_arm} ARM, {n_thumb} Thumb")
@@ -1002,7 +1080,7 @@ def main():
     print(f"  funcoes sem retorno alcancavel: {sum(1 for r in funcs if not r['has_return'])}  "
           f"{dict(Counter(r['noreturn_kind'] for r in funcs if r['noreturn_kind']))}")
     print(f"\nArquivos em {out}/: header.json functions.csv jumptables.csv regions.csv unresolved.csv "
-          f"ram_code.csv map.json continuations.csv")
+          f"ram_code.csv map.json continuations.csv orphan_switch_targets.csv")
 
 
 if __name__ == "__main__":
