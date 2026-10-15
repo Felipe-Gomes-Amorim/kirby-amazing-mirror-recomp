@@ -27,7 +27,7 @@ WORK = os.path.join(BASE, 'work')
 LOG = os.path.join(BASE, 'launcher.log')
 # (tag printed by tools/build_all.py, label, weight in percent)
 STEPS = [('1/5', 'Analisando a ROM', 5), ('2/5', 'Ramos indiretos', 2), ('3/5', 'Confianca das funcoes', 2),
-         ('4/5', 'Analisando (2a passada)', 5), ('5/5', 'Recompilando e compilando o jogo', 86)]
+         ('4/5', 'Analisando (2a passada)', 5), ('5/5', 'Compilando o jogo', 86)]
 CONSOLE = False
 
 
@@ -243,6 +243,118 @@ def build(rom, out_dir, stamp, ui):
     return rc == 0, tail
 
 
+def tool_env():
+    env = dict(os.environ)
+    env['KIRBY_ZIG'] = os.path.join(APP, 'tools', 'zig', 'zig.exe')
+    env['SDL2_DIR'] = os.path.join(APP, 'sdl2')
+    env['PYTHONIOENCODING'] = 'utf-8'
+    env['PYTHONPATH'] = WORK
+    env['KIRBY_WORK'] = WORK
+    return env
+
+
+def pid_alive(pid):
+    try:
+        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))   # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(h)
+        return code.value == 259                                          # STILL_ACTIVE
+    except Exception:
+        return False
+
+
+def build_interp(rom, out_dir, ui=None):
+    """Interpreter-only kirby.exe: runtime + SDL + interpreter, none of the game compiled (seconds).
+    Runs as a child process while the progress window keeps pumping events (otherwise Windows flags the
+    window as "not responding")."""
+    exe = os.path.join(out_dir, 'interp', 'kirby.exe')
+    if os.path.exists(exe):
+        return exe
+    cmd = [sys.executable, '-m', 'recomp.program', '--rom', rom, '--out', out_dir, '--interp-only']
+    t0 = time.time()
+    p = subprocess.Popen(cmd, cwd=WORK, env=tool_env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, encoding='utf-8', errors='replace', creationflags=0x08000000)
+    out = []
+    threading.Thread(target=lambda: out.append(p.stdout.read()), daemon=True).start()
+    while p.poll() is None:
+        el = time.time() - t0
+        pct = 5 + 90 * (1 - 1 / (1 + el / 25.0))            # smooth, never reaches 100%
+        if ui is not None:
+            ui.update(pct, 'Preparando o modo rapido (%d s)' % el)
+        time.sleep(0.2)
+    time.sleep(0.2)
+    log('modo rapido: %.0fs rc=%d' % (time.time() - t0, p.returncode))
+    if p.returncode or not os.path.exists(exe):
+        log(''.join(out)[-800:].replace(chr(10), ' | '))
+        return None
+    return exe
+
+
+def background_build_main(rom, stamp):
+    """Entry point of the detached process (`launcher.py ROM STAMP --bg-build`): runs the full build
+    and records success, independently of whether the game window is still open."""
+    sys.path.insert(0, WORK)
+    from recomp import toolchain
+    out_dir = toolchain.default_out(sha1_of(rom))
+    os.makedirs(out_dir, exist_ok=True)
+    lock = os.path.join(out_dir, 'build.lock')
+    with open(lock, 'w') as f:
+        f.write(str(os.getpid()))
+    jobs = max(2, (os.cpu_count() or 4) - 2)             # leave cores for the game
+    cmd = [sys.executable, os.path.join(WORK, 'tools', 'build_all.py'), rom, '--jobs', str(jobs)]
+    log('construcao completa em segundo plano (%d jobs)' % jobs)
+    with open(os.path.join(BASE, 'build.log'), 'w', encoding='utf-8') as logf:
+        rc = subprocess.run(cmd, cwd=WORK, env=tool_env(), stdout=logf, stderr=subprocess.STDOUT,
+                            creationflags=0x08000000).returncode
+    try:
+        os.remove(lock)
+    except OSError:
+        pass
+    if rc == 0 and os.path.exists(os.path.join(out_dir, 'kirby.exe')):
+        with open(os.path.join(out_dir, 'build.ok'), 'w') as f:
+            f.write(stamp)
+        log('construcao completa pronta; a proxima abertura usa o jogo compilado')
+    else:
+        log('construcao completa falhou (rc=%s); veja build.log' % rc)
+    return rc
+
+
+def start_background_build(rom, out_dir, stamp):
+    """Launch the build as a separate low-priority, detached process (survives the game window)."""
+    lock = os.path.join(out_dir, 'build.lock')
+    if os.path.exists(lock):
+        try:
+            pid = open(lock).read().strip()
+            if pid_alive(pid):
+                log('ja existe uma construcao em andamento (pid %s)' % pid)
+                return False
+        except OSError:
+            pass
+    cmd = [sys.executable, os.path.abspath(__file__), rom, stamp, '--bg-build']
+    # CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS | DETACHED_PROCESS
+    subprocess.Popen(cmd, cwd=WORK, env=tool_env(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, creationflags=0x08000000 | 0x00004000 | 0x00000008)
+    return True
+
+
+def play_while_building(rom, out_dir, stamp, flags):
+    """First run: open the game NOW through the interpreter, finish the compiled build in the background.
+    Returns an exit code, or None to fall back to the blocking build."""
+    ui = UI()
+    ui.update(5, 'Preparando o modo rapido...')
+    exe_i = build_interp(rom, out_dir, ui)
+    ui.update(100, 'Abrindo o jogo...')
+    ui.close()
+    if not exe_i:
+        return None
+    start_background_build(rom, out_dir, stamp)
+    log('iniciando (interpretador) ' + exe_i)
+    return subprocess.run([exe_i, rom], cwd=os.path.dirname(exe_i)).returncode
+
+
 def main(argv):
     global CONSOLE
     flags = [a for a in argv if a.startswith('--')]
@@ -251,6 +363,8 @@ def main(argv):
     if '--version' in flags:
         print('KirbyRecomp launcher', VERSION)
         return 0
+    if '--bg-build' in flags:
+        return background_build_main(pos[0], pos[1])
     rom = find_rom(pos[0] if pos else None)
     if not rom:
         return 1
@@ -279,6 +393,12 @@ def main(argv):
         ready = False
     if not ready:
         os.makedirs(out_dir, exist_ok=True)
+        fast = '--no-fast' not in flags and '--build-only' not in flags
+        if fast:
+            code = play_while_building(rom, out_dir, stamp, flags)
+            if code is not None:
+                return code
+            log('modo rapido indisponivel; construindo antes de abrir')
         ui = UI()
         ui.update(0, 'Preparando... (so na primeira vez; leva alguns minutos)')
         good, tail = build(rom, out_dir, stamp, ui)

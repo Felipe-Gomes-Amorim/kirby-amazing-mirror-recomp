@@ -1517,3 +1517,19 @@ System32, `LOCALAPPDATA` vazio), caminho com espacos (`Kirby Recomp Test`), ROM 
   (zig MIT, SDL2 zlib, Python PSF, capstone BSD) em `README.txt`, e assinatura do exe (antivirus).
 - **Pacote enxuto, mesmo teste limpo:** 4 min 32 s no total (compilar 233 s), `kirby.exe` gerado, saida 0.
   Zip do pacote enxuto: **95 MB** (347 MB sem compactar). Nao ha nada do jogo dentro (auditoria passa).
+
+### Jogar enquanto compila (Riven) - launcher v0.2
+Primeira abertura sem build compilado: o launcher gera um `kirby.exe` so com runtime + SDL + interpretador
+(`recomp.program --interp-only`, ~1-2 s com cache do zig; **58 s com zig sem cache**), abre o jogo e dispara a
+construcao completa como processo separado (`launcher.py ROM STAMP --bg-build`: destacado, prioridade
+abaixo do normal, `cpu-2` jobs, `build.lock` com o PID). Ela sobrevive ao fechar da janela do jogo e grava
+`build.ok`; na proxima abertura usa o compilado.
+| Medida (ambiente limpo, zig frio, pacote de release) | |
+|---|---|
+| jogo (interpretador) na tela | **58 s** (usuario com zig quente: 10-15 s) |
+| construcao completa em segundo plano | 273 s desde o inicio (4 jobs) |
+| matar so a janela do jogo | a construcao continua e termina |
+| 2a abertura (`--build-only`) | **215 ms** |
+Bug achado pelo usuario: a janela de progresso aparecia como "Nao esta respondendo" porque a construcao do
+interpretador era chamada bloqueante (sem bombear eventos). Corrigido (`build_interp` com Popen + `ui.update`
+a cada 0,2 s). **Nao feito:** trocar do interpretado para o compilado na mesma sessao (DLL no mesmo processo).
