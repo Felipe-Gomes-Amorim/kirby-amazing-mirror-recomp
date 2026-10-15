@@ -318,9 +318,8 @@ class IniV1CompatTest(IniCase):
         self.assertEqual(find_key(cfg, 'scale'), '3')
         self.assertEqual(find_key(cfg, 'mute'), '1')
 
-    @unittest.expectedFailure
     def test_utf8_bom_at_start_is_accepted(self):
-        """BUG (hw/config_ini.c): o Bloco de Notas antigo grava BOM UTF-8; a 1a chave vira '\\xef\\xbb\\xbfscale'."""
+        """Regressao (corrigido): o Bloco de Notas antigo grava BOM UTF-8; a 1a chave nao pode se perder."""
         _, cfg = self.roundtrip(b'\xef\xbb\xbfscale=5\r\nmute=1\r\n')
         self.assertEqual(find_key(cfg, 'scale'), '5')
 
@@ -893,6 +892,435 @@ class UIScalingModeTest(unittest.TestCase):
             self.skipTest('launcher_ui.c still has only the INTEGER SCALING checkbox (3-mode selector pending)')
         for word in ('integer', 'fit', 'stretch'):
             self.assertIn(word, src.lower())
+
+
+# ----------------------------- [keyboard]/[controller] e analogico: SDL real com camada falsa -------------------
+# O harness inclui recomp/runtime/rt_input.c (RT_WINDOW) trocando, por macro, as chamadas de controle/teclado do
+# SDL por falsas controlaveis por stdin. Assim roda o rt_input_init()/rt_input_poll() REAIS, sem hardware.
+SDL_INPUT_C = r"""
+#define SDL_MAIN_HANDLED
+#include <SDL.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+static int fk_joys = 0;
+static int fk_axis[2];
+static Uint8 fk_btn[SDL_CONTROLLER_BUTTON_MAX + 8];
+static Uint8 fk_keys[SDL_NUM_SCANCODES];
+static char fk_obj;
+static int fk_NumJoysticks(void) { return fk_joys; }
+static SDL_bool fk_IsGameController(int i) { return SDL_TRUE; }
+static SDL_GameController *fk_Open(int i) { return (SDL_GameController *)&fk_obj; }
+static void fk_Close(SDL_GameController *c) {}
+static SDL_bool fk_Attached(SDL_GameController *c) { return fk_joys > 0 ? SDL_TRUE : SDL_FALSE; }
+static Sint16 fk_Axis(SDL_GameController *c, SDL_GameControllerAxis a) {
+    if (fk_joys <= 0) return 0;
+    return a == SDL_CONTROLLER_AXIS_LEFTX ? (Sint16)fk_axis[0] : a == SDL_CONTROLLER_AXIS_LEFTY ? (Sint16)fk_axis[1] : 0;
+}
+static Uint8 fk_Button(SDL_GameController *c, SDL_GameControllerButton b) { return fk_joys > 0 ? fk_btn[b] : 0; }
+static const Uint8 *fk_Keys(int *n) { if (n) *n = SDL_NUM_SCANCODES; return fk_keys; }
+#define SDL_NumJoysticks fk_NumJoysticks
+#define SDL_IsGameController fk_IsGameController
+#define SDL_GameControllerOpen fk_Open
+#define SDL_GameControllerClose fk_Close
+#define SDL_GameControllerGetAttached fk_Attached
+#define SDL_GameControllerGetAxis fk_Axis
+#define SDL_GameControllerGetButton fk_Button
+#define SDL_GetKeyboardState fk_Keys
+#define RT_WINDOW
+#include "RT_INPUT_C_PATH"
+static const char *BN[NBTN] = {"A", "B", "SELECT", "START", "RIGHT", "LEFT", "UP", "DOWN", "R", "L"};
+static int scan_of(const char *name) {
+    SDL_Keycode k = SDL_GetKeyFromName(name);
+    SDL_Scancode sc = k != SDLK_UNKNOWN ? SDL_GetScancodeFromKey(k) : SDL_SCANCODE_UNKNOWN;
+    if (sc == SDL_SCANCODE_UNKNOWN) sc = SDL_GetScancodeFromName(name);
+    return (int)sc;
+}
+int main(void) {
+    char line[600], cmd[40], arg[520];
+    SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);
+    while (fgets(line, sizeof line, stdin)) {
+        size_t n = strlen(line);
+        while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
+        arg[0] = 0;
+        if (sscanf(line, "%39s %519[^\n]", cmd, arg) < 1) continue;
+        if (!strcmp(cmd, "load")) {
+            int rc = rt_cfg_load(arg);
+            input_ready = 0;
+            rt_input_init();
+            printf("rc=%d\n", rc);
+        } else if (!strcmp(cmd, "dump")) {
+            for (int i = 0; i < NBTN; i++)
+                printf("%s %d %d\n", BN[i], (int)kb_sc[i], (int)pad_btn[i]);
+        } else if (!strcmp(cmd, "cfg")) {
+            printf("deadzone=%d stick=%d\n", rt_cfg.deadzone, rt_cfg.stick_as_dpad);
+        } else if (!strcmp(cmd, "scan")) {
+            printf("%d\n", scan_of(arg));
+        } else if (!strcmp(cmd, "pad")) {
+            printf("%d\n", (int)SDL_GameControllerGetButtonFromString(arg));
+        } else if (!strcmp(cmd, "joy")) {
+            fk_joys = atoi(arg);
+        } else if (!strcmp(cmd, "axis")) {
+            int x = 0, y = 0;
+            sscanf(arg, "%d %d", &x, &y);
+            fk_axis[0] = x; fk_axis[1] = y;
+        } else if (!strcmp(cmd, "btn")) {
+            char nm[64]; int v = 0;
+            sscanf(arg, "%63s %d", nm, &v);
+            int b = (int)SDL_GameControllerGetButtonFromString(nm);
+            if (b >= 0) fk_btn[b] = (Uint8)v;
+        } else if (!strcmp(cmd, "key")) {
+            char nm[64]; int v = 0;
+            sscanf(arg, "%63s %d", nm, &v);
+            int sc = scan_of(nm);
+            if (sc > 0) fk_keys[sc] = (Uint8)v;
+        } else if (!strcmp(cmd, "poll")) {
+            int cnt = atoi(arg) > 0 ? atoi(arg) : 1;
+            unsigned v = 0;
+            for (int i = 0; i < cnt; i++) v = rt_input_poll();
+            printf("poll=%04x\n", v);
+        }
+        fflush(stdout);
+    }
+    return 0;
+}
+"""
+
+GBA_BITS = ['A', 'B', 'SELECT', 'START', 'RIGHT', 'LEFT', 'UP', 'DOWN', 'R', 'L']   # ordem de KEYINPUT em rt_input.c
+UNKNOWN_SC, INVALID_BTN = 0, -1
+INPUT_EXE, INPUT_BIN, INPUT_SKIP = None, None, None
+
+
+def _build_input_harness():
+    global INPUT_EXE, INPUT_BIN, INPUT_SKIP
+    if INPUT_EXE or INPUT_SKIP:
+        return
+    if SKIP_REASON:
+        INPUT_SKIP = SKIP_REASON
+        return
+    sdl = _find_sdl()
+    if not sdl:
+        INPUT_SKIP = 'SDL2 development files not found (set SDL2_DIR or install to C:/libs/SDL2-2.32.2)'
+        return
+    inc, lib, bindir = sdl
+    d = tempfile.mkdtemp(dir=TMP)
+    src = os.path.join(d, 'input_sdl.c')
+    path = os.path.join(ROOT, 'recomp', 'runtime', 'rt_input.c').replace('\\', '/')
+    with open(src, 'w') as f:
+        f.write(SDL_INPUT_C.replace('RT_INPUT_C_PATH', path))
+    exe = os.path.join(d, 'input_sdl.exe' if os.name == 'nt' else 'input_sdl')
+    err = ''
+    for cc in _cc_candidates():
+        r = subprocess.run(cc + ['-O1', '-w', '-I', inc, src, '-L', lib, '-lSDL2', '-o', exe],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            INPUT_EXE, INPUT_BIN = exe, bindir
+            return
+        err = r.stderr[-250:]
+    INPUT_SKIP = 'could not compile rt_input.c with the fake SDL layer: ' + err
+
+
+class InputCase(unittest.TestCase):
+    """Base: roda o harness (rt_input.c real + SDL falso) com um script de comandos."""
+
+    def setUp(self):
+        _build_input_harness()
+        if INPUT_SKIP:
+            self.skipTest(INPUT_SKIP)
+        self.dir = tempfile.mkdtemp(dir=TMP)
+
+    def ini(self, text, name='k.ini'):
+        p = os.path.join(self.dir, name)
+        with open(p, 'wb') as f:
+            f.write(text.encode('utf-8'))
+        return p
+
+    def run_script(self, lines):
+        env = dict(os.environ)
+        if INPUT_BIN:
+            env['PATH'] = INPUT_BIN + os.pathsep + env.get('PATH', '')
+        r = subprocess.run([INPUT_EXE], input='\n'.join(lines) + '\n', capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip().split('\n') if r.stdout.strip() else []
+
+    def scan(self, name):
+        return int(self.run_script([f'scan {name}'])[0])
+
+    def pad(self, name):
+        return int(self.run_script([f'pad {name}'])[0])
+
+    def effective(self, ini_text):
+        """{botao GBA: (scancode, botao do controle)} que o JOGO realmente usa para esse arquivo."""
+        out = self.run_script([f'load {self.ini(ini_text)}', 'dump'])
+        res = {}
+        for line in out[1:]:
+            b, sc, pad = line.split()
+            res[b] = (int(sc), int(pad))
+        return res
+
+    def pressed(self, value_hex):
+        v = int(value_hex.split('=')[1], 16)
+        return {n for i, n in enumerate(GBA_BITS) if not (v >> i) & 1}
+
+
+DEFAULT_KB = {'A': 'X', 'B': 'Z', 'L': 'A', 'R': 'S', 'START': 'Return', 'SELECT': 'Backspace',
+              'UP': 'Up', 'DOWN': 'Down', 'LEFT': 'Left', 'RIGHT': 'Right'}
+DEFAULT_PAD = {'A': 'b', 'B': 'a', 'L': 'leftshoulder', 'R': 'rightshoulder', 'START': 'start', 'SELECT': 'back',
+               'UP': 'dpup', 'DOWN': 'dpdown', 'LEFT': 'dpleft', 'RIGHT': 'dpright'}
+KEY_SECTION = {'A': 'a', 'B': 'b', 'L': 'l', 'R': 'r', 'START': 'start', 'SELECT': 'select', 'UP': 'up',
+               'DOWN': 'down', 'LEFT': 'left', 'RIGHT': 'right'}
+
+
+class KeyboardControllerBindingTest(InputCase):
+    """[keyboard] / [controller]: nomes SDL validos, invalidos, reservados, duplicados, v1/v2 (jogo, SDL real)."""
+
+    def setUp(self):
+        super().setUp()
+        self.def_kb = {b: self.scan(n) for b, n in DEFAULT_KB.items()}
+        self.def_pad = {b: self.pad(n) for b, n in DEFAULT_PAD.items()}
+
+    def test_every_default_name_is_a_real_sdl_name(self):
+        for b in GBA_BITS:
+            with self.subTest(button=b):
+                self.assertNotEqual(self.def_kb[b], UNKNOWN_SC, DEFAULT_KB[b])
+                self.assertNotEqual(self.def_pad[b], INVALID_BTN, DEFAULT_PAD[b])
+
+    def test_defaults_without_any_file_or_with_v1_file(self):
+        for text in ('', 'scale=5\nmute=1\n', '[kirby]\nscale=2\n'):
+            with self.subTest(file=text):
+                eff = self.effective(text)
+                for b in GBA_BITS:
+                    self.assertEqual(eff[b], (self.def_kb[b], self.def_pad[b]), b)
+
+    def test_valid_custom_keyboard_names(self):
+        for name in ('Q', 'q', 'Space', 'Tab', 'Left Shift', 'F5', '1', 'Keypad 5', 'Right Ctrl'):
+            with self.subTest(name=name):
+                want = self.scan(name)
+                self.assertNotEqual(want, UNKNOWN_SC)
+                eff = self.effective(f'[keyboard]\na={name}\n')
+                self.assertEqual(eff['A'][0], want)
+                for b in GBA_BITS:           # os outros ficam como estavam
+                    if b != 'A':
+                        self.assertEqual(eff[b][0], self.def_kb[b], b)
+
+    def test_valid_controller_names(self):
+        for name in ('x', 'y', 'guide', 'leftstick', 'rightstick'):
+            with self.subTest(name=name):
+                eff = self.effective(f'[controller]\na={name}\n')
+                self.assertEqual(eff['A'][1], self.pad(name))
+
+    def test_duplicate_controller_binding_resets_only_the_controller_map(self):
+        # `back` ja e o padrao de SELECT: duplicata -> mapa do CONTROLE volta ao padrao; teclado intacto
+        eff = self.effective('[keyboard]\na=Q\n[controller]\na=back\n')
+        self.assertEqual(eff['A'], (self.scan('Q'), self.def_pad['A']))
+        for b in GBA_BITS:
+            self.assertEqual(eff[b][1], self.def_pad[b], b)
+
+    def test_duplicate_keyboard_binding_does_not_touch_the_controller_map(self):
+        eff = self.effective('[keyboard]\na=Z\n[controller]\na=x\n')
+        self.assertEqual(eff['A'], (self.def_kb['A'], self.pad('x')))
+
+    def test_names_are_case_insensitive(self):
+        for kb in ('RETURN', 'return', 'ReTuRn'):
+            with self.subTest(kb=kb):
+                self.assertEqual(self.effective(f'[keyboard]\nstart={kb}\n')['START'][0], self.def_kb['START'])
+        for pd in ('LEFTSHOULDER', 'LeftShoulder'):
+            with self.subTest(pad=pd):
+                self.assertEqual(self.effective(f'[controller]\nl={pd}\n')['L'][1], self.def_pad['L'])
+
+    def test_reserved_keys_fall_back_to_the_default_key(self):
+        for name in ('Escape', 'escape', 'F11', 'F1', 'f1'):
+            with self.subTest(name=name):
+                eff = self.effective(f'[keyboard]\na={name}\n')
+                self.assertEqual(eff['A'][0], self.def_kb['A'])
+
+    def test_reserved_keys_stay_unbound_for_every_gba_button(self):
+        for b, key in KEY_SECTION.items():
+            with self.subTest(button=b):
+                eff = self.effective(f'[keyboard]\n{key}=F11\n')
+                self.assertNotIn(eff[b][0], (self.scan('F11'), self.scan('F1'), self.scan('Escape')))
+
+    def test_duplicate_keyboard_binding_resets_the_whole_map(self):
+        eff = self.effective('[keyboard]\na=Z\nl=Q\n')       # Z ja e o padrao de B
+        for b in GBA_BITS:
+            self.assertEqual(eff[b][0], self.def_kb[b], b)
+
+    def test_two_distinct_custom_keys_are_kept(self):
+        eff = self.effective('[keyboard]\na=Q\nb=W\n')
+        self.assertEqual((eff['A'][0], eff['B'][0]), (self.scan('Q'), self.scan('W')))
+
+    @unittest.expectedFailure
+    def test_unknown_keyboard_name_falls_back_to_the_default_key(self):
+        """FALHA CONHECIDA (rt_input.c rt_input_init): nome que o SDL nao conhece deixa o botao SEM tecla
+        (kb_sc = UNKNOWN) em vez de voltar ao padrao ("invalid value falls back to its default")."""
+        for name in ('NotAKey', 'Q W E', 'Ctrl+Z', 'xx'):
+            with self.subTest(name=name):
+                eff = self.effective(f'[keyboard]\na={name}\n')
+                self.assertEqual(eff['A'][0], self.def_kb['A'])
+
+    @unittest.expectedFailure
+    def test_unknown_controller_name_falls_back_to_the_default_button(self):
+        """FALHA CONHECIDA (rt_input.c): `a=banana` deixa o A do controle sem botao (INVALID)."""
+        for name in ('banana', 'button1', 'triangle'):
+            with self.subTest(name=name):
+                eff = self.effective(f'[controller]\na={name}\n')
+                self.assertEqual(eff['A'][1], self.def_pad['A'])
+
+    def test_keyboard_and_controller_drive_the_same_gba_bit(self):
+        out = self.run_script([f'load {self.ini("[keyboard]" + chr(10) + "a=Q" + chr(10))}', 'joy 1', 'poll 2',
+                               'key Q 1', 'poll 1', 'key Q 0', 'btn b 1', 'poll 1', 'btn b 0', 'poll 1'])
+        polls = [l for l in out if l.startswith('poll=')]
+        self.assertEqual([self.pressed(p) for p in polls], [set(), {'A'}, {'A'}, set()])
+
+    def test_ui_and_game_resolve_the_same_keys_and_buttons(self):
+        """Leitor da UI (config_ini.c, nomes) -> SDL  ==  o que o jogo usa de fato, para varios arquivos."""
+        if EXE is None:
+            self.skipTest(SKIP_REASON or 'config_ini harness not built')
+        corpus = ['', '[keyboard]\na=Q\nb=W\nl=1\n', '[keyboard]\na=Escape\n', '[keyboard]\na=Z\nl=Q\n',
+                  '[controller]\na=x\nb=y\nl=guide\n', 'scale=4\n', '[KEYBOARD]\nSTART=space\n',
+                  '[keyboard]\nup=W\ndown=S\nleft=A\nright=D\n']
+        for text in corpus:
+            with self.subTest(file=text):
+                src = os.path.join(self.dir, 'ui_in.ini')
+                with open(src, 'w', encoding='utf-8') as f:
+                    f.write(text)
+                out = os.path.join(self.dir, 'ui_out.ini')
+                subprocess.run([EXE, 'rt', src, out], check=False)
+                with open(out, encoding='utf-8', errors='replace') as f:
+                    ui = parse_ini(f.read())
+                game = self.effective(text)
+                for b, key in KEY_SECTION.items():
+                    kb_name = ui.get(('keyboard', key), DEFAULT_KB[b])
+                    pad_name = ui.get(('controller', key), DEFAULT_PAD[b])
+                    self.assertEqual(self.scan(kb_name), game[b][0], f'{b} keyboard {kb_name}')
+                    self.assertEqual(self.pad(pad_name), game[b][1], f'{b} controller {pad_name}')
+
+    def test_launcher_reader_matches_for_keys_and_buttons(self):
+        sys.path.insert(0, os.path.join(ROOT, 'launcher'))
+        try:
+            import flow
+        finally:
+            sys.path.pop(0)
+        fn = getattr(flow, 'read_bindings', None)
+        if fn is None:
+            self.skipTest('launcher/flow.py does not read key/button bindings (only show/scaling); '
+                          'keys are kept across F1 -> Play because the launcher never rewrites them')
+        text = '[keyboard]\na=Q\n[controller]\nb=x\n'
+        got = fn(self.ini(text))
+        self.assertEqual(str(got['keyboard']['a']).lower(), 'q')
+
+
+class AnalogStickTest(InputCase):
+    """Analogico como direcional (stick_as_dpad/deadzone), pelo rt_input_poll() real com SDL falso."""
+    DZ = 8000   # entra em |v| >= DZ (inclusivo) e so solta abaixo de 85% de DZ (histerese)
+
+    def stick(self, x, y, dz=None, stick=1, extra=None, polls=1):
+        """Conecta um controle, aplica (x, y) e devolve o conjunto de botoes GBA pressionados."""
+        dz = self.DZ if dz is None else dz
+        text = f'[controller]\nstick_as_dpad={stick}\ndeadzone={dz}\n'
+        cmds = [f'load {self.ini(text)}', 'joy 1'] + (extra or []) + [f'axis {x} {y}', f'poll {polls}']
+        return self.pressed([l for l in self.run_script(cmds) if l.startswith('poll=')][-1])
+
+    def test_below_the_deadzone_is_ignored(self):
+        d = self.DZ - 1
+        for x, y in ((0, 0), (d, 0), (-d, 0), (0, d), (0, -d), (d, d), (5000, -5000), (-d, d)):
+            with self.subTest(axis=(x, y)):
+                self.assertEqual(self.stick(x, y), set())
+
+    def test_at_and_above_the_deadzone_presses_the_direction(self):
+        for d in (self.DZ, self.DZ + 1):
+            with self.subTest(value=d):
+                self.assertEqual(self.stick(d, 0), {'RIGHT'})
+                self.assertEqual(self.stick(-d, 0), {'LEFT'})
+                self.assertEqual(self.stick(0, d), {'DOWN'})
+                self.assertEqual(self.stick(0, -d), {'UP'})
+        self.assertEqual(self.stick(32767, 0), {'RIGHT'})
+        self.assertEqual(self.stick(-32768, 0), {'LEFT'})
+
+    def test_diagonals(self):
+        self.assertEqual(self.stick(20000, 20000), {'RIGHT', 'DOWN'})
+        self.assertEqual(self.stick(20000, -20000), {'RIGHT', 'UP'})
+        self.assertEqual(self.stick(-20000, 20000), {'LEFT', 'DOWN'})
+        self.assertEqual(self.stick(-20000, -20000), {'LEFT', 'UP'})
+        # um eixo dentro da zona morta: so o outro vale (sem diagonal "falsa")
+        self.assertEqual(self.stick(20000, self.DZ - 1), {'RIGHT'})
+        self.assertEqual(self.stick(-(self.DZ - 1), -20000), {'UP'})
+
+    def test_stick_as_dpad_off_ignores_the_stick_but_not_the_dpad(self):
+        self.assertEqual(self.stick(32767, -32768, stick=0), set())
+        self.assertEqual(self.stick(0, 0, stick=0, extra=['btn dpleft 1']), {'LEFT'})
+
+    def test_stick_and_opposite_dpad_cancel_each_other(self):
+        self.assertEqual(self.stick(20000, 0, extra=['btn dpleft 1']), set())
+
+    def test_deadzone_zero_reacts_to_any_deflection_but_not_to_rest(self):
+        self.assertEqual(self.stick(0, 0, dz=0), set())
+        self.assertEqual(self.stick(1, 0, dz=0), {'RIGHT'})
+        self.assertEqual(self.stick(-1, 0, dz=0), {'LEFT'})
+
+    def test_deadzone_at_the_upper_limit_only_full_deflection_counts(self):
+        out = self.run_script([f'load {self.ini("[controller]" + chr(10) + "deadzone=32767" + chr(10))}', 'cfg'])
+        self.assertIn('deadzone=32767', out[-1])
+        self.assertEqual(self.stick(32766, 0, dz=32767), set())
+        self.assertEqual(self.stick(-32766, 0, dz=32767), set())
+        # deflexao total conta nos DOIS sentidos (simetrico, inclusive o -32768 do int16)
+        self.assertEqual(self.stick(32767, 0, dz=32767), {'RIGHT'})
+        self.assertEqual(self.stick(-32768, 0, dz=32767), {'LEFT'})
+        self.assertEqual(self.stick(0, 32767, dz=32767), {'DOWN'})
+        self.assertEqual(self.stick(0, -32768, dz=32767), {'UP'})
+
+    def test_deadzone_out_of_range_in_the_file_falls_back(self):
+        for v in ('32768', '-1', 'abc', ''):
+            with self.subTest(v=v):
+                out = self.run_script([f'load {self.ini("[controller]" + chr(10) + "deadzone=" + v + chr(10))}', 'cfg'])
+                self.assertIn('deadzone=8000', out[-1])
+
+    def test_hysteresis_prevents_flicker_around_the_limit(self):
+        """Entra em |v| >= dz; depois de apertado so solta abaixo de 85% de dz (rt_input.c `hyst`)."""
+        cmds = [f'load {self.ini("[controller]" + chr(10) + "deadzone=8000" + chr(10))}', 'joy 1']
+        seq = [9000, 7900, 8100, 7900, 8100, 7950, 8050]
+        for v in seq:
+            cmds += [f'axis {v} 0', 'poll 1']
+        cmds += ['axis 0 0', 'poll 1']
+        states = [('RIGHT' in self.pressed(l)) for l in self.run_script(cmds) if l.startswith('poll=')]
+        transitions = sum(1 for a, b in zip(states, states[1:]) if a != b)
+        self.assertEqual(states[0], True)
+        self.assertEqual(transitions, 1, f'direction flickered: {states}')   # so 1: o soltar em (0, 0)
+        self.assertEqual(states[-1], False)
+
+    def test_hysteresis_release_threshold_and_re_arm(self):
+        cmds = [f'load {self.ini("[controller]" + chr(10) + "deadzone=8000" + chr(10))}', 'joy 1']
+        for v in (8000, 7000, 6800, 6799, 7900, 7999, 8000):   # 85% de 8000 = 6800
+            cmds += [f'axis {v} 0', 'poll 1']
+        states = [('RIGHT' in self.pressed(l)) for l in self.run_script(cmds) if l.startswith('poll=')]
+        # aperta em 8000; segura em 7000 e 6800; solta em 6799; so volta a apertar em >= 8000
+        self.assertEqual(states, [True, True, True, False, False, False, True])
+
+    def test_hysteresis_works_per_axis_and_per_direction(self):
+        cmds = [f'load {self.ini("[controller]" + chr(10) + "deadzone=8000" + chr(10))}', 'joy 1',
+                'axis 9000 -9000', 'poll 1', 'axis 7000 -7000', 'poll 1', 'axis -9000 7000', 'poll 1']
+        polls = [self.pressed(l) for l in self.run_script(cmds) if l.startswith('poll=')]
+        self.assertEqual(polls[0], {'RIGHT', 'UP'})
+        self.assertEqual(polls[1], {'RIGHT', 'UP'})          # ainda dentro da histerese
+        self.assertEqual(polls[2], {'LEFT'})                 # X inverteu (entra em LEFT); Y passou para +7000 (< 8000): solta o UP e nao entra em DOWN
+
+    def test_disconnect_in_the_middle_of_a_movement_releases_the_direction(self):
+        cmds = [f'load {self.ini("[controller]" + chr(10) + "deadzone=8000" + chr(10))}', 'joy 1',
+                'axis 20000 -20000', 'poll 2', 'joy 0', 'poll 1']
+        polls = [self.pressed(l) for l in self.run_script(cmds) if l.startswith('poll=')]
+        self.assertEqual(polls[0], {'RIGHT', 'UP'})
+        self.assertEqual(polls[1], set(), 'direction stayed latched right after the controller vanished')
+
+    def test_disconnect_then_reconnect_works_without_restarting(self):
+        cmds = [f'load {self.ini("[controller]" + chr(10) + "deadzone=8000" + chr(10))}', 'joy 1',
+                'axis 20000 0', 'poll 2', 'joy 0', 'poll 40', 'joy 1', 'poll 40']
+        polls = [self.pressed(l) for l in self.run_script(cmds) if l.startswith('poll=')]
+        self.assertEqual(polls, [{'RIGHT'}, set(), {'RIGHT'}])
+
+    def test_keyboard_keeps_working_while_the_controller_is_gone(self):
+        cmds = [f'load {self.ini("")}', 'joy 1', 'poll 2', 'joy 0', 'poll 40', 'key Right 1', 'poll 1']
+        last = [l for l in self.run_script(cmds) if l.startswith('poll=')][-1]
+        self.assertEqual(self.pressed(last), {'RIGHT'})
 
 
 if __name__ == '__main__':
