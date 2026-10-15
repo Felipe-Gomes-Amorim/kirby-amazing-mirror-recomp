@@ -51,7 +51,8 @@ def main():
     t['indirect'] = step('2/5 indirect branches and leaf functions', [py, 'tools/resolve_indirect.py', rom])
     t['score'] = step('3/5 confidence', [py, 'tools/score_functions.py', rom])
     t['analysis2'] = step('4/5 analysis (second pass)', [py, 'tools/analyze_rom.py', rom, '-o', 'build/analysis'])
-    cmd = [py, '-m', 'recomp.program', '--rom', rom, '--jobs', str(a.jobs)]
+    cmd = [py, '-m', 'recomp.program', '--rom', rom, '--jobs', str(a.jobs),
+           '--functions', os.path.join(ROOT, 'build', 'analysis', 'functions.csv')]
     cmd += ['--window', str(a.play)] if a.play else ['--frames', '700']
     t['build'] = step('5/5 recompile, converge, link', cmd)
     print('\nDone. ' + ', '.join(f'{k} {v:.0f}s' for k, v in t.items()))

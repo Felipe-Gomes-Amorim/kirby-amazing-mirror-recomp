@@ -17,10 +17,15 @@ import struct
 import subprocess
 import sys
 
-from unicorn import (Uc, UcError, UC_ARCH_ARM, UC_MODE_ARM, UC_HOOK_CODE, UC_PROT_ALL,
-                     UC_PROT_READ, UC_PROT_EXEC, UC_HOOK_MEM_FETCH_UNMAPPED,
-                     UC_HOOK_MEM_FETCH_PROT)
-from unicorn import arm_const as AC
+try:
+    from unicorn import (Uc, UcError, UC_ARCH_ARM, UC_MODE_ARM, UC_HOOK_CODE, UC_PROT_ALL,
+                         UC_PROT_READ, UC_PROT_EXEC, UC_HOOK_MEM_FETCH_UNMAPPED,
+                         UC_HOOK_MEM_FETCH_PROT)
+    from unicorn import arm_const as AC
+except ImportError:     # Unicorn is only the TEST oracle; building/playing the game does not need it
+    Uc = UcError = UC_ARCH_ARM = UC_MODE_ARM = UC_HOOK_CODE = UC_PROT_ALL = None
+    UC_PROT_READ = UC_PROT_EXEC = UC_HOOK_MEM_FETCH_UNMAPPED = UC_HOOK_MEM_FETCH_PROT = None
+    AC = None
 
 from .emit import emit_unit
 
@@ -29,7 +34,7 @@ RUNTIME = os.path.join(ROOT, 'recomp', 'runtime')
 ROM_BASE, EWRAM, IWRAM, SENTINEL = 0x08000000, 0x02000000, 0x03000000, 0x09000000
 EWRAM_SIZE, IWRAM_SIZE = 0x40000, 0x8000
 MAX_STEPS = 1000
-GPRS = [getattr(AC, 'UC_ARM_REG_R%d' % i) for i in range(15)]
+GPRS = [getattr(AC, 'UC_ARM_REG_R%d' % i) for i in range(15)] if AC else []
 
 
 class CpuStruct(C.Structure):

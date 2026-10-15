@@ -1,0 +1,205 @@
+"""Assemble the KirbyRecomp release folder (Riven).
+
+  python tools/package_release.py [--out dist/KirbyRecomp] [--zip] [--python-zip FILE] [--zig DIR] [--sdl2 DIR]
+
+Layout produced (no ROM, no generated game code, nothing derived from the game):
+  KirbyRecomp.exe          stub that runs python\\pythonw.exe app\\launcher\\launcher.py
+  python\\                  Python embeddable distribution + capstone
+  app\\launcher, recomp, hw, tools   sources (the C runtime is compiled on the user's machine)
+  app\\tools\\zig            portable Zig compiler (C compiler)
+  app\\sdl2                 SDL2 development files + SDL2.dll
+It then AUDITS the folder and fails if a ROM, a save, generated C or a built game exe slipped in.
+"""
+import argparse, fnmatch, os, re, shutil, subprocess, sys, urllib.request, zipfile
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PY_VER = '%d.%d.%d' % sys.version_info[:3]
+PY_URL = f'https://www.python.org/ftp/python/{PY_VER}/python-{PY_VER}-embed-amd64.zip'
+FORBIDDEN = ['*.gba', '*.sav', '*.sgm', 'gen_*.c', 'shard_*.c', 'table.c', 'rc_protos.h', 'kirby.exe',
+             'rt_boot.exe', 'ram_dump.bin', 'baserom*', 'functions.csv', 'map.json', 'jumptables.csv']
+FORBIDDEN_DIRS = {'build', '.git', '.venv', '__pycache__', 'frames'}
+
+
+def copy_tree(src, dst, skip_dirs=(), only_ext=None):
+    n = 0
+    for root, dirs, files in os.walk(src):
+        dirs[:] = [d for d in dirs if d not in FORBIDDEN_DIRS and d not in skip_dirs]
+        for f in files:
+            if only_ext and not f.lower().endswith(only_ext):
+                continue
+            rel = os.path.relpath(os.path.join(root, f), src)
+            out = os.path.join(dst, rel)
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            shutil.copy2(os.path.join(root, f), out)
+            n += 1
+    return n
+
+
+def find_zig(arg):
+    for c in [arg, os.path.join(ROOT, 'tools', 'zig'), os.path.join(ROOT, '.venv', 'Lib', 'site-packages', 'ziglang')]:
+        if c and os.path.exists(os.path.join(c, 'zig.exe')):
+            return c
+    sys.exit('zig.exe not found: pass --zig DIR (the ziglang pip package directory works)')
+
+
+def find_sdl2(arg):
+    for c in [arg, os.environ.get('SDL2_DIR'), os.path.join(ROOT, 'sdl2'),
+              'C:/libs/SDL2-2.32.2/x86_64-w64-mingw32', 'C:/libs/SDL2-2.32.2_64-w64-mingw32']:
+        if c and os.path.exists(os.path.join(c, 'include', 'SDL2', 'SDL.h')):
+            return c
+    sys.exit('SDL2 development files (MinGW, x86_64) not found: pass --sdl2 DIR')
+
+
+def find_capstone():
+    for c in [os.path.join(ROOT, '.venv', 'Lib', 'site-packages', 'capstone')]:
+        if os.path.isdir(c):
+            return c
+    try:
+        import capstone
+        return os.path.dirname(capstone.__file__)
+    except ImportError:
+        sys.exit('capstone not found: pip install capstone')
+
+
+def slim_zig(zdir):
+    """Keep only what compiling C for x86_64-windows-gnu needs (the compiler is 177 MB by itself; the
+    target libc headers for every OS are another ~120 MB). Verified by the build test after packaging."""
+    removed = 0
+    lib = os.path.join(zdir, 'lib')
+    drop = ['libcxx', 'libcxxabi', 'libtsan', 'docs', 'build-web', 'tsan', 'fuzzer', 'init']
+    libc = os.path.join(lib, 'libc')
+    for d in os.listdir(libc) if os.path.isdir(libc) else []:
+        if d not in ('mingw', 'include', 'wasi') and os.path.isdir(os.path.join(libc, d)):
+            drop.append(os.path.join('libc', d))
+    inc = os.path.join(libc, 'include')
+    for d in os.listdir(inc) if os.path.isdir(inc) else []:
+        if 'windows' not in d:           # keep any-windows-any / x86_64-windows-gnu ...
+            drop.append(os.path.join('libc', 'include', d))
+    for d in drop:
+        p = os.path.join(lib, d)
+        if os.path.isdir(p):
+            removed += sum(os.path.getsize(os.path.join(r, n)) for r, _, fs in os.walk(p) for n in fs)
+            shutil.rmtree(p)
+    print(f'  slimmed zig: -{removed / 1e6:.0f} MB')
+
+
+def run(cmd, **kw):
+    print('  $', ' '.join(str(c) for c in cmd))
+    subprocess.run(cmd, check=True, **kw)
+
+
+def audit(dist):
+    bad, big = [], []
+    for root, dirs, files in os.walk(dist):
+        for d in dirs:
+            if d in FORBIDDEN_DIRS and d != '__pycache__':
+                bad.append(os.path.join(root, d) + os.sep)
+        for f in files:
+            p = os.path.join(root, f)
+            if any(fnmatch.fnmatch(f.lower(), pat) for pat in FORBIDDEN):
+                bad.append(p)
+            if os.path.getsize(p) == 16 * 1024 * 1024:       # a 16 MiB file would be a ROM image
+                bad.append(p + '  (16 MiB: looks like a GBA ROM)')
+            elif f.lower().endswith('.exe') and 'zig' not in p and 'python' not in p \
+                    and f.lower() not in ('kirbyrecomp.exe',):
+                bad.append(p + '  (unexpected exe)')
+    return bad
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--out', default=os.path.join(ROOT, 'dist', 'KirbyRecomp'))
+    ap.add_argument('--python-zip')
+    ap.add_argument('--zig')
+    ap.add_argument('--sdl2')
+    ap.add_argument('--zip', action='store_true')
+    ap.add_argument('--full-zig', action='store_true', help='do not prune the Zig lib directory')
+    a = ap.parse_args()
+    dist = os.path.abspath(a.out)
+    zig, sdl, cap = find_zig(a.zig), find_sdl2(a.sdl2), find_capstone()
+    if os.path.exists(dist):
+        shutil.rmtree(dist)
+    os.makedirs(dist)
+    print('1/6 python (embeddable) + capstone')
+    pz = a.python_zip or os.path.join(ROOT, 'build', 'dist_cache', os.path.basename(PY_URL))
+    if not os.path.exists(pz):
+        os.makedirs(os.path.dirname(pz), exist_ok=True)
+        print('  downloading', PY_URL)
+        urllib.request.urlretrieve(PY_URL, pz)
+    pydir = os.path.join(dist, 'python')
+    with zipfile.ZipFile(pz) as z:
+        z.extractall(pydir)
+    pth = [f for f in os.listdir(pydir) if f.endswith('._pth')][0]
+    stem = pth[:-5]
+    with open(os.path.join(pydir, pth), 'w') as f:
+        f.write(f'{stem}.zip\n.\nLib\\site-packages\nimport site\n')
+    copy_tree(cap, os.path.join(pydir, 'Lib', 'site-packages', 'capstone'))
+    # the embeddable Python ignores PYTHONPATH; this .pth lets the launcher add its work tree to sys.path
+    with open(os.path.join(pydir, 'Lib', 'site-packages', 'kirby_work.pth'), 'w') as f:
+        f.write("import os, sys; w = os.environ.get('KIRBY_WORK'); w and sys.path.insert(0, w)\n")
+    print('2/6 sources')
+    app = os.path.join(dist, 'app')
+    copy_tree(os.path.join(ROOT, 'recomp'), os.path.join(app, 'recomp'), only_ext=('.py', '.c', '.h'))
+    copy_tree(os.path.join(ROOT, 'hw'), os.path.join(app, 'hw'), skip_dirs=('tests',), only_ext=('.c', '.h'))
+    copy_tree(os.path.join(ROOT, 'tools'), os.path.join(app, 'tools'), skip_dirs=('zig',),
+              only_ext=('.py', '.csv'))
+    os.makedirs(os.path.join(app, 'launcher'))
+    shutil.copy2(os.path.join(ROOT, 'launcher', 'launcher.py'), os.path.join(app, 'launcher', 'launcher.py'))
+    print('3/6 zig + SDL2')
+    copy_tree(zig, os.path.join(app, 'tools', 'zig'))
+    if not a.full_zig:
+        slim_zig(os.path.join(app, 'tools', 'zig'))
+    copy_tree(sdl, os.path.join(app, 'sdl2'))
+    print('4/6 build the progress-window DLL and the launcher stub (with the bundled zig)')
+    zexe = os.path.join(app, 'tools', 'zig', 'zig.exe')
+    inc, lib = os.path.join(sdl, 'include', 'SDL2'), os.path.join(sdl, 'lib')
+    run([zexe, 'cc', '-target', 'x86_64-windows-gnu', '-O2', '-shared', '-I', inc,
+         os.path.join(ROOT, 'hw', 'window_sdl.c'), os.path.join(ROOT, 'launcher', 'ui_dll.c'),
+         os.path.join(lib, 'libSDL2.dll.a'), '-o', os.path.join(app, 'launcher', 'kirby_ui.dll')])   # import lib, not the static one
+    shutil.copy2(os.path.join(sdl, 'bin', 'SDL2.dll'), os.path.join(app, 'launcher', 'SDL2.dll'))
+    run([zexe, 'cc', '-target', 'x86_64-windows-gnu', '-O2', '-municode', '-Wl,--subsystem,windows',
+         os.path.join(ROOT, 'launcher', 'stub.c'), '-o', os.path.join(dist, 'KirbyRecomp.exe')])
+    print('5/6 README')
+    with open(os.path.join(dist, 'README.txt'), 'w', encoding='utf-8') as f:
+        f.write(README)
+    print('6/6 audit')
+    bad = audit(dist)
+    if bad:
+        print('AUDIT FAILED - these must not be shipped:')
+        for b in bad:
+            print('   ', b)
+        sys.exit(1)
+    total = sum(os.path.getsize(os.path.join(r, n)) for r, _, fs in os.walk(dist) for n in fs)
+    print(f'audit ok. {dist}  {total / 1e6:.0f} MB')
+    for sub in ('python', 'app', 'app/tools/zig', 'app/sdl2'):
+        p = os.path.join(dist, sub)
+        s = sum(os.path.getsize(os.path.join(r, n)) for r, _, fs in os.walk(p) for n in fs)
+        print(f'   {sub:16s} {s / 1e6:6.1f} MB')
+    if a.zip:
+        z = shutil.make_archive(dist, 'zip', os.path.dirname(dist), os.path.basename(dist))
+        print('zip:', z, f'{os.path.getsize(z) / 1e6:.0f} MB')
+
+
+README = """Kirby & The Amazing Mirror - Recomp (unofficial)
+=================================================
+
+PT-BR
+  1. Tenha a SUA ROM (USA, game code B8KE): Kirby & The Amazing Mirror (USA).gba
+  2. Arraste a ROM sobre KirbyRecomp.exe (ou de duplo clique e escolha o arquivo).
+  3. Na primeira vez ele constroi o jogo no seu computador (alguns minutos). Depois abre direto.
+  O jogo gerado fica em %LOCALAPPDATA%\\KirbyRecomp. Nada do jogo e distribuido neste pacote.
+  Controles: Z=A  X=B  Enter=Start  Backspace=Select  setas  A/S=L/R  F11=tela cheia  Esc=sair.
+  Problemas: veja %LOCALAPPDATA%\\KirbyRecomp\\launcher.log e build.log.
+
+EN
+  1. Get YOUR OWN ROM (USA, game code B8KE).
+  2. Drag the ROM onto KirbyRecomp.exe (or double-click it and pick the file).
+  3. The first run builds the game on your machine (a few minutes); later runs start immediately.
+  The generated game lives in %LOCALAPPDATA%\\KirbyRecomp. No game data is shipped in this package.
+
+Unofficial, non-commercial; not affiliated with Nintendo or HAL Laboratory.
+Windows may warn about an unsigned program: the launcher runs a compiler and the program it produces.
+"""
+
+if __name__ == '__main__':
+    main()

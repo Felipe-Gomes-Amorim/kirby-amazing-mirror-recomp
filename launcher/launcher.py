@@ -1,0 +1,290 @@
+"""KirbyRecomp launcher (Riven).
+
+Drag a ROM onto KirbyRecomp.exe (or run it and pick the file). First run: verify the ROM, build the
+recompiled game on THIS machine (analysis -> recompile -> compile), then start it. Next runs: start.
+Nothing of the game is ever shipped; everything generated stays under %LOCALAPPDATA%\\KirbyRecomp.
+
+  KirbyRecomp.exe [ROM] [--build-only] [--rebuild] [--console] [--version]
+"""
+import ctypes
+import hashlib
+import json
+import os
+import queue
+import shutil
+import subprocess
+import sys
+import threading
+import time
+
+VERSION = '0.1'
+SUPPORTED = {'274b102b6d940f46861a92b4e65f89a51815c12c': 'Kirby & The Amazing Mirror (USA)'}
+HERE = os.path.dirname(os.path.abspath(__file__))            # <install>/app/launcher
+APP = os.path.dirname(HERE)                                  # <install>/app
+INSTALL = os.path.dirname(APP)
+BASE = os.path.join(os.environ.get('LOCALAPPDATA') or os.path.expanduser('~'), 'KirbyRecomp')
+WORK = os.path.join(BASE, 'work')
+LOG = os.path.join(BASE, 'launcher.log')
+# (tag printed by tools/build_all.py, label, weight in percent)
+STEPS = [('1/5', 'Analisando a ROM', 5), ('2/5', 'Ramos indiretos', 2), ('3/5', 'Confianca das funcoes', 2),
+         ('4/5', 'Analisando (2a passada)', 5), ('5/5', 'Recompilando e compilando o jogo', 86)]
+CONSOLE = False
+
+
+def log(msg):
+    os.makedirs(BASE, exist_ok=True)
+    with open(LOG, 'a', encoding='utf-8') as f:
+        f.write(time.strftime('%H:%M:%S ') + msg + '\n')
+    if CONSOLE:
+        print(msg, flush=True)
+
+
+def message(title, text, error=False):
+    log(('ERRO: ' if error else '') + title + ': ' + text.replace('\n', ' | '))
+    if CONSOLE:
+        return
+    try:
+        ctypes.windll.user32.MessageBoxW(None, text, title, 0x10 if error else 0x40)
+    except Exception:
+        print(title, text)
+
+
+def pick_rom():
+    """Win32 'open file' dialog through ctypes (no tkinter, nothing extra to ship)."""
+    from ctypes import wintypes
+
+    class OFN(ctypes.Structure):
+        _fields_ = [('lStructSize', wintypes.DWORD), ('hwndOwner', wintypes.HWND),
+                    ('hInstance', wintypes.HINSTANCE), ('lpstrFilter', wintypes.LPCWSTR),
+                    ('lpstrCustomFilter', wintypes.LPWSTR), ('nMaxCustFilter', wintypes.DWORD),
+                    ('nFilterIndex', wintypes.DWORD), ('lpstrFile', wintypes.LPWSTR),
+                    ('nMaxFile', wintypes.DWORD), ('lpstrFileTitle', wintypes.LPWSTR),
+                    ('nMaxFileTitle', wintypes.DWORD), ('lpstrInitialDir', wintypes.LPCWSTR),
+                    ('lpstrTitle', wintypes.LPCWSTR), ('Flags', wintypes.DWORD),
+                    ('nFileOffset', wintypes.WORD), ('nFileExtension', wintypes.WORD),
+                    ('lpstrDefExt', wintypes.LPCWSTR), ('lCustData', wintypes.LPARAM),
+                    ('lpfnHook', ctypes.c_void_p), ('lpTemplateName', wintypes.LPCWSTR),
+                    ('pvReserved', ctypes.c_void_p), ('dwReserved', wintypes.DWORD),
+                    ('FlagsEx', wintypes.DWORD)]
+    buf = ctypes.create_unicode_buffer(1024)
+    o = OFN()
+    o.lStructSize = ctypes.sizeof(OFN)
+    o.lpstrFilter = 'GBA ROM (*.gba)\0*.gba\0Todos os arquivos\0*.*\0\0'
+    o.lpstrFile = ctypes.cast(buf, wintypes.LPWSTR)
+    o.nMaxFile = 1024
+    o.lpstrTitle = 'Escolha a ROM de Kirby & The Amazing Mirror (USA)'
+    o.Flags = 0x00001000 | 0x00000800 | 0x00080000      # FILEMUSTEXIST | PATHMUSTEXIST | EXPLORER
+    return buf.value if ctypes.windll.comdlg32.GetOpenFileNameW(ctypes.byref(o)) else None
+
+
+def find_rom(arg):
+    if arg:
+        return arg
+    last = os.path.join(BASE, 'last_rom.txt')
+    cands = [open(last).read().strip()] if os.path.exists(last) else []
+    for d in (INSTALL, os.getcwd()):
+        cands.append(os.path.join(d, 'baserom.gba'))
+        if os.path.isdir(d):
+            cands += [os.path.join(d, f) for f in sorted(os.listdir(d)) if f.lower().endswith('.gba')]
+    for c in cands:
+        if c and os.path.isfile(c):
+            return c
+    return pick_rom()
+
+
+def sha1_of(path):
+    h = hashlib.sha1()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def source_stamp():
+    """Changes whenever the shipped sources change; decides restaging and rebuilding."""
+    h = hashlib.sha1(VERSION.encode())
+    for sub in ('recomp', 'hw', 'tools'):
+        for root, dirs, files in os.walk(os.path.join(APP, sub)):
+            dirs[:] = sorted(d for d in dirs if d not in ('zig', '__pycache__'))
+            for n in sorted(files):
+                if n.endswith(('.py', '.c', '.h', '.csv', '.ps1')):
+                    p = os.path.join(root, n)
+                    h.update(os.path.relpath(p, APP).encode())
+                    h.update(str(os.path.getsize(p)).encode())
+    return h.hexdigest()[:16]
+
+
+def stage_sources(stamp):
+    """Copy the (small) sources into a writable per-user work tree; the tools write build/ next to themselves."""
+    mark = os.path.join(WORK, '.stamp')
+    if os.path.exists(mark) and open(mark).read() == stamp:
+        return
+    log('preparando area de trabalho em ' + WORK)
+    for sub in ('recomp', 'hw', 'tools'):
+        dst = os.path.join(WORK, sub)
+        if os.path.exists(dst):
+            shutil.rmtree(dst)
+        shutil.copytree(os.path.join(APP, sub), dst,
+                        ignore=shutil.ignore_patterns('zig', '__pycache__', '*.pyc'))
+    with open(mark, 'w') as f:
+        f.write(stamp)
+
+
+class UI:
+    """Progress window from hw/window_sdl.c (kirby_ui.dll). Falls back to log-only."""
+
+    def __init__(self):
+        self.dll = None
+        path = os.path.join(HERE, 'kirby_ui.dll')
+        if os.path.exists(path) and not CONSOLE:
+            try:
+                os.add_dll_directory(HERE)
+                self.dll = ctypes.CDLL(path)
+                self.dll.kui_open.argtypes = [ctypes.c_char_p]
+                self.dll.kui_progress.argtypes = [ctypes.c_int, ctypes.c_char_p]
+                if self.dll.kui_open(b'Kirby Recomp') != 0:
+                    self.dll = None
+            except OSError as e:
+                log('janela de progresso indisponivel: %s' % e)
+                self.dll = None
+
+    def update(self, pct, text):
+        now = time.time()
+        label = text.split('  (')[0]
+        if now - getattr(self, '_last', 0) >= 5 or label != getattr(self, '_txt', None):
+            log('[%3d%%] %s' % (pct, text))
+            self._last, self._txt = now, label
+        if self.dll:
+            return bool(self.dll.kui_progress(int(pct), text.encode('ascii', 'replace')))
+        return True
+
+    def close(self):
+        if self.dll:
+            self.dll.kui_close()
+            self.dll = None
+
+
+def build(rom, out_dir, stamp, ui):
+    env = dict(os.environ)
+    env['KIRBY_ZIG'] = os.path.join(APP, 'tools', 'zig', 'zig.exe')
+    env['SDL2_DIR'] = os.path.join(APP, 'sdl2')
+    env['PYTHONIOENCODING'] = 'utf-8'
+    env['PYTHONPATH'] = WORK
+    env['KIRBY_WORK'] = WORK      # the embeddable Python ignores PYTHONPATH; kirby_work.pth honours this
+    cmd = [sys.executable, os.path.join(WORK, 'tools', 'build_all.py'), rom,
+           '--jobs', str(max(2, os.cpu_count() or 4))]
+    est = 200.0
+    tfile = os.path.join(BASE, 'timings.json')
+    if os.path.exists(tfile):
+        try:
+            est = float(json.load(open(tfile)).get('build_s', est))
+        except Exception:
+            pass
+    q = queue.Queue()
+    p = subprocess.Popen(cmd, cwd=WORK, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         creationflags=0x08000000, text=True, encoding='utf-8', errors='replace')
+
+    def pump():
+        for line in p.stdout:
+            q.put(line.rstrip())
+        q.put(None)
+    threading.Thread(target=pump, daemon=True).start()
+    done_w, cur = 0, 0
+    t0 = t_step = time.time()
+    tail = []
+    buildlog = open(os.path.join(BASE, 'build.log'), 'w', encoding='utf-8')
+    alive = True
+    while alive or not q.empty():
+        try:
+            line = q.get(timeout=0.5)
+            if line is None:
+                alive = False
+                continue
+            buildlog.write(line + '\n')
+            tail = (tail + [line])[-25:]
+            for i, (tag, _, _) in enumerate(STEPS):
+                if line.startswith('== ' + tag):
+                    done_w = sum(w for _, _, w in STEPS[:i])
+                    cur, t_step = i, time.time()
+        except queue.Empty:
+            pass
+        _, name, w = STEPS[cur]
+        el = time.time() - t_step
+        frac = 1 - 1 / (1 + el / (est if cur == len(STEPS) - 1 else 30.0))   # smooth, never reaches 100%
+        pct = min(99, done_w + w * frac)
+        mm, ss = divmod(int(time.time() - t0), 60)
+        if not ui.update(pct, '%s %s  (%d:%02d)' % (STEPS[cur][0], name, mm, ss)):
+            p.kill()
+            return False, ['cancelado']
+    rc = p.wait()
+    buildlog.close()
+    if rc == 0:
+        with open(tfile, 'w') as f:
+            json.dump({'build_s': time.time() - t0}, f)
+        with open(os.path.join(out_dir, 'build.ok'), 'w') as f:
+            f.write(stamp)
+    return rc == 0, tail
+
+
+def main(argv):
+    global CONSOLE
+    flags = [a for a in argv if a.startswith('--')]
+    pos = [a for a in argv if not a.startswith('--')]
+    CONSOLE = '--console' in flags
+    if '--version' in flags:
+        print('KirbyRecomp launcher', VERSION)
+        return 0
+    rom = find_rom(pos[0] if pos else None)
+    if not rom:
+        return 1
+    rom = os.path.abspath(rom)
+    if not os.path.isfile(rom):
+        message('Kirby Recomp', 'Arquivo nao encontrado:\n' + rom, True)
+        return 1
+    sha = sha1_of(rom)
+    if sha not in SUPPORTED:
+        message('Kirby Recomp', 'Esta ROM nao e suportada.\n\nSHA-1: %s\n\nSuportada: %s (SHA-1 %s).'
+                % (sha, ', '.join(SUPPORTED.values()), next(iter(SUPPORTED))), True)
+        return 1
+    os.makedirs(BASE, exist_ok=True)
+    with open(os.path.join(BASE, 'last_rom.txt'), 'w') as f:
+        f.write(rom)
+
+    stamp = source_stamp()
+    stage_sources(stamp)
+    sys.path.insert(0, WORK)
+    from recomp import toolchain                      # resolved from the staged copy
+    out_dir = toolchain.default_out(sha)
+    exe = os.path.join(out_dir, 'kirby.exe')
+    ok_mark = os.path.join(out_dir, 'build.ok')
+    ready = os.path.exists(exe) and os.path.exists(ok_mark) and open(ok_mark).read() == stamp
+    if '--rebuild' in flags:
+        ready = False
+    if not ready:
+        os.makedirs(out_dir, exist_ok=True)
+        ui = UI()
+        ui.update(0, 'Preparando... (so na primeira vez; leva alguns minutos)')
+        good, tail = build(rom, out_dir, stamp, ui)
+        ui.close()
+        if not good or not os.path.exists(exe):
+            if tail != ['cancelado']:
+                message('Kirby Recomp - falha na construcao',
+                        'A construcao falhou.\n\nUltimas linhas:\n' + '\n'.join(tail[-8:]) +
+                        '\n\nLog completo: ' + os.path.join(BASE, 'build.log'), True)
+            return 2
+    if '--build-only' in flags:
+        log('pronto: ' + exe)
+        return 0
+    log('iniciando ' + exe)
+    return subprocess.run([exe, rom], cwd=out_dir).returncode
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except SystemExit:
+        raise
+    except Exception:
+        import traceback
+        message('Kirby Recomp - erro inesperado', traceback.format_exc()[-1500:], True)
+        sys.exit(3)
