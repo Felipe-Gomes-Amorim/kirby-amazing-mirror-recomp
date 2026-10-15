@@ -116,6 +116,8 @@ class Analyzer:
         self._lj_cache = {}
         self.extra_conts = []      # extras que caem dentro de outra funcao
         self.func_members = {}     # endereco de instrucao -> primeira funcao que o contem (build_functions)
+        self.ram_aliases = {}      # enderecos RAM vistos pelo runtime (nao sao funcoes da ROM)
+        self.runtime_seen = {}     # endereco ROM -> fonte (runtime|runtime-log)
 
     # ---- acesso a ROM ----
     def off(self, addr):
@@ -762,12 +764,22 @@ DEFAULT_EXTRAS = [
     str(REPO / "build/indirect/new_functions.csv"),         # folhas de ponteiro (Riven)
     str(REPO / "build/indirect/m4a_handlers.csv"),          # handlers do M4A (tabela de saltos)
     str(REPO / "build/recomp/program/extra_functions.csv"), # descobertas em execucao (runtime do Nasus)
+    str(REPO / "build/analysis/runtime_seen.csv"),          # acumulado dos merges (sobrevive a logs apagados)
 ]
 
 
+def norm_addr(addr, mode):
+    """Espelhos de ROM (0x0A/0x0C) -> 0x08; bit Thumb limpo."""
+    if 0x0A000000 <= addr < 0x0E000000:
+        addr = ROM_BASE + (addr & 0x01FFFFFF)
+    return addr & ~1 if mode == "thumb" else addr & ~3
+
+
 def read_extra_rows(path):
-    """Linhas {addr:int, mode, source, tier}. Aceita com cabecalho ou sem (addr[,mode])."""
-    with open(path, newline="") as f:
+    """Linhas {addr:int, mode, source, tier}. Aceita CSV com ou sem cabecalho (addr[,mode,...])
+    e os unresolved*.log do runtime (`addr,mode,lr=..,sp=..`)."""
+    default_src = "runtime-log" if str(path).endswith(".log") else "runtime"
+    with open(path, newline="", errors="replace") as f:
         rows = [r for r in csv.reader(f) if r and r[0].strip()]
     if rows and rows[0][0].strip().lower() == "addr":
         head = [h.strip() for h in rows[0]]
@@ -776,25 +788,52 @@ def read_extra_rows(path):
         recs = [{"addr": r[0], "mode": r[1] if len(r) > 1 else "thumb"} for r in rows]
     out = []
     for r in recs:
-        out.append({"addr": int(r["addr"].strip(), 16), "mode": (r.get("mode") or "thumb").strip().lower(),
-                    "source": (r.get("source") or "runtime").strip(), "tier": (r.get("tier") or "").strip()})
+        try:
+            addr = int(r["addr"].strip(), 16)
+        except ValueError:
+            continue  # linha de texto livre do log
+        mode = (r.get("mode") or "thumb").strip().lower()
+        if mode not in ("thumb", "arm"):
+            mode = "thumb"
+        out.append({"addr": norm_addr(addr, mode), "mode": mode,
+                    "source": (r.get("source") or default_src).strip(), "tier": (r.get("tier") or "").strip()})
     return out
 
 
-def merge_runtime(args, out, prev_map, new_map, funcs):
+def merge_runtime(args, out, prev_map, new_map, funcs, a):
     """Relatorio do que o runtime trouxe + atualiza o baseline do check_map.py se nada regrediu."""
     import datetime
     rt = REPO / "build/recomp/program/extra_functions.csv"
     prev = {f["addr"] for f in prev_map["functions"]} if prev_map else set()
-    rows = read_extra_rows(str(rt)) if rt.exists() else []
-    rt_addrs = {r["addr"] for r in rows if ROM_BASE <= r["addr"] < ROM_BASE + 0x2000000}
+    rt_addrs = set(a.runtime_seen)
+    seen_src = Counter(a.runtime_seen.values())
     new_funcs = [f for f in new_map["functions"] if f["addr"] not in prev]
     by_src = Counter(f["source"] for f in new_funcs)
     rt_new = sorted(a for a in rt_addrs if a not in prev)
-    print(f"merge-runtime: {len(rt_addrs)} enderecos do runtime ({len(rt_new)} ainda nao estavam no mapa); "
-          f"+{len(new_funcs)} funcoes novas no total {dict(by_src)}")
+    print(f"merge-runtime: {len(rt_addrs)} enderecos ROM do runtime {dict(seen_src)} "
+          f"({len(rt_new)} ainda nao estavam no mapa); {len(a.ram_aliases)} enderecos RAM -> ram-alias "
+          f"(fora do mapa); +{len(new_funcs)} funcoes novas no total {dict(by_src)}")
     for f in new_funcs:
         print(f"    +0x{f['addr']:08X} {f['mode']} {f['source']}")
+    # acumulado: tudo que o runtime ja pediu, mesmo que o runtime apague/reescreva os logs depois
+    store = out / "runtime_seen.csv"
+    kept = {}
+    if store.exists():
+        with open(store, newline="") as fh:
+            for r in csv.DictReader(fh):
+                kept[int(r["addr"], 16)] = r
+    modes = {f["addr"]: f["mode"] for f in new_map["functions"]}
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    for ad, src in a.runtime_seen.items():
+        kept.setdefault(ad, {"addr": f"0x{ad:08X}", "mode": modes.get(ad, "thumb"), "source": src,
+                             "first_seen": now, "note": ""})
+    with open(store, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["addr", "mode", "source", "first_seen", "note"])
+        for ad in sorted(kept):
+            r = kept[ad]
+            w.writerow([r["addr"], r.get("mode", "thumb"), r.get("source", "runtime"),
+                        r.get("first_seen", ""), r.get("note", "")])
     log = out / "merge_log.csv"
     new_file = not log.exists()
     with open(log, "a", newline="") as fh:
@@ -881,12 +920,23 @@ def main():
     extra_files = DEFAULT_EXTRAS if args.extra_functions is None else args.extra_functions
     if "" in extra_files:
         extra_files = []
+    elif args.extra_functions is None:  # logs do runtime: PCs sem funcao recompilada
+        extra_files = extra_files + sorted(str(q) for q in (REPO / "build/recomp/program").glob("unresolved*.log"))
     for path in extra_files:
         if not Path(path).exists():
             continue  # ex.: o runtime ainda nao gravou extra_functions.csv
         added = known = inside = 0
         for row in read_extra_rows(path):
             addr, thumb = row["addr"], row["mode"] == "thumb"
+            if addr >> 24 in (2, 3):
+                # rotina copiada para RAM/pilha: o runtime resolve por conteudo; nao e funcao da ROM
+                a.ram_aliases.setdefault(addr, {"addr": addr, "mode": row["mode"], "files": set()})
+                a.ram_aliases[addr]["files"].add(Path(path).name)
+                continue
+            if a.off(addr) is None:
+                continue
+            if row["source"].startswith("runtime"):
+                a.runtime_seen.setdefault(addr, row["source"])
             if addr in a.funcs:
                 known += 1
                 continue
@@ -1021,6 +1071,8 @@ def main():
         } for r in funcs],
         "regions": [{"start": s0, "end": e0, "size": e0 - s0, "kind": k0} for s0, e0, k0 in runs(cov)],
         "ram_code": [{"block": k, **b} for k, b in enumerate(blocks)],
+        "ram_aliases": [{"addr": ad, "mode": d["mode"], "seen_in": sorted(d["files"])}
+                        for ad, d in sorted(a.ram_aliases.items())],
         "continuations": [{"child": t, "parent": o, "why": w} for t, d in sorted(a.cont.items())
                           for o, w in sorted(d.items())],
         "jump_tables": [{"site": t["site"], "table": t["base"], "mode": "thumb" if t["thumb"] else "arm",
@@ -1050,12 +1102,17 @@ def main():
         for site, base, tg, sf, of, kind in orphans:
             w.writerow([f"0x{site:08X}", f"0x{base:08X}", f"0x{tg:08X}",
                         f"0x{sf:08X}" if sf is not None else "", f"0x{of:08X}" if of is not None else "", kind])
+    with open(out / "ram_alias.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["addr", "mode", "seen_in", "kind"])
+        for ad, d in sorted(a.ram_aliases.items()):
+            w.writerow([f"0x{ad:08X}", d["mode"], " ".join(sorted(d["files"])), "ram-alias"])
     n_orph = sum(1 for o in orphans if o[5] == "orphan")
     print(f"  switch: {n_targets} alvos distintos em {len(a.tables)} tabelas; {n_orph} orfaos, "
           f"{len(orphans) - n_orph} em outra funcao (orphan_switch_targets.csv)")
 
     if args.merge_runtime:
-        merge_runtime(args, out, prev_map, map_json, funcs)
+        merge_runtime(args, out, prev_map, map_json, funcs, a)
 
     mb = lambda c: f"{c / 1024:9.1f} KiB ({100 * c / len(rom):4.1f}%)"
     print("\nResumo")
@@ -1080,7 +1137,7 @@ def main():
     print(f"  funcoes sem retorno alcancavel: {sum(1 for r in funcs if not r['has_return'])}  "
           f"{dict(Counter(r['noreturn_kind'] for r in funcs if r['noreturn_kind']))}")
     print(f"\nArquivos em {out}/: header.json functions.csv jumptables.csv regions.csv unresolved.csv "
-          f"ram_code.csv map.json continuations.csv orphan_switch_targets.csv")
+          f"ram_code.csv map.json continuations.csv orphan_switch_targets.csv ram_alias.csv")
 
 
 if __name__ == "__main__":
