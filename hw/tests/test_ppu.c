@@ -165,10 +165,103 @@ static void scene_b(const char *dir) {
     }
 }
 
+
+static const uint32_t *run_frame(void) { hw_step(FRAME); return hw_frame_ready(); }
+
+/* BG0 (prio 0) vermelho solido, BG1 (prio 1) azul solido, backdrop verde. */
+static void scene_c_setup(void) {
+    hw_reset();
+    gba_write16(0x05000000, c15(0, 31, 0));
+    gba_write16(0x05000000 + 2, c15(31, 0, 0));          /* banco 0 idx 1 */
+    gba_write16(0x05000000 + 34, c15(0, 0, 31));         /* banco 1 idx 1 */
+    for (int r = 0; r < 8; r++) gba_write32(0x06000000 + 32 + r * 4, 0x11111111);
+    for (int i = 0; i < 32 * 32; i++) {
+        gba_write16(0x06004000 + i * 2, 1);              /* BG0: tile 1 banco 0 */
+        gba_write16(0x06004800 + i * 2, 1 | 1 << 12);    /* BG1: tile 1 banco 1 */
+    }
+    gba_write16(0x04000008, 0x0800);                     /* BG0CNT prio 0 */
+    gba_write16(0x0400000A, 0x0901);                     /* BG1CNT prio 1 */
+}
+
+static void scene_c(const char *dir) {
+    const uint32_t RED = 0xFF0000, BLUE = 0x0000FF;
+    const uint32_t *f;
+    /* C1: janela 0 em x[40,80) y[20,60): dentro so BG1; fora BG0+BG1 */
+    scene_c_setup();
+    gba_write16(0x04000040, 40 << 8 | 80);
+    gba_write16(0x04000044, 20 << 8 | 60);
+    gba_write16(0x04000048, 0x0002);                      /* WININ win0: BG1 */
+    gba_write16(0x0400004A, 0x0003);                      /* WINOUT: BG0+BG1 */
+    gba_write16(0x04000000, 0x0003 << 8 | 0x2000);        /* modo 0, BG0+BG1, WIN0 */
+    f = run_frame();
+    CHECK(f != 0, "C1: frame");
+    if (f) {
+        ppm(dir, "ppu_window.ppm", f);
+        CHECK(f[30 * 240 + 50] == BLUE, "C1: dentro da janela so BG1");
+        CHECK(f[30 * 240 + 10] == RED, "C1: fora da janela BG0");
+        CHECK(f[30 * 240 + 79] == BLUE && f[30 * 240 + 80] == RED, "C1: x2 exclusivo");
+        CHECK(f[59 * 240 + 50] == BLUE && f[60 * 240 + 50] == RED, "C1: y2 exclusivo");
+        CHECK(f[19 * 240 + 50] == RED && f[20 * 240 + 50] == BLUE, "C1: y1 inclusivo");
+        CHECK(f[30 * 240 + 39] == RED && f[30 * 240 + 40] == BLUE, "C1: x1 inclusivo");
+    }
+    /* C2: alpha BG0 sobre BG1, EVA=8 EVB=8: (15,0,15) -> 0x7B007B */
+    scene_c_setup();
+    gba_write16(0x04000050, 0x0001 | 0x0040 | 0x0200);
+    gba_write16(0x04000052, 0x0808);
+    gba_write16(0x04000000, 0x0300);
+    f = run_frame();
+    CHECK(f && f[80 * 240 + 100] == 0x7B007B, "C2: alpha 8/16 + 8/16 = 0x7B007B");
+    /* C3: brighten BG0 EVY=8: (31,15,15) -> FF7B7B ; C4: darken: (16,0,0) -> 840000 */
+    scene_c_setup();
+    gba_write16(0x04000050, 0x0001 | 0x0080);
+    gba_write16(0x04000054, 8);
+    gba_write16(0x04000000, 0x0300);
+    f = run_frame();
+    CHECK(f && f[80 * 240 + 100] == 0xFF7B7B, "C3: brighten EVY=8 = 0xFF7B7B");
+    scene_c_setup();
+    gba_write16(0x04000050, 0x0001 | 0x00C0);
+    gba_write16(0x04000054, 8);
+    gba_write16(0x04000000, 0x0300);
+    f = run_frame();
+    CHECK(f && f[80 * 240 + 100] == 0x840000, "C4: darken EVY=8 = 0x840000");
+    /* C4b: alvo nao marcado => sem efeito */
+    scene_c_setup();
+    gba_write16(0x04000050, 0x0002 | 0x0040);              /* alvo 1 = BG1, topo e BG0 */
+    gba_write16(0x04000052, 0x0808);
+    gba_write16(0x04000000, 0x0300);
+    f = run_frame();
+    CHECK(f && f[80 * 240 + 100] == RED, "C4b: topo fora do alvo 1 nao mistura");
+
+    /* C5: mosaico BG0 H=4 V=2; tile 2 com idx((x+y)&7)+1, cor i = (i,0,31-i) */
+    hw_reset();
+    for (int i = 1; i <= 8; i++) gba_write16(0x05000000 + i * 2, c15(i, 0, 31 - i));
+    for (int y = 0; y < 8; y++) {
+        uint32_t row = 0;
+        for (int x = 0; x < 8; x++) row |= (uint32_t)(((x + y) & 7) + 1) << (x * 4);
+        gba_write32(0x06000000 + 64 + y * 4, row);
+    }
+    gba_write16(0x06004000, 2);                           /* (0,0) = tile 2; resto tile 0 (transparente) */
+    gba_write16(0x04000008, 0x0800 | 0x0040);             /* BG0CNT: mosaico */
+    gba_write16(0x0400004C, 3 | 1 << 4);                  /* H=4 (3+1), V=2 (1+1) */
+    gba_write16(0x04000000, 0x0100);
+    f = run_frame();
+    CHECK(f != 0, "C5: frame");
+    if (f) {
+        ppm(dir, "ppu_mosaic.ppm", f);
+        int bad = 0;
+        for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) {
+            int i = (((x - x % 4) + (y - y % 2)) & 7) + 1;
+            if (f[y * 240 + x] != x8(i, 0, 31 - i)) bad++;
+        }
+        CHECK(bad == 0, "C5: mosaico H4 V2 igual ao esperado (64 pixels)");
+    }
+}
+
 int main(int argc, char **argv) {
     const char *dir = argc > 1 ? argv[1] : ".";
     scene_a(dir);
     scene_b(dir);
+    scene_c(dir);
     CHECK(hw_get_framebuffer() != 0, "hw_get_framebuffer nao nulo");
     printf(fails ? "RESULTADO: %d falha(s)\n" : "RESULTADO: OK\n", fails);
     return fails != 0;

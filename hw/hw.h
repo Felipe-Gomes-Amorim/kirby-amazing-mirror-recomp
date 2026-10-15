@@ -21,6 +21,12 @@ void hw_set_keys(uint16_t keyinput);
 const uint32_t *hw_frame_ready(void);
 /* framebuffer 240x160 XRGB8888 (sempre valido; linhas ja renderizadas do quadro corrente) */
 const uint32_t *hw_get_framebuffer(void);
+/* Audio PCM (Direct Sound A/B). Saida estereo int16 intercalada (L,R) a hw_audio_rate() = 48000 Hz,
+ * gerada dentro de hw_step (retencao de ordem zero da amostra atual de cada FIFO; PSG ainda nao).
+ * Retorna quantos quadros (pares L,R) foram copiados (<= frames); o resto do buffer nao e tocado.
+ * Buffer interno de 16384 quadros: se ninguem le, os mais antigos sao descartados. */
+int hw_audio_read(int16_t *lr, int frames);
+int hw_audio_rate(void);
 #define HW_FB_W 240
 #define HW_FB_H 160
 
