@@ -19,5 +19,9 @@ void hw_step(uint32_t cycles);
 uint16_t hw_irq_pending(void);
 void hw_set_keys(uint16_t keyinput);
 const uint32_t *hw_frame_ready(void);
+/* framebuffer 240x160 XRGB8888 (sempre valido; linhas ja renderizadas do quadro corrente) */
+const uint32_t *hw_get_framebuffer(void);
+#define HW_FB_W 240
+#define HW_FB_H 160
 
 #endif

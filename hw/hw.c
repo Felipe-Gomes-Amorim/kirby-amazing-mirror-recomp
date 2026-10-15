@@ -20,6 +20,7 @@ static uint16_t keyinput;
 static uint16_t if_reg;
 static uint32_t line_cyc;
 static int vcount;
+static int32_t aff_x[2], aff_y[2];   /* ponto de referencia interno BG2/BG3 (24.8) */
 static uint8_t rd_ok[0x200];       /* por halfword: 1 = legivel; senao le 0 */
 
 typedef struct { uint16_t cnt; uint32_t acc; } Timer;
@@ -38,6 +39,7 @@ void hw_reset(void) {
     memset(io, 0, sizeof io); memset(pal, 0, sizeof pal); memset(vram, 0, sizeof vram);
     memset(oam, 0, sizeof oam); memset(fb, 0, sizeof fb); memset(tm, 0, sizeof tm);
     memset(dma, 0, sizeof dma); memset(rd_ok, 0, sizeof rd_ok);
+    memset(aff_x, 0, sizeof aff_x); memset(aff_y, 0, sizeof aff_y);
     frame_flag = 0; keyinput = 0x03FF; if_reg = 0; line_cyc = 0; vcount = 0;
     W16(DISPCNT, 0x0080);   /* forced blank, como a BIOS deixa */
     mark(0x00, 0x00); mark(0x04, 0x0E); mark(0x48, 0x4A); mark(0x50, 0x52); mark(0x60, 0x9E);
@@ -46,13 +48,20 @@ void hw_reset(void) {
     mark(0x200, 0x204); mark(0x208, 0x208);
 }
 
+static uint32_t io32(int o);
 /* ---------------- IRQ ---------------- */
+static int32_t sx28(uint32_t v) { v &= 0x0FFFFFFF; return (int32_t)(v << 4) >> 4; }
+static void aff_latch(int i) {
+    aff_x[i] = sx28(io32(0x28 + 0x10 * i));
+    aff_y[i] = sx28(io32(0x2C + 0x10 * i));
+}
 static void raise_if(uint16_t bits) { if_reg |= bits; }
 uint16_t hw_irq_pending(void) { return (R16(IME) & 1) ? (uint16_t)(R16(IE) & if_reg & 0x3FFF) : 0; }
 void hw_set_keys(uint16_t k) { keyinput = k & 0x03FF; }
 
 /* ---------------- DMA ---------------- */
-static uint32_t io32(int o) {
+static uint32_t io32(int o)
+{
     return io[o] | io[o + 1] << 8 | io[o + 2] << 16 | (uint32_t)io[o + 3] << 24;
 }
 static void dma_run(int n) {
@@ -146,6 +155,27 @@ static void render_text_bg(int b, int y, int32_t *out) {
     }
 }
 
+static void render_affine_bg(int b, int32_t *out) {
+    int base = 0x20 + 0x10 * (b - 2);
+    int pa = (int16_t)R16(base), pc = (int16_t)R16(base + 4);
+    uint16_t cnt = R16(0x08 + 2 * b);
+    uint32_t cbase = (cnt >> 2 & 3) * 0x4000u, sbase = (cnt >> 8 & 31) * 0x800u;
+    int wrap = cnt >> 13 & 1, dim = 128 << (cnt >> 14);
+    int32_t x = aff_x[b - 2], y = aff_y[b - 2];
+    for (int sx = 0; sx < 240; sx++, x += pa, y += pc) {
+        int tx = x >> 8, ty = y >> 8;
+        out[sx] = -1;
+        if (tx < 0 || tx >= dim || ty < 0 || ty >= dim) {
+            if (!wrap) continue;
+            tx &= dim - 1; ty &= dim - 1;
+        }
+        uint32_t t = vram[sbase + (uint32_t)(ty >> 3) * (dim >> 3) + (tx >> 3)];
+        uint32_t a = cbase + t * 64u + (ty & 7) * 8 + (tx & 7);
+        int idx = a < 0x18000 ? vram[a] : 0;
+        if (idx) out[sx] = P16(idx * 2);
+    }
+}
+
 static void render_objs(int y, int32_t *col, uint8_t *prio) {
     static const uint8_t sz[3][4][2] = {
         { {8,8},{16,16},{32,32},{64,64} }, { {16,8},{32,8},{32,16},{64,32} }, { {8,16},{8,32},{16,32},{32,64} } };
@@ -190,6 +220,7 @@ static void render_line(int y) {
     for (int b = 0; b < 4; b++) {
         if (!(dc >> (8 + b) & 1)) continue;
         if (mode == 0 || (mode == 1 && b < 2)) render_text_bg(b, y, bg[b]);
+        else if ((mode == 1 && b == 2) || (mode == 2 && b >= 2)) render_affine_bg(b, bg[b]);
         else if (b == 2 && mode == 3) { for (int x = 0; x < 240; x++) bg[2][x] = V16((y * 240 + x) * 2); }
         else if (b == 2 && mode == 4) {
             uint32_t base = (dc & 0x10) ? 0xA000 : 0;
@@ -197,7 +228,7 @@ static void render_line(int y) {
         } else if (b == 2 && mode == 5 && y < 128) {
             uint32_t base = (dc & 0x10) ? 0xA000 : 0;
             for (int x = 0; x < 160; x++) bg[2][x] = V16(base + (y * 160 + x) * 2);
-        }                                          /* mode 1/2 afim: nao suportado */
+        }
     }
     for (int x = 0; x < 240; x++) { ob[x] = -1; op[x] = 4; }
     if (dc & 0x1000) render_objs(y, ob, op);
@@ -217,12 +248,20 @@ static void render_line(int y) {
 
 /* ---------------- Tempo ---------------- */
 static void enter_hblank(void) {
-    if (vcount < 160) { render_line(vcount); dma_trigger(2); }
+    if (vcount < 160) {
+        render_line(vcount);
+        for (int i = 0; i < 2; i++) {
+            aff_x[i] += (int16_t)R16(0x22 + 0x10 * i);
+            aff_y[i] += (int16_t)R16(0x26 + 0x10 * i);
+        }
+        dma_trigger(2);
+    }
     if (R16(DISPSTAT) & 0x10) raise_if(0x02);
 }
 static void end_line(void) {
     line_cyc = 0;
     vcount = (vcount + 1) % LINES;
+    if (vcount == 0) { aff_latch(0); aff_latch(1); }
     uint16_t ds = R16(DISPSTAT);
     if (vcount == 160) {
         frame_flag = 1;
@@ -240,6 +279,7 @@ void hw_step(uint32_t cycles) {
         else if (line_cyc == CYC_LINE) end_line();
     }
 }
+const uint32_t *hw_get_framebuffer(void) { return fb; }
 const uint32_t *hw_frame_ready(void) {
     if (!frame_flag) return 0;
     frame_flag = 0; return fb;
@@ -290,6 +330,7 @@ static void io_wr16(uint32_t o, uint16_t v) {
         return;
     }
     W16(o, v);
+    if (o >= 0x28 && o <= 0x3E && (o & 0xF) >= 8 && (o & 0xF) <= 0xE) aff_latch((o >> 4) - 2);
 }
 
 uint32_t hw_read(uint32_t addr, int size) {
