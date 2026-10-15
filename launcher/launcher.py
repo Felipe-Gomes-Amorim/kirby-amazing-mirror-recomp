@@ -245,8 +245,8 @@ def build(rom, out_dir, stamp, ui):
 
 def tool_env():
     env = dict(os.environ)
-    env['KIRBY_ZIG'] = os.path.join(APP, 'tools', 'zig', 'zig.exe')
-    env['SDL2_DIR'] = os.path.join(APP, 'sdl2')
+    env.setdefault('KIRBY_ZIG', os.path.join(APP, 'tools', 'zig', 'zig.exe'))   # setdefault: dev overrides
+    env.setdefault('SDL2_DIR', os.path.join(APP, 'sdl2'))
     env['PYTHONIOENCODING'] = 'utf-8'
     env['PYTHONPATH'] = WORK
     env['KIRBY_WORK'] = WORK
@@ -355,6 +355,109 @@ def play_while_building(rom, out_dir, stamp, flags):
     return subprocess.run([exe_i, rom], cwd=os.path.dirname(exe_i)).returncode
 
 
+class _ProgressAdapter:
+    """build_interp() reports through ui.update(pct, text); the new flow reports through a callback."""
+    def __init__(self, cb):
+        self.cb = cb
+
+    def update(self, pct, text):
+        self.cb(pct, text)
+        return True
+
+
+class LauncherEnv:
+    """Side-effecting pieces for launcher/flow.py (see tests/test_launcher_flow.py for the fakes)."""
+
+    def __init__(self, rom, out_dir, stamp, flow_mod):
+        self.rom, self.out_dir, self.stamp = rom, out_dir, stamp
+        est = 240.0
+        try:
+            with open(os.path.join(BASE, 'timings.json')) as f:
+                est = float(json.load(f).get('build_s', est))
+        except Exception:
+            pass
+        self.monitor = flow_mod.BuildMonitor(out_dir, os.path.join(BASE, 'build.log'), stamp,
+                                             est_seconds=est, pid_alive=pid_alive)
+
+    def log(self, msg):
+        log(msg)
+
+    def compiled_exe(self):
+        return os.path.join(self.out_dir, 'kirby.exe')
+
+    def compiled_ready(self):
+        return self.monitor.done()
+
+    def ensure_fast_exe(self, progress):
+        return build_interp(self.rom, self.out_dir, _ProgressAdapter(progress))
+
+    def start_background_build(self):
+        return start_background_build(self.rom, self.out_dir, self.stamp)
+
+    def run_game(self, exe):
+        log('starting ' + exe)
+        return subprocess.run([exe, self.rom], cwd=os.path.dirname(exe)).returncode
+
+    def pick_new_rom(self):
+        rom = pick_rom()
+        if not rom or sha1_of(rom) not in SUPPORTED:
+            if rom:
+                message('Kirby Recomp', 'This ROM is not supported.', True)
+            return False
+        self.rom = os.path.abspath(rom)
+        with open(os.path.join(BASE, 'last_rom.txt'), 'w') as f:
+            f.write(self.rom)
+        return True
+
+
+class KlUI:
+    """kirby_ui.dll: kl_run(ini_path, poll) -> KL_PLAY | KL_QUIT | KL_PICK_ROM (written by the UI chat)."""
+
+    def __init__(self, flow_mod):
+        self.flow = flow_mod
+        self.dll = None
+        path = os.path.join(HERE, 'kirby_ui.dll')
+        if os.path.exists(path):
+            try:
+                os.add_dll_directory(HERE)
+                dll = ctypes.CDLL(path)
+                if hasattr(dll, 'kl_run'):
+                    dll.kl_run.argtypes = [ctypes.c_char_p, flow_mod.KlPoll]
+                    dll.kl_run.restype = ctypes.c_int
+                    self.dll = dll
+            except OSError as e:
+                log('kirby_ui.dll unavailable: %s' % e)
+
+    def available(self):
+        return self.dll is not None
+
+    def run(self, ini_path, poll):
+        return self.dll.kl_run(ini_path.encode('utf-8'), poll)
+
+
+def shift_held():
+    try:
+        return bool(ctypes.windll.user32.GetAsyncKeyState(0x10) & 0x8000)
+    except Exception:
+        return False
+
+
+def run_full_launcher(rom, out_dir, stamp, flags):
+    """The full launcher (settings screen + Play). Returns an exit code, or None when the UI DLL has no
+    kl_run yet and no fake UI was requested (the caller then keeps the previous behaviour)."""
+    sys.path.insert(0, HERE)
+    import flow
+    ui = KlUI(flow)
+    if not ui.available():
+        if not os.environ.get('KIRBY_FAKE_UI'):
+            return None
+        ui = flow.FakeUI(log=log, max_polls=5000, interval=0.2)   # dev stand-in: wait up to ~17 min
+        log('using the fake UI (KIRBY_FAKE_UI)')
+    env = LauncherEnv(rom, out_dir, stamp, flow)
+    ini_path = os.path.join(os.path.dirname(rom), 'kirby.ini')
+    return flow.Controller(env).run(ui, ini_path, shift_held=shift_held())
+
+
 def main(argv):
     global CONSOLE
     flags = [a for a in argv if a.startswith('--')]
@@ -391,6 +494,10 @@ def main(argv):
     ready = os.path.exists(exe) and os.path.exists(ok_mark) and open(ok_mark).read() == stamp
     if '--rebuild' in flags:
         ready = False
+    if '--build-only' not in flags and '--no-fast' not in flags and '--rebuild' not in flags:
+        code = run_full_launcher(rom, out_dir, stamp, flags)
+        if code is not None:
+            return code
     if not ready:
         os.makedirs(out_dir, exist_ok=True)
         fast = '--no-fast' not in flags and '--build-only' not in flags

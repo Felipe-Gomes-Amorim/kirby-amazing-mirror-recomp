@@ -82,8 +82,8 @@ class BootTest(unittest.TestCase):
             ROM, MAP, verbose=False, boot_args=['--timeout', '120', '--frames', '600'])
         self.assertEqual(rc, 0, err[-2000:])
         self.assertIn('RT_STOP frames', out)
-        self.assertIn('nao_resolvidos=0', out)
-        self.assertRegex(out, r'IRQ entregues=60[01]')
+        self.assertIn('unresolved=0', out)
+        self.assertRegex(out, r'IRQs delivered=60[01]')
 
     def test_interpreter_selftest_and_forced_fallback(self):
         import subprocess as sp
@@ -92,8 +92,8 @@ class BootTest(unittest.TestCase):
         r = sp.run([exe, ROM, '--selftest-interp', '--sav', 'none', '--timeout', '100'],
                    capture_output=True, text=True, timeout=150)
         self.assertEqual(r.returncode, 0, r.stderr[-1500:])
-        self.assertIn('0 divergencias', r.stderr)
-        self.assertIn('corpos SRAM em 3 enderecos da pilha: OK', r.stderr)
+        self.assertIn('0 divergences', r.stderr)
+        self.assertIn('SRAM bodies at 3 stack addresses: OK', r.stderr)
 
 
 if __name__ == '__main__':
