@@ -10,6 +10,7 @@
 #include "gba_rt.h"
 
 int rt_opt_stop_at_vblank_wait;
+void (*rt_frame_hook)(uint64_t);
 int rt_swi_count[256];
 
 #define BIOS_IF 0x03007FF8u
@@ -279,7 +280,9 @@ static int vblank_intr_wait(Cpu *c, uint32_t next) {
         if (c->stop) return 1;
     }
     c->pc = next;
-    if (rt_frames_limit && ++rt_frames_counted >= rt_frames_limit) {
+    rt_frames_counted++;
+    if (rt_frame_hook) rt_frame_hook(rt_frames_counted);
+    if (rt_frames_limit && rt_frames_counted >= rt_frames_limit) {
         c->stop = RT_STOP_FRAMES;
         return 1;
     }

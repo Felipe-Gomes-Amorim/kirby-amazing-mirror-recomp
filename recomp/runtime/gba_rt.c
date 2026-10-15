@@ -163,6 +163,7 @@ static int unresolved_rom(Cpu *c, uint32_t a) {
 
 void rt_call(Cpu *c) {
     uint32_t a = c->pc;
+    if (a == 0x0815917Cu && c->thumb) a = c->pc = 0x08159158u; /* ReadSramFast -> ReadSram */
     const RcFunc *f = lookup(a, c->thumb);
     if (!f && a >= 0x08000000u && a < 0x08000000u + gba_rom_size() && unresolved_rom(c, a)) return;
     if (!f) rt_abort(c, "endereco sem funcao recompilada (RAM/overlay ou ROM sem saida)");

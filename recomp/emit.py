@@ -14,6 +14,8 @@ COND = {
     10: '(cpu->n == cpu->v)', 11: '(cpu->n != cpu->v)',
     12: '(!cpu->z && cpu->n == cpu->v)', 13: '(cpu->z || cpu->n != cpu->v)',
 }
+# funcoes substituidas por outra equivalente (ReadSramFast copia ReadSram p/ a pilha)
+ALIASES = {0x0815917C: 0x08159158}
 SHFN = {'lsl': 'sh_lsl', 'lsr': 'sh_lsr', 'asr': 'sh_asr', 'ror': 'sh_ror'}
 
 
@@ -36,7 +38,7 @@ class Function:
 
 # ------------------------------------------------------------ discovery
 def discover(read16, entry, thumb, max_insns=300, max_span=0x400, jump_targets=frozenset(),
-             extra_seeds=()):
+             extra_seeds=(), indirect=None):
     """Segue o fluxo a partir de `entry`. Levanta Unsupported se algo no caminho
     nao for suportado. Desvios incondicionais para longe (> max_span) viram saida
     (tail call); `bl` e tratado como chamada que retorna."""
@@ -47,6 +49,8 @@ def discover(read16, entry, thumb, max_insns=300, max_span=0x400, jump_targets=f
             continue
         i = decode(read16, a, thumb)
         insns[a] = i
+        if indirect and a in indirect:     # tabela de saltos (switch): alvos do analisador
+            todo.extend(indirect[a])
         if len(insns) > max_insns:
             raise Unsupported('funcao grande demais')
         succ = []
@@ -306,7 +310,7 @@ class Emitter:
         return v.f['rm'] if v.kind == 'bx' and v.cond == AL else None
 
     def call(self, i):
-        t = i.f['target']
+        t = ALIASES.get(i.f['target'], i.f['target']) if i.thumb else i.f['target']
         ret = i.next | (1 if i.thumb else 0)
         out = ['cpu->r[14] = %s;' % hx(ret)]
         n = self.stub_reg(t) if i.thumb else None

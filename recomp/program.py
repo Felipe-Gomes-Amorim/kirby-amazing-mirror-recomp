@@ -35,16 +35,30 @@ def load_continuations(csv_path):
     return kids, jumps
 
 
+def load_jumptables(csv_path):
+    """build/analysis/jumptables.csv -> {endereco do salto: [alvos]} (so Thumb)."""
+    p = os.path.join(os.path.dirname(csv_path), 'jumptables.csv')
+    out = {}
+    if os.path.exists(p):
+        with open(p) as f:
+            for r in csv.DictReader(f):
+                if r['mode'] == 'thumb':
+                    out.setdefault(int(r['site'], 16), []).extend(
+                        int(t, 16) & ~1 for t in r['targets'].split())
+    return out
+
+
 def load_functions(rom, csv_path):
     funcs, bad = [], {}
     kids, jumps = load_continuations(csv_path)
+    jt = load_jumptables(csv_path)
     with open(csv_path) as f:
         rows = list(csv.DictReader(f))
     for row in rows:
         a, thumb = int(row['addr'], 16), row['mode'] == 'thumb'
         try:
             funcs.append(discover(rom.read16, a, thumb, max_insns=20000, max_span=0x100000,
-                                  jump_targets=jumps, extra_seeds=kids.get(a, ())))
+                                  jump_targets=jumps, extra_seeds=kids.get(a, ()), indirect=jt))
         except Unsupported as e:
             bad[a] = str(e)
     return funcs, bad
@@ -100,7 +114,7 @@ def build(rom, funcs, bad=None, jobs=8, nshards=16, verbose=True):
     # objetos em paralelo; so recompila o que mudou (hash do .c + headers)
     hdr = hashlib.sha1()
     for name in sorted(os.listdir(RUNTIME)):
-        if name.endswith('.h'):
+        if name == 'gba_cpu.h':   # unico header incluido pelo codigo gerado
             hdr.update(open(os.path.join(RUNTIME, name), 'rb').read())
     objs = []
 
@@ -116,7 +130,8 @@ def build(rom, funcs, bad=None, jobs=8, nshards=16, verbose=True):
                 raise RuntimeError('compilando %s:\n%s' % (src, r.stderr[-3000:]))
         return obj
 
-    rt_srcs = [os.path.join(RUNTIME, n) for n in ('gba_bus.c', 'gba_rt.c', 'gba_bios.c', 'rt_main.c')]
+    rt_srcs = [os.path.join(RUNTIME, n) for n in ('gba_bus.c', 'gba_rt.c', 'gba_bios.c', 'rt_main.c',
+                                                    'rt_script.c')]
     rt_srcs.append(os.path.join(ROOT, 'hw', 'hw.c'))   # strong: substitui os stubs fracos
     t1 = time.time()
     with ThreadPoolExecutor(jobs) as ex:
@@ -157,6 +172,11 @@ def iterate(rom_path, csv_path, jobs=8, max_iter=40, verbose=True, boot_args=())
     if os.path.exists(extra_csv):
         with open(extra_csv) as fh:
             extras = [l.strip().split(',') for l in fh if l.strip()]
+    m4a = os.path.join(ROOT, 'build', 'indirect', 'm4a_handlers.csv')   # Riven: handlers do M4A
+    if os.path.exists(m4a):
+        with open(m4a) as fh:
+            for row in csv.DictReader(fh):
+                extras.append([row['addr'][2:], row.get('mode', 'thumb')])
 
     def add_extra(addr, thumb):
         if addr in have:
@@ -229,15 +249,27 @@ def main():
     ap.add_argument('--jobs', type=int, default=8)
     ap.add_argument('--timeout', type=int, default=120, help='watchdog do runtime (s)')
     ap.add_argument('--frames', type=int, default=0, help='roda N quadros (0 = para na 1a espera)')
+    ap.add_argument('--keys', help='roteiro: "START@620,A@700+10"')
+    ap.add_argument('--snap', help='quadros p/ salvar em build/recomp/frames: "600,2000"')
+    ap.add_argument('--sav', help='arquivo de save (padrao: <rom>.sav; "none" desliga)')
     a = ap.parse_args()
-    args = ['--timeout', str(a.timeout), '--unresolved', os.path.join(OUT, 'unresolved.log'),
+    frames_dir = os.path.join(ROOT, 'build', 'recomp', 'frames')
+    os.makedirs(frames_dir, exist_ok=True)
+    args = ['--frames-dir', frames_dir, '--timeout', str(a.timeout), '--unresolved', os.path.join(OUT, 'unresolved.log'),
             '--ppm', os.path.join(OUT, 'last_frame.ppm')]
-    if os.path.exists(args[1]):
-        os.remove(args[1])
+    ppm = os.path.join(OUT, 'last_frame.ppm')
+    if os.path.exists(ppm):
+        os.remove(ppm)
     if a.frames:
         args += ['--frames', str(a.frames)]
+    for flag, val in (('--keys', a.keys), ('--snap', a.snap), ('--sav', a.sav)):
+        if val:
+            args += [flag, val]
     rc, out, err, overlays = iterate(a.rom, a.functions, a.jobs, boot_args=args)
     print(out)
+    for line in err.splitlines():
+        if line.startswith('[snap]'):
+            print(line)
     print(err[-3000:])
     return rc
 

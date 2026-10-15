@@ -17,6 +17,13 @@ extern uint64_t rt_irq_delivered, rt_irq_biosif_by_handler, rt_irq_biosif_by_run
 extern const char *rt_unresolved_path;
 const uint32_t *rt_last_frame(void);
 extern uint32_t rt_loop_site;
+extern void (*rt_frame_hook)(uint64_t frame); /* chamado ao fim de cada VBlankIntrWait */
+/* rt_script.c */
+int rt_script_keys(const char *spec);
+int rt_script_snaps(const char *spec);
+void rt_script_dir(const char *dir);
+void rt_script_install(void);
+void rt_script_sram(const char *path);
 void rt_irq_service(Cpu *);
 
 /* opcoes do HLE */

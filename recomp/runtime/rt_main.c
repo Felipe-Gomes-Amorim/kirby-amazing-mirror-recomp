@@ -55,13 +55,17 @@ int main(int argc, char **argv) {
     fclose(f);
     gba_load_rom(rom, (uint32_t)n);
     hw_reset();
-    const char *ppm = NULL;
+    const char *ppm = NULL, *sav = NULL;
     rt_opt_stop_at_vblank_wait = 1;
     hw_set_keys(0x03FF);
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--no-stop")) rt_opt_stop_at_vblank_wait = 0;
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) rt_dump_path = argv[++i];
         else if (!strcmp(argv[i], "--unresolved") && i + 1 < argc) rt_unresolved_path = argv[++i];
+        else if (!strcmp(argv[i], "--keys") && i + 1 < argc) { if (rt_script_keys(argv[++i])) { fprintf(stderr, "--keys invalido"); return 1; } }
+        else if (!strcmp(argv[i], "--snap") && i + 1 < argc) rt_script_snaps(argv[++i]);
+        else if (!strcmp(argv[i], "--frames-dir") && i + 1 < argc) rt_script_dir(argv[++i]);
+        else if (!strcmp(argv[i], "--sav") && i + 1 < argc) sav = argv[++i];
         else if (!strcmp(argv[i], "--stop-on-unresolved")) { extern int rt_stop_on_unresolved; rt_stop_on_unresolved = 1; }
         else if (!strcmp(argv[i], "--ppm") && i + 1 < argc) ppm = argv[++i];
         else if (!strcmp(argv[i], "--trace-psr")) { extern int rt_trace_psr; rt_trace_psr = 200; }
@@ -72,6 +76,18 @@ int main(int argc, char **argv) {
         }
     }
 
+    {   /* save: --sav FILE | <rom>.sav | "none" */
+        static char def[1024];
+        if (!sav) {
+            snprintf(def, sizeof def, "%s", argv[1]);
+            char *dot = strrchr(def, '.');
+            if (dot) strcpy(dot, ".sav");
+            else strcat(def, ".sav");
+            sav = def;
+        }
+        if (strcmp(sav, "none")) rt_script_sram(sav);
+    }
+    rt_script_install();
     rt_cpu_reset(&cpu);
     if (watchdog_s) {
 #ifdef _WIN32
