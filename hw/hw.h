@@ -19,6 +19,11 @@ void hw_step(uint32_t cycles);
 uint16_t hw_irq_pending(void);
 void hw_set_keys(uint16_t keyinput);
 const uint32_t *hw_frame_ready(void);
+/* Como hw_step, mas PARA no instante em que uma interrupcao habilitada (IME&IE&IF) passa a estar
+ * pendente e devolve quantos ciclos consumiu (<= cycles). O chamador entrega o IRQ e depois continua
+ * com o que sobrou (cycles - retorno). Evita latencia de IRQ de ate `cycles` ciclos quando o
+ * runtime avanca o hw em saltos grandes (ver NOTES.md 'Estalo no som'). */
+uint32_t hw_step_irq(uint32_t cycles);
 /* framebuffer 240x160 XRGB8888 (sempre valido; linhas ja renderizadas do quadro corrente) */
 const uint32_t *hw_get_framebuffer(void);
 /* Audio PCM (Direct Sound A/B). Saida estereo int16 intercalada (L,R) a hw_audio_rate() = 48000 Hz,

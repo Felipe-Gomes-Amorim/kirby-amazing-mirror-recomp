@@ -310,6 +310,20 @@ static void tm_ticks(int t, uint32_t n) {
         }
     }
 }
+/* ciclos ate o proximo estouro de um timer ligado e nao em cascata (UINT32_MAX = nenhum) */
+static uint32_t timer_next(void) {
+    static const uint32_t div[4] = { 1, 64, 256, 1024 };
+    uint32_t best = 0xFFFFFFFFu;
+    for (int t = 0; t < 4; t++) {
+        uint16_t ctl = R16(0x102 + 4 * t);
+        if (!(ctl & 0x80) || ((ctl & 4) && t > 0)) continue;
+        uint32_t dv = div[ctl & 3];
+        uint32_t need = (0x10000u - tm[t].cnt) * dv - tm[t].acc;
+        if (need == 0) need = 1;
+        if (need < best) best = need;
+    }
+    return best;
+}
 static void timers_advance(uint32_t c) {
     static const uint32_t div[4] = { 1, 64, 256, 1024 };
     for (int t = 0; t < 4; t++) {
@@ -543,24 +557,31 @@ static void end_line(void) {
     }
     if (vcount == (ds >> 8) && (ds & 0x20)) raise_if(0x04);
 }
-void hw_step(uint32_t cycles) {
+static uint32_t step_core(uint32_t cycles, int stop_on_irq) {
+    uint32_t done = 0;
+    uint16_t p0 = stop_on_irq ? hw_irq_pending() : 0;
     while (cycles) {
         uint32_t to = line_cyc < CYC_HBL ? CYC_HBL - line_cyc : CYC_LINE - line_cyc;
         uint32_t c = cycles < to ? cycles : to;
 #ifdef HW_STEP_CAP
         if (c > HW_STEP_CAP) c = HW_STEP_CAP;       /* so para medir a versao antiga (passo fixo) */
 #else
+        { uint32_t tn = timer_next(); if (c > tn) c = tn; }   /* estouro de timer cai exatamente no fim do passo */
         if (R16(0x84) & 0x80) {                      /* audio ligado: no maximo ate a proxima amostra de saida */
             uint32_t to_s = (uint32_t)((16777216ull - a_acc + AUDIO_RATE - 1) / AUDIO_RATE);
             if (to_s == 0) to_s = 1;
             if (c > to_s) c = to_s;
         }
 #endif
-        timers_advance(c); audio_gen(c); line_cyc += c; cycles -= c;
+        timers_advance(c); audio_gen(c); line_cyc += c; cycles -= c; done += c;
         if (line_cyc == CYC_HBL) enter_hblank();
         else if (line_cyc == CYC_LINE) end_line();
+        if (stop_on_irq && (hw_irq_pending() & ~p0)) break;   /* IRQ recem-levantado: devolve o controle */
     }
+    return done;
 }
+void hw_step(uint32_t cycles) { step_core(cycles, 0); }
+uint32_t hw_step_irq(uint32_t cycles) { return step_core(cycles, 1); }
 const uint32_t *hw_get_framebuffer(void) { return fb; }
 const uint32_t *hw_frame_ready(void) {
     if (!frame_flag) return 0;
