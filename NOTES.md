@@ -417,6 +417,59 @@ descoberta compartilha estado (grafo) e e inerentemente sequencial; o que parale
 `resolve_indirect.py` e o `score_functions.py` entre si (so se o score nao ler o que o outro
 escreve; e do Riven) e a compilacao (`--jobs` do build_all, ja usado).
 
+### QA do launcher e do controle (Poppy) - testes automatizados e roteiro manual
+**Automatizado:** `python -m unittest tests.test_launcher_qa -v` (raiz do repo; ~5 s; 35 testes). Compila de
+verdade, num harness C minimo, o `hw/config_ini.c` (UI) e o `recomp/runtime/rt_input.c` (jogo, sem SDL), e
+le o `launcher/flow.py`. Sem compilador funcional os testes de C pulam com o motivo (zig do projeto, `.venv`,
+WinLibs ou gcc/clang do PATH). Cobertura:
+| grupo | o que garante |
+|---|---|
+| v1 antigo | chaves soltas/`[kirby]`, valores invalidos -> padrao, comentarios `;`/`#`, CRLF, caixa, duplicata (ultima vence), arquivo vazio/binario/linha >255 bytes, `cfg_path_beside` (barras, acentos, sem diretorio) |
+| v2 contrato | todas as chaves de `[video] [audio] [keyboard] [controller] [launcher]` com padrao e faixa, faltando secao/chave, secao desconhecida, reservadas (Esc/F11/F1), binding duplicado reseta o teclado, nomes longos sem estouro, migracao v1 -> v2, round-trip estavel |
+| mesmo arquivo | launcher.py (`ini_path = dirname(rom)/kirby.ini`) == jogo (`kirby.ini` ao lado de `<rom>.sav`, rt_main.c); jogo carrega o ini e aceita `--ini`; F1 = codigo 77 no launcher |
+| paridade dos 3 leitores | UI (`config_ini.c`) x jogo (`rt_cfg_load`) x launcher (`flow.read_ini_value`) dao os mesmos valores em 14 arquivos comuns |
+**Achados (cada um e um `expectedFailure` com o arquivo de entrada; quando corrigido o teste vira
+"unexpected success" e o decorador sai):**
+1. `rt_input.c` `to_int`: `scale=2x` vale 2 no jogo, 3 (padrao) na UI. Dono: Nasus.
+2. `rt_input.c`: `deadzone` maximo 32000 (UI/contrato: 32767). Nasus.
+3. `rt_input.c`: `a=Escape` deixa o botao A SEM tecla no jogo e volta a X na UI; binding duplicado
+   mantem as duas (uma tecla = 2 botoes) enquanto a UI reseta o teclado. Nasus/Gwen.
+4. `launcher/flow.py` `read_ini_value`: so corta `;`; `show=0 # x` abre o launcher, o C le 0. Riven.
+5. `hw/config_ini.c`: BOM UTF-8 no inicio faz a 1a chave virar `\xef\xbb\xbfscale` (ignorada). Gwen.
+6. Causa de 1-4: o jogo tem parser PROPRIO. `hw/config_ini.c` ja nao usa SDL: usar a mesma funcao no
+   `kirby.exe` elimina as divergencias (`test_game_uses_the_shared_parser`).
+**Mensagens em ingles (build.log):** as mensagens de `tools/analyze_rom.py` e `tools/check_map.py`
+(prints, `--help`, erros) foram traduzidas; as dos demais `tools/*.py` ja estavam em ingles (varredura
+por palavras portuguesas em print/exit/raise: 0 ocorrencias). Comentarios continuam em portugues.
+
+**Roteiro manual (marcar cada item; build limpo com `KirbyRecomp.exe`; logs em
+`%LOCALAPPDATA%\KirbyRecomp\launcher.log` e `build.log`):**
+Preparo: uma pasta SEM `kirby.ini`; ROM valida `baserom.gba`; outra pasta com um `.gba` qualquer (copia
+renomeada de um arquivo de texto) para o caso invalido; um controle USB/Bluetooth (Xbox ou Switch Pro).
+| # | Passo | Resultado esperado |
+|---|---|---|
+| 1 | Abrir `KirbyRecomp.exe` sem argumentos, sem `kirby.ini` | Tela do launcher aparece (nao abre o jogo direto). Titulo `KIRBY RECOMP`, ROM mostra `ok`, status em ingles (`Preparing...` -> `Building NN% (you can play now)` -> `Compiled version ready`). Nenhum texto em portugues, nenhum acento quebrado |
+| 2 | Janela: redimensionar, minimizar, restaurar, arrastar entre monitores | Sem travar; ao restaurar, volta a atualizar (progresso continua) |
+| 3 | Escolher uma ROM invalida (arquivo que nao e GBA / SHA-1 diferente) | Mensagem `This ROM is not supported.` com o SHA-1 e a versao aceita; launcher nao inicia build; pode escolher outra |
+| 4 | ROM inexistente (arrastar e apagar antes / caminho errado) | `File not found: <caminho>`; sem excecao/traceback |
+| 5 | Construcao em andamento: abrir, esperar `Preparing fast mode`, apertar PLAY quando habilitar | Jogo abre pelo interpretador; barra continua no launcher/`build.log`; ao terminar, status `Compiled version ready`; nada trava |
+| 6 | Construcao em andamento: fechar a janela de progresso | Pergunta de confirmacao (`Cancel building the game?`); `No` mantem a construcao; `Yes` cancela e nao deixa processo orfao (conferir no Gerenciador de Tarefas) |
+| 7 | Jogando: F1 | Jogo fecha com codigo 77 e o launcher reaparece com as mesmas configuracoes; PLAY reabre o jogo |
+| 8 | Jogando: Esc | Sai do jogo (e do launcher). F11 alterna tela cheia e NAO fecha |
+| 9 | Remapear teclado: Keyboard... -> clicar em A -> tecla Q | Mostra `Press a key for A...`; Esc cancela sem mudar; Q fica gravada em `[keyboard] a=Q`; jogo usa Q como A |
+| 10 | Remapear para tecla ja usada | Pede troca/conflito (nao deixa duas teclas no mesmo botao); `Reset to defaults` restaura X/Z/A/S/Return/Backspace/setas |
+| 11 | Tentar atribuir Esc, F1 ou F11 | Recusado com aviso de tecla reservada; atribuicao anterior preservada |
+| 12 | Controle conectado ANTES de abrir | Aba Controller lista/usa o controle; navegar a tela so com o controle (D-pad + A/B); botoes por POSICAO (A do GBA = botao leste) |
+| 13 | Conectar o controle COM o jogo aberto; depois desconectar | Passa a responder sem reiniciar; ao desconectar, nada trava e o teclado continua valendo |
+| 14 | Direcional analogico: `stick_as_dpad=1` e `0`; zona morta | Com 1 o analogico move; com 0 so o D-pad; pequenas inclinacoes (< zona morta) nao movem |
+| 15 | Escala 1x..6x e `Integer scaling` | Janela = 240x160 x N; com inteira, sem barras tortas/pixels borrados; guardado em `[video]` |
+| 16 | Tela cheia (checkbox e F11) | Entra/sai sem perder o audio; restaura a escala anterior ao sair; persiste em `fullscreen=` |
+| 17 | Volume e Mute | Barra altera o volume do jogo; Mute silencia; persistem em `[audio]` |
+| 18 | Arquivo `kirby.ini` editado a mao com lixo (`scale=abc`, chave desconhecida, BOM) | Abre normalmente com os padroes para o que for invalido (BOM e o achado 5: confirmar o comportamento) |
+| 19 | `Show launcher` desmarcado; abrir de novo; segurar Shift | Sem Shift: abre o jogo direto; com Shift: mostra o launcher |
+| 20 | Pasta com espacos/acentos (`C:\Users\Joao Silva\Documentos`) e disco sem permissao de escrita | Funciona; sem permissao: mensagem clara em ingles (nao fecha em silencio) |
+Aceite: itens 1-8 e 12-13 sao obrigatorios para liberar; os demais, sem regressao em relacao a versao anterior.
+
 ### Funcoes sem retorno alcancavel (`noreturn.csv`, coluna `noreturn_kind`)
 24 funcoes, todas explicadas (0 `suspect`):
 | kind | qtd | exemplos / motivo |
@@ -817,6 +870,52 @@ Plano: NOTES 'Distribuicao: arrastar a ROM (Riven)'. Tudo em `hw/window_sdl.[ch]
   Explorer; tela cheia verificada so no driver dummy; sem selecao de ROM por dialogo (so soltar/CLI);
   gravar o ini quando o usuario muda algo em tempo de execucao e do runtime (chamar `cfg_save`).
 
+### 12. Launcher UI (kirby_ui.dll) and kirby.ini v2 - phases 0 and 1 (Gwen)
+Contract: NOTES 'Launcher completo: tela de configuracao e botao Play (Riven)'. All UI text is English.
+- **`hw/config_ini.[ch]` (kirby.ini v2, no SDL):** sections `[video] scale fullscreen integer_scale vsync`,
+  `[audio] volume mute`, `[keyboard] a b l r start select up down left right` (SDL key names),
+  `[controller]` same buttons (SDL game-controller names) + `stick_as_dpad deadzone`, `[launcher] show language`.
+  `cfg_defaults / cfg_load / cfg_save / cfg_validate / cfg_reset_keyboard / cfg_reset_controller /
+  cfg_path_beside / cfg_equal / cfg_key_reserved / cfg_button_name`. Defaults are the contract's (keyboard BY
+  POSITION: A=X, B=Z, L=A, R=S, Start=Return, Select=Backspace, arrows; controller GBA A = SDL `b` (east),
+  GBA B = SDL `a`). Validation: out-of-range number -> default, empty/illegal name (`= ; # [ ]`, control chars,
+  >31 chars) -> default, **Escape/F11/F1 never bindable** (any case), duplicate bindings reset the whole map
+  (the stick/deadzone are kept). Keys are case-insensitive, `;`/`#` comments, unknown keys/sections ignored.
+  **v1 compatible:** flat file or `[kirby]` section with scale/mute/fullscreen/vsync loads; the v1 field names
+  and order of `KirbyConfig` are unchanged (`KirbyConfig c = {5,1,1,1}` still means scale/mute/fullscreen/vsync);
+  a v1 file is upgraded to v2 on the next `cfg_save`.
+- **`hw/launcher_ui.[ch]` -> `kirby_ui.dll`:** `int kl_run(const char *ini_path, KlPoll poll)` returns `KL_PLAY=1`,
+  `KL_QUIT=0` or `KL_PICK_ROM=2`; `KlStatus {state, percent, text[96], rom[260], rom_ok}`; `poll` is called ~10x/s
+  on the UI thread (default 100 ms; `kl_set_poll_interval`). Extra export: `const char *kl_dropped_path(void)`
+  (a file dropped on the window returns `KL_PICK_ROM` and the path is here). Screen (640x420 logical, resizable,
+  icon + `WIN_TITLE`): header (KIRBY RECOMP, ROM name + OK / (unverified) / none, SELECT ROM...), status panel
+  with text + progress bar (states 1 and 2), VIDEO (window size 1X-6X radio, Fullscreen, Integer scaling),
+  AUDIO (volume slider 0-100, Mute), INPUT (KEYBOARD..., CONTROLLER..., RESET TO DEFAULTS), PLAY, QUIT.
+  **PLAY is disabled when `state == 1`**; with `state == 0` (no ROM) it returns `KL_PICK_ROM`.
+  Every change is written to the ini immediately. Mouse (click, drag the slider, hover), keyboard (Tab /
+  Shift+Tab / Up / Down move the focus; Left/Right change radios and the slider by 5; Enter/Space activate;
+  Esc quits or closes a page). KEYBOARD.../CONTROLLER... open a read-only page with the current bindings (the
+  editing screen is phase 2/3). RESET TO DEFAULTS resets the keyboard and controller maps only.
+  Build: `gcc -DKL_BUILD_DLL -shared -o kirby_ui.dll hw/launcher_ui.c hw/config_ini.c hw/window_sdl.c -lSDL2`
+  (`hw/tests/run_ui.ps1` does this and also writes `libkirby_ui.dll.a`). `kirby_ui.dll` needs `SDL2.dll`.
+  Python/ctypes: `ctypes.CDLL('kirby_ui.dll')`, `CFUNCTYPE(None, POINTER(KlStatus))` for `poll`, `kl_run(ini.encode(),
+  poll)`; keep a reference to the callback.
+- **Font:** `hw/font5x7.c` (A-Z 0-9 and `. , : - _ / % ( ) ! ? & ' + = < > [ ] * # | ~`; lowercase uses
+  uppercase; unknown -> `?`) is unity-included by `window_sdl.c` (so external builds that compile only
+  `window_sdl.c` keep working) and exported as `win_font_rows()`.
+- **Tests (headless, SDL dummy driver, simulated events):** `hw/tests/test_config_ini.c` (defaults, round trip of
+  every field, v1 flat / `[kirby]`, upgrade, parsing, validation, reserved keys, duplicates, garbage struct,
+  paths) and `hw/tests/test_kirby_ui.c` linked against the real `kirby_ui.dll` (settings by mouse and keyboard
+  saved to the ini, Play disabled in state 1 (pixel check), progress bar pixels, Tab/Shift+Tab, Esc, Select
+  ROM, file drop + path, Play with no ROM, Reset, info pages and Back, Quit). Run `hw/tests/run_ui.ps1`;
+  frame dump for a visual check: `build/hw/ui_launcher.png`. The config test found a real bug: `set_name`
+  copied 31 bytes into `language[8]` (stack overwrite) - fixed.
+- **Not done (later phases):** phase 2 keyboard remapping screen with the controller outline (press-a-key
+  capture, conflict swap, reserved-key warning); phase 3 controller input and navigating the UI with it;
+  `hw_input` (keyboard + controller -> KEYINPUT with the ini bindings; today `win_keys()` still has the old
+  fixed Z=A/X=B map). Mouse drag-and-drop of a ROM and real-monitor DPI behavior were tested only with
+  synthetic events. Fullscreen/volume are only stored in the ini; applying them is up to kirby.exe.
+
 - Cuidado para o runtime: `hw_irq_pending` ja aplica IME e IE&IF; o runtime so decide o despacho.
   O registro BIOS_IF (0x03007FF8) e IWRAM, fica a cargo do runtime ao tratar VBlankIntrWait.
 
@@ -1216,6 +1315,42 @@ a menos, sobra de 9x). Runtime nao recompila (objetos em cache por hash); so 7 .
 `--opt=-Os|-O1`, `--shards N`, `--jobs N`. O "~10 min" do plano do Riven nao reproduziu aqui; em PC
 com 2-4 nucleos espere ~2-3x do tempo. Nao medido: zig frio (1o uso compila compiler-rt/libc no
 cache global do zig, +alguns s).
+
+### kirby.ini v2, F1, entrada unificada e mensagens em ingles (Nasus)
+- **`kirby.ini`** (`rt_input.c`, parser proprio, sem mudar a linha de comando): caminho = `--ini F` ou
+  `kirby.ini` ao lado do save (ou da ROM se `--sav none`). Secoes v2 `[video] scale fullscreen
+  integer_scale vsync`, `[audio] volume(0-100) mute`, `[keyboard] a b l r start select up down left
+  right` (nomes SDL), `[controller]` (nomes de `SDL_GameControllerGetStringForButton`) + `stick_as_dpad`,
+  `deadzone`; tambem le o v1 (chaves soltas/`[kirby]`). Valor invalido -> padrao; comentarios `;`/`#`.
+  Padroes: teclado A=X B=Z L=A R=S Start=Return Select=Backspace + setas; controle A=`b` (leste) B=`a`
+  (sul), L/R=ombros, start/back, dpad. `--window N` na linha de comando tem prioridade sobre `scale`.
+  Aplicado: escala, tela cheia inicial, escala inteira (`SDL_RenderSetIntegerScale`), vsync
+  (`win_open_ex`), volume (escala as amostras antes do `audio_push`), mudo (nao abre o audio).
+  Autoteste: `rt_boot.exe baserom.gba --selftest-ini` (v2 completo, invalidos, v1, vazio): OK.
+- **F1** sai do processo com **codigo 77** (grava o `.sav` no `atexit`); **Esc**/fechar = 0; **F11**
+  tela cheia. Reservadas: se o ini mapear Esc/F1/F11 a um botao, a ligacao e ignorada. Testado com
+  `KIRBY_TEST_HOTKEY="F1@90"` (gancho de teste): exit 77 e `.sav` de 32 KiB gravado.
+- **Entrada unificada** (`rt_input_poll`, no `kirby.exe`; substitui `win_keys()` do `window_sdl.c`):
+  teclado por scancode + `SDL_GameController` (ate 4), **hot-plug** por varredura a cada ~30 quadros
+  (os eventos do SDL sao consumidos por `win_poll`), **zona morta** configuravel, **analogico
+  esquerdo como direcional** opcional, mapeamento por **posicao** (GBA A = leste, B = sul), pares de
+  direcoes opostas se cancelam. **Nao testado com hardware** (sem controle aqui): so compila/linka e o
+  caminho do teclado roda; peco teste manual com um controle.
+- **Mensagens em ingles** (kirby.exe/rt_boot): MessageBox "ROM not found. Drag the .gba file onto
+  kirby.exe, or put baserom.gba in the same folder.", avisos de audio/janela, rotulos
+  `HALT`/`WARNING`, resumo final. **Tokens de log que mudaram** (consumidores: `program.py`, tests,
+  `tools/fuzz_run.py` do Riven):
+  | antes | agora |
+  |---|---|
+  | `PARADA:` / `AVISO:` | `HALT:` / `WARNING:` |
+  | `PARADA: endereco sem funcao recompilada ...` | `HALT: address with no recompiled function (RAM overlay or ROM exit)` |
+  | `PARADA: funcao saiu sem avancar o pc ...` | `HALT: function left pc unchanged (target outside the compiled set)` |
+  | `nao_resolvidos=N` | `unresolved=N` |
+  | `IRQ entregues=` (`pelo handler`/`pelo runtime`/`IF limpo pelo runtime`) | `IRQs delivered=` (`by handler`/`by runtime`/`IF cleared by runtime`) |
+  | `VELOCIDADE:` / `TRECHO q.` / `quadros atrasados` | `SPEED:` / `SEGMENT f.` / `late frames` |
+  | `INTERPRETADOR: N entradas, M instrucoes` | `INTERPRETER: N entries, M instructions` |
+  | `RT_STOP frames/...` | igual (`first VBlankIntrWait` no lugar de `primeira VBlankIntrWait`) |
+  Formato de `unresolved.log` e `[overlay]` do Python nao mudou.
 
 ### O que falta / riscos
 - Interpretador de fallback: endereco de RAM sem overlay ainda **aborta**; ROM sem funcao
