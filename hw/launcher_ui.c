@@ -326,7 +326,15 @@ static void draw_main(void) {
     frame(panel, C_DIM);
     text("STATUS", 20, 66, 1, C_DIM);
     text(state_text(), 20, 76, 2, st.state == 4 ? C_ERR : C_TEXT);
-    if (st.text[0]) text(st.text, 20, 96, 1, C_DIM);
+    if (st.text[0]) {
+        char det[100];
+        snprintf(det, sizeof det, "%s", st.text);
+        if (st.state == 1 || st.state == 2) {         /* the bar starts at x=200: never draw under it */
+            int maxc = (196 - 20) / 6;
+            if ((int)strlen(det) > maxc && maxc > 3) { det[maxc - 3] = 0; strcat(det, "..."); }
+        }
+        text(det, 20, 96, 1, C_DIM);
+    }
     if (st.state == 1 || st.state == 2) {
         SDL_Rect bar = { 200, 95, 260, 9 };
         frame(bar, C_TEXT);
@@ -372,7 +380,7 @@ static void draw_info(void) {
         text("GBA A = EAST BUTTON", 300, 90, 1, C_DIM);
         text("GBA B = SOUTH BUTTON", 300, 102, 1, C_DIM);
     }
-    text("EDITING IS NOT AVAILABLE YET", 12, 278, 1, C_DIM);
+    text("EDITING IS NOT AVAILABLE YET", 12, 262, 1, C_DIM);   /* above the Back button (y=278) */
     text("ESC OR ENTER: BACK", 12, 311, 1, C_DIM);
 }
 

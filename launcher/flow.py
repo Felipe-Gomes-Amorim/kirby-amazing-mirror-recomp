@@ -142,7 +142,7 @@ class Controller:
         if self.env.compiled_ready():
             self._set(STATE_READY, 100, 'Compiled version ready')
             return
-        self._set(STATE_PREPARING, 5, 'Preparing fast mode (first run only)...')
+        self._set(STATE_PREPARING, 5, 'Preparing fast mode...')
         self._worker = threading.Thread(target=self._prepare, daemon=True)
         self._worker.start()
 
@@ -159,7 +159,7 @@ class Controller:
         self._fast_exe = exe
         self.env.start_background_build()
         self._bg_t0 = time.time()
-        self._set(STATE_FAST, 0, 'Playable now. Building the compiled version...')
+        self._set(STATE_FAST, 0, 'Building the compiled version')
 
     def _set(self, state, pct, text):
         with self._lock:
@@ -176,9 +176,9 @@ class Controller:
                 pct, label = self.env.monitor.progress()
                 pending = self._bg_t0 is not None and time.time() - self._bg_t0 < 5.0
                 if not self.env.monitor.running() and not pending:
-                    st = Status(STATE_FAST, 0, 'Playable. Background build is not running', self.env.rom, 1)
+                    st = Status(STATE_FAST, 0, 'Background build stopped', self.env.rom, 1)
                 else:
-                    st = Status(STATE_FAST, pct, '%s %d%% (you can play now)' % (label, pct), self.env.rom, 1)
+                    st = Status(STATE_FAST, pct, label, self.env.rom, 1)
         elif st.state == STATE_READY and not self.env.compiled_ready():
             pass
         return st
