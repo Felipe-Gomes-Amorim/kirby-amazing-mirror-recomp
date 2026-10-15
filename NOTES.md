@@ -418,7 +418,7 @@ descoberta compartilha estado (grafo) e e inerentemente sequencial; o que parale
 escreve; e do Riven) e a compilacao (`--jobs` do build_all, ja usado).
 
 ### QA do launcher e do controle (Poppy) - testes automatizados e roteiro manual
-**Automatizado:** `python -m unittest tests.test_launcher_qa -v` (raiz do repo; ~5 s; 35 testes). Compila de
+**Automatizado:** `python -m unittest tests.test_launcher_qa -v` (raiz do repo; ~10 s; 50 testes). Compila de
 verdade, num harness C minimo, o `hw/config_ini.c` (UI) e o `recomp/runtime/rt_input.c` (jogo, sem SDL), e
 le o `launcher/flow.py`. Sem compilador funcional os testes de C pulam com o motivo (zig do projeto, `.venv`,
 WinLibs ou gcc/clang do PATH). Cobertura:
@@ -428,8 +428,9 @@ WinLibs ou gcc/clang do PATH). Cobertura:
 | v2 contrato | todas as chaves de `[video] [audio] [keyboard] [controller] [launcher]` com padrao e faixa, faltando secao/chave, secao desconhecida, reservadas (Esc/F11/F1), binding duplicado reseta o teclado, nomes longos sem estouro, migracao v1 -> v2, round-trip estavel |
 | mesmo arquivo | launcher.py (`ini_path = dirname(rom)/kirby.ini`) == jogo (`kirby.ini` ao lado de `<rom>.sav`, rt_main.c); jogo carrega o ini e aceita `--ini`; F1 = codigo 77 no launcher |
 | paridade dos 3 leitores | UI (`config_ini.c`) x jogo (`rt_cfg_load`) x launcher (`flow.read_ini_value`) dao os mesmos valores em 14 arquivos comuns |
-**Achados (cada um e um `expectedFailure` com o arquivo de entrada; quando corrigido o teste vira
-"unexpected success" e o decorador sai):**
+**Achados (cada um foi um `expectedFailure` com o arquivo de entrada; corrigido o teste vira
+"unexpected success" e o decorador sai). Estado em 2026-10: 1-4 e 6 CORRIGIDOS (o jogo passou a usar o
+mesmo parser de `hw/config_ini.c`; `flow.py` ja corta `#`); resta o 5 (BOM), unico `expectedFailure`:**
 1. `rt_input.c` `to_int`: `scale=2x` vale 2 no jogo, 3 (padrao) na UI. Dono: Nasus.
 2. `rt_input.c`: `deadzone` maximo 32000 (UI/contrato: 32767). Nasus.
 3. `rt_input.c`: `a=Escape` deixa o botao A SEM tecla no jogo e volta a X na UI; binding duplicado
@@ -468,7 +469,40 @@ renomeada de um arquivo de texto) para o caso invalido; um controle USB/Bluetoot
 | 18 | Arquivo `kirby.ini` editado a mao com lixo (`scale=abc`, chave desconhecida, BOM) | Abre normalmente com os padroes para o que for invalido (BOM e o achado 5: confirmar o comportamento) |
 | 19 | `Show launcher` desmarcado; abrir de novo; segurar Shift | Sem Shift: abre o jogo direto; com Shift: mostra o launcher |
 | 20 | Pasta com espacos/acentos (`C:\Users\Joao Silva\Documentos`) e disco sem permissao de escrita | Funciona; sem permissao: mensagem clara em ingles (nao fecha em silencio) |
-Aceite: itens 1-8 e 12-13 sao obrigatorios para liberar; os demais, sem regressao em relacao a versao anterior.
+| 21 | Launcher: trocar `Window size` (1x..6x) com o launcher aberto | A janela do LAUNCHER muda de tamanho para `240*N x 160*N` (minimo 480x320); em 1x a UI aparece em 2x com a legenda `1X PREVIEW (UI AT 2X)`; o jogo, ao abrir, usa o mesmo N |
+| 22 | Launcher: marcar `Fullscreen` | `Window size` fica DESABILITADO (cinza, nao clica); desmarcar reabilita e restaura o N anterior; com fullscreen a UI preenche a tela |
+| 23 | Launcher: `Select ROM` com e sem ROM carregada | Sem ROM: botao `Select ROM` visivel. Com ROM valida carregada: o botao some e aparece so `ROM: <nome> OK`; ROM invalida volta a mostrar o botao |
+| 24 | Escala do jogo: `scaling=integer`, `fit`, `stretch` em tela cheia 1920x1080 | integer = 1440x960 com bordas nos 2 eixos; fit = 1620x1080 (bordas so nas laterais, 3:2); stretch = 1920x1080 (preenche e distorce). Sem pixels borrados em integer |
+Aceite: itens 1-8, 12-13 e 21-23 sao obrigatorios para liberar; os demais, sem regressao em relacao a versao anterior.
+
+### Escala de video: `[video] scaling=integer|fit|stretch` - contrato, referencia e testes (Poppy)
+Contrato (`hw/config_ini.h`; decisao do usuario): padrao **fit**. `integer_scale=1` (v1/v2 antigo) -> integer,
+`integer_scale=0` -> fit; um `scaling=` valido SEMPRE vence; invalido -> padrao (a chave antiga, se valida,
+ainda vale). O arquivo gravado nao tem mais `integer_scale`.
+Retangulo de destino na janela `W x H` (referencia, so inteiros):
+- integer: `k = max(1, min(W//240, H//160))`; `240k x 160k`, centralizado (`(W-w)//2`, `(H-h)//2`)
+- fit: `k = min(W/240, H/160)` real; `floor(240k) x floor(160k)`, centralizado (3:2; barra so nas laterais num 16:9)
+- stretch: `(0, 0, W, H)`
+Medido no SDL real (`rt_apply_scaling` + `dest_rect` de `recomp/runtime/rt_window.c`, driver `dummy`); x,y,w,h:
+| janela | integer | fit | stretch |
+|---|---|---|---|
+| 1920x1080 | 240,60 1440x960 | 150,0 1620x1080 | 0,0 1920x1080 |
+| 1366x768 | 203,64 960x640 | 107,0 1152x768 | 0,0 1366x768 |
+| 2560x1440 | 200,0 2160x1440 | 200,0 2160x1440 (= integer, 9x exato) | 0,0 2560x1440 |
+| 1280x720 | 160,40 960x640 | 100,0 1080x720 | 0,0 1280x720 |
+O SDL bate com a referencia nos 12 casos, sem diferenca de 1 px (a tolerancia do teste e 1 px).
+Testes (`tests/test_launcher_qa.py`):
+| classe | o que faz | estado |
+|---|---|---|
+| `ScalingReferenceSpecTest` | a referencia reproduz a tabela feita a mao + invariantes (dentro da janela, centrado +-1 px, multiplos de 240x160 no integer, 3:2 no fit) | roda sempre |
+| `ScalingParseUITest` | `scaling=` no `config_ini.c`: padrao fit, valores validos (qualquer caixa), invalidos -> fit, legado `integer_scale`, `scaling` vence, round-trip | ativo |
+| `ScalingParseParityTest` | jogo (`rt_cfg.scaling`, via `rt_input.c`) e launcher (`flow.read_scaling`) = UI em 8 arquivos | jogo ativo; launcher PULA ate existir `flow.read_scaling(ini_path)` |
+| `GameDestRectTest` | compila o `rt_apply_scaling`/`dest_rect` reais com o SDL dummy e compara 4 resolucoes x 3 modos | ativo (precisa SDL2 dev: `SDL2_DIR` ou `C:/libs/SDL2-2.32.2`) |
+| `UIScalingModeTest` | `launcher_ui.c` expoe os 3 modos | PULA: a UI ainda so tem o checkbox `INTEGER SCALING` |
+Pendencias para fechar a comparacao UI x jogo: (1) UI: seletor dos 3 modos em `launcher_ui.c` (Gwen);
+(2) launcher: `flow.read_scaling(ini_path)` devolvendo `integer|fit|stretch` com a mesma regra legada (Riven).
+Hoje a UI nao desenha um retangulo de jogo proprio (so a janela `SetLogicalSize(KL_W, KL_H)`), entao nao ha
+segundo calculo para comparar com o do jogo; quando o preview existir, adicione-o em `GameDestRectTest`.
 
 ### Funcoes sem retorno alcancavel (`noreturn.csv`, coluna `noreturn_kind`)
 24 funcoes, todas explicadas (0 `suspect`):
@@ -916,6 +950,38 @@ Contract: NOTES 'Launcher completo: tela de configuracao e botao Play (Riven)'. 
   fixed Z=A/X=B map). Mouse drag-and-drop of a ROM and real-monitor DPI behavior were tested only with
   synthetic events. Fullscreen/volume are only stored in the ini; applying them is up to kirby.exe.
 
+### 13. Launcher screen adjustments: size/fullscreen/scaling (Gwen)
+User feedback with screenshots. All UI text in English.
+- **Window size disabled in full screen:** the 1X-6X radios are greyed out, ignore clicks and are skipped by
+  Tab/arrows while Fullscreen is checked.
+- **SELECT ROM... only when needed:** shown when `state == 0` or `rom_ok == 0`; with a verified ROM the header
+  only reads `ROM: <name> OK`.
+- **The launcher window follows the options:** logical canvas **480x320**; window = `240*scale x 160*scale`,
+  never below 480x320 (so 1X and 2X both give 480x320; 3X = 720x480 ... 6X = 1440x960). At 1X a short caption
+  `1X PREVIEW (UI AT 2X)` is drawn. Fullscreen applies to the launcher too (`SDL_WINDOW_FULLSCREEN_DESKTOP`).
+  Everything is applied at once on click and saved to the ini; leaving full screen restores the size.
+- **Scaling mode (replaces the Integer scaling checkbox):** `Integer | Fit | Stretch`. `kirby.ini`
+  `[video] scaling=integer|fit|stretch` (default **fit**). Integer = whole-number zoom (SDL integer scale, black
+  bars); Fit = `SDL_RenderSetLogicalSize` with the aspect preserved; Stretch = no letterbox (logical size 0,
+  canvas scaled per axis, mouse mapped by window size). Compatibility: with no valid `scaling=`, a file with
+  `integer_scale=1` loads as integer and `integer_scale=0` as fit; an explicit valid `scaling=` always wins
+  (any key order); an invalid `scaling=` falls back to `integer_scale`, then fit. `cfg_save` writes only
+  `scaling=` (no `integer_scale`). `KirbyConfig.integer_scale` was replaced by `int scaling`
+  (`CFG_SCALING_INTEGER/FIT/STRETCH`), `cfg_scaling_name()`.
+- **Shared by kirby.exe:** `hw/window_sdl.c` now has `win_set_scaling(mode)` / `win_get_scaling()` (mode = the
+  `CFG_SCALING_*` value; can be called before or after `win_open`) so the game window uses the same three
+  behaviours. rt_input.c already includes `config_ini.c` and reads `c.scaling`.
+- **Bug found while testing:** in SDL2 the logical size lives in the renderer scale, so calling
+  `SDL_RenderSetScale(1,1)` every frame cancelled it (clicks missed once the window was not 480x320). Only the
+  stretch mode touches the render scale now.
+- **Tests:** `test_config_ini.c` (scaling round trip, case-insensitivity, absent/invalid, every v1/v2
+  `integer_scale` combination, out of range, re-save) and `test_kirby_ui.c` against the real `kirby_ui.dll`
+  (window size per scale incl. the 480x320 floor, caption at 1X, fullscreen disables the sizes and focus skips
+  them, Integer/Fit/Stretch saved, applies immediately, SELECT ROM visibility matrix, stretch click mapping).
+  `hw/tests/run_ui.ps1`; frame at native size: `build/hw/ui_launcher.png`.
+- **Not done:** the full-screen path was only exercised with the SDL dummy video driver (flag and size
+  logic); real monitor/DPI behaviour and the integer mode on a non-multiple window are untested by eye.
+
 - Cuidado para o runtime: `hw_irq_pending` ja aplica IME e IE&IF; o runtime so decide o despacho.
   O registro BIOS_IF (0x03007FF8) e IWRAM, fica a cargo do runtime ao tratar VBlankIntrWait.
 
@@ -1351,6 +1417,38 @@ cache global do zig, +alguns s).
   | `INTERPRETADOR: N entradas, M instrucoes` | `INTERPRETER: N entries, M instructions` |
   | `RT_STOP frames/...` | igual (`first VBlankIntrWait` no lugar de `primeira VBlankIntrWait`) |
   Formato de `unresolved.log` e `[overlay]` do Python nao mudou.
+
+### Modos de escala (`[video] scaling=integer|fit|stretch`) e parser unico (Nasus)
+- **`scaling`** (padrao **fit**): `integer` = multiplos inteiros (borda nos dois eixos quando nao cabe
+  exato); `fit` = escala fracionaria preservando 3:2 (borda so nas laterais num 16:9); `stretch` =
+  preenche a janela (distorce). Legado: `integer_scale=1` -> integer, `0` -> fit; `scaling=` vence
+  (regra do `hw/config_ini.c`). Implementado em `rt_window.c::rt_apply_scaling`: `window_sdl.c`
+  usa `SDL_RenderSetLogicalSize(240,160)` (= fit); integer liga `SDL_RenderSetIntegerScale`;
+  stretch remove o tamanho logico (`SetLogicalSize(0,0)`, `RenderCopy(..., NULL, NULL)`). Aplica na
+  abertura (e em tela cheia, F11). Linha de comando: `--scaling integer|fit|stretch` (prioridade
+  sobre o ini), sem mudar o resto.
+- **Parser unico**: `rt_input.c` inclui `hw/config_ini.c` (uma unidade de traducao; sem SDL) e
+  usa `cfg_load` (sempre validado: `scale=2x` -> padrao, deadzone ate 32767, tecla reservada e
+  duplicadas resetam o teclado, BOM etc. = o que a UI faz). O parser proprio foi removido; o
+  `rt_cfg`/`rt_cfg_load` seguem como API fina sobre `KirbyConfig` (harness da Poppy continua
+  compilando so `rt_input.c`).
+- **Testes**: `tests/test_launcher_qa.py` - os 4 `expectedFailure` do jogo (`scale=2x`, deadzone
+  maximo, reservada/duplicada, parser compartilhado) agora PASSAM e os decoradores foram removidos;
+  `ParserParityTest`/`SharedIniFileTest`/`ScalingParseParityTest` verdes. Ajuste necessario no
+  teste: `FIELD_SECTION` troca `integer_scale` por `scaling` (o `cfg_save` da Gwen nao grava mais
+  `integer_scale`) e o harness do jogo imprime `scaling=`.
+  **Ainda vermelhos (nao sao do jogo; expectativas antigas)**: `IniV2ContractTest` (`V2_SPEC` ainda
+  tem `integer_scale` com padrao 1) e `ScalingParseUITest` (espera padrao `integer`; o config_ini.c
+  novo e `fit`; ver o pedido do usuario) - 35 falhas ao todo, todas dessas duas classes + parity
+  de `launcher.show` ja corrigidas por esta mudanca.
+- **Retangulos de destino** (`kirby.exe --selftest-video`: janela dummy do SDL, modo aplicado,
+  retangulo medido por `SDL_RenderLogicalToWindow`; todos batem com `RECT_TABLE` da Poppy):
+  | janela | integer (x,y,w,h) | fit | stretch |
+  |---|---|---|---|
+  | 1920x1080 | 240,60 1440x960 (6x) | 150,0 1620x1080 (6,75x) | 0,0 1920x1080 |
+  | 1366x768 | 203,64 960x640 (4x) | 107,0 1152x768 (4,8x) | 0,0 1366x768 |
+  Em tela cheia 1080p o `fit` so deixa as laterais (150 px de cada lado); `integer` deixa 60 px
+  em cima/embaixo e 240 px nas laterais. Nao testei em monitor real.
 
 ### O que falta / riscos
 - Interpretador de fallback: endereco de RAM sem overlay ainda **aborta**; ROM sem funcao
