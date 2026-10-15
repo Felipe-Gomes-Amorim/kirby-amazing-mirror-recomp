@@ -19,10 +19,11 @@ runtime que imita o hardware (vídeo, DMA, timers, interrupções, BIOS).
 | Recompilador ARM/Thumb → C | funciona: o jogo inicia e roda mais de 8.000 quadros sem abortar |
 | Hardware | ligado: fundos tiled/afins, sprites, janelas, blending, DMA, timers, áudio PCM |
 | Imagem | título, abertura e a primeira fase aparecem corretos (salvos como imagem) |
-| Janela e teclado | janela SDL2 escrita e testada em uma demo; ainda não ligada ao jogo |
-| Saída de som e save | o áudio PCM é gerado, mas não vai para o alto-falante. O arquivo de save (32 KiB) funciona |
+| Janela e teclado | funciona: `python -m recomp.program --window 3` (Z/X = A/B, Enter = Start, setas) |
+| Saída de som | o áudio PCM e PSG é gerado e existe uma saída SDL2, mas ela ainda não está ligada ao executável do jogo |
+| Save | funciona: `baserom.sav` de 32 KiB |
 
-Mais detalhe, com números e decisões, em [`NOTES.md`](NOTES.md).
+Mais detalhe, com números e decisões, em [`NOTES.md`](NOTES.md) (resumo em inglês: [`NOTES.en.md`](NOTES.en.md)).
 
 ## Como funciona
 

@@ -1,25 +1,49 @@
 # NOTES
 
+> Diario tecnico do projeto, escrito em portugues. Resumo em ingles: [NOTES.en.md](NOTES.en.md).
+> Visao geral para quem chega agora: [README.md](README.md).
+
+## Como ler este arquivo
+Este arquivo e o registro de trabalho de quatro frentes paralelas; por isso ele cresceu em
+camadas. Cada secao tem um dono (ver [ROLES.md](ROLES.md)) e as mais recentes tem prioridade
+sobre o plano inicial (secoes 1-6), que ficou como historico.
+
+| Se voce quer... | Leia |
+|---|---|
+| O estado atual e o que falta | **Estado** (logo abaixo) |
+| Entender ARM/Thumb e o mapa do GBA com exemplos reais | secoes 2 e 3 |
+| Como a ROM foi analisada e o que o mapa contem | "Como rodar: ambiente e analise" e as subsecoes (Poppy) |
+| Problemas do compilador original (retornos, saltos longos, indiretos) | "Saltos indiretos", "Revisao das 86...", "`bl` Thumb como salto longo" |
+| O hardware simulado (PPU, DMA, timers, audio) | "Hardware GBA (hw/)" (Gwen) |
+| O recompilador, o runtime e como rodar o jogo | "Recompilador minimo" (Nasus) |
+| Som (M4A) e save (SRAM) | "Som (M4A) e save (SRAM)" |
+
 ## Objetivo
 Recompilacao estatica: traduzir o codigo ARM/Thumb da ROM para C/C++, ligar com um
 runtime que emula o hardware do GBA (PPU, audio, DMA, timers, interrupcoes, BIOS)
 e rodar nativo no PC. NAO e decompilacao matching.
 
 ## Estado
+Resumo: o jogo **liga e roda** como C nativo: titulo, abertura e primeira fase aparecem; ha
+janela, teclado, audio PCM+PSG e save. O que resta e precisao e acabamento, nao "fazer rodar".
+
 - [x] Pesquisar projetos/ferramentas de recomp estatica (GBA e outros) -> secao 1
 - [x] Toolchain: Windows nativo (Python 3.13, capstone, unicorn, zig cc/GCC, SDL2 2.32.2)
-- [x] Mapa congelado (`map.json`, 5669 funcoes) + regressao `tools/check_map.py`; handlers M4A incluidos
-- [x] Recompilador roda o jogo: 8000+ quadros, 0 abortos (`python -m recomp.program --frames N`)
-- [x] Hardware ligado: BG tiled/afim, sprites, janelas, blend, mosaico, DMA, timers, FIFO PCM
-- [x] Titulo, abertura e 1a fase renderizam (roteiro de teclas `--keys`, quadros em `build/recomp/frames/`)
-- [x] Save SRAM de 32 KiB (`baserom.sav`)
-- [x] Janela SDL2 compilada e testada em demo (`hw/tests/run_demo.ps1`)
-- [ ] Ligar a janela SDL2 e o teclado ao executavel do jogo (hoje so gera quadros em arquivo)
-- [ ] Saida de audio: `hw_audio_read` existe, falta enviar ao alto-falante (SDL audio) e PSG
-- [ ] Leitura em 0x100F0D55 (endereco inexistente) durante a fase: achar quem gera o ponteiro
-- [ ] Velocidade: nao medida (rodar em tempo real); timing por ciclo e aproximado
-- [ ] Interpretador de fallback para codigo em RAM nao previsto
-- [ ] Licenca do repositorio e revisao dos trechos desmontados do NOTES.md
+- [x] Mapa congelado (`map.json`, ~5,7 mil funcoes) + regressao `tools/check_map.py`
+- [x] Recompilador roda o jogo: 8000+ quadros, 0 abortos
+- [x] Hardware ligado: BG tiled/afim, sprites, janelas, blend, mosaico, DMA, timers, FIFO PCM, PSG
+- [x] Titulo, abertura e 1a fase renderizam; save SRAM de 32 KiB (`baserom.sav`)
+- [x] Janela e teclado: `python -m recomp.program --window [escala]` (Z=A, X=B, Enter=START)
+- [x] Ritmo de 59,7275 quadros/s; velocidade medida ~9,7x tempo real (gargalo: PPU, nao o codigo recompilado)
+- [x] Saida de audio SDL2 escrita (`hw/audio_sdl.c`); verificada so com driver "dummy"
+- [ ] **Ligar `hw/audio_sdl.c` ao `kirby.exe`**: `rt_window.c` so chama `audio_push` fraco (descarta) e nao
+  chama `audio_open`; hoje o jogo roda **sem som**
+- [ ] Ouvir o som de verdade e conferir contra a referencia (mGBA) - nao verificado por humano
+- [x] Leitura em 0x100F0D55: origem achada (indice 0xFFFF, comportamento do original; ver secao propria)
+- [ ] Interpretador de fallback para codigo em RAM nao previsto (hoje aborta)
+- [ ] Oraculo de programa inteiro (testes diferenciais de `bl`/pilha/IRQ)
+- [ ] Precisao de timing por ciclo; multiplayer por cabo fora do escopo
+- [ ] Licenca do repositorio e revisao dos trechos desmontados deste arquivo
 
 ## Fatos da ROM (verificados nesta maquina)
 - Arquivo local: `baserom.gba` (renomeado do nome original "Kirby & The Amazing Mirror
@@ -27,8 +51,8 @@ e rodar nativo no PC. NAO e decompilacao matching.
 - 16 MiB, SHA-1 `274b102b6d940f46861a92b4e65f89a51815c12c`.
 - Cabecalho: titulo `AGB KIRBY AM`, game code `B8KE`, maker `01` (Nintendo), versao 0.
 - Entry point: word em 0x08000000 = `ea00002e` = `B 0x080000C0` (crt0).
-- Save: string `SRAM_V113` em 0x0D608A0 -> biblioteca oficial de SRAM (32 KB), nao Flash/EEPROM.
-- Som: engine M4A/"Sappy" (magic `Smsh` em 0x14F458 etc.). O mixer roda em IRQ, e
+- Save: string `SRAM_V113` em 0x08D608A0 -> biblioteca oficial de SRAM (32 KB), nao Flash/EEPROM.
+- Som: engine M4A/"Sappy" (magic `Smsh` em 0x0814F458 etc.). O mixer roda em IRQ, e
   esse codigo e copiado para IWRAM (ver riscos).
 
 ## 1. Projetos e ferramentas existentes (pesquisa)
@@ -51,7 +75,8 @@ estado antes de reaproveitar codigo):
 - Kirby Amazing Mirror: NAO achei decompilacao (pret-style) nem mapa de simbolos publico.
   Logo, o mapa de funcoes tem que ser gerado por nos (analise automatica).
 
-Ferramentas reaproveitaveis (a instalar so depois do OK):
+Ferramentas consideradas (na pratica usamos Capstone, Unicorn, SDL2 e zig cc/GCC; mGBA foi
+descartado como oraculo por breakpoints, ver "Validacao do mapa"):
 | Necessidade | Opcao | Uso |
 |---|---|---|
 | Emulador/oraculo | mGBA (MPL-2.0) | referencia de comportamento, debugger, traces para comparar |
@@ -180,7 +205,8 @@ tabela `addr->ptr`, e `CMakeLists.txt`. Nada do jogo e commitado (so a ferrament
 
 ### Toolchain
 Windows nativo: Python 3 (analisador), CMake + clang (ou MSVC), SDL2. WSL so se algo
-exigir Linux. devkitARM apenas para conferir/desmontar. (Nada instalado ainda.)
+exigir Linux. devkitARM apenas para conferir/desmontar.
+(Atualizado: instalados Python+capstone+unicorn, zig cc/GCC (WinLibs) e SDL2; sem CMake/WSL.)
 
 ## 5. Riscos
 1. **Codigo vs dados**: literal pools e jump tables dentro do codigo confundem a
@@ -198,7 +224,7 @@ exigir Linux. devkitARM apenas para conferir/desmontar. (Nada instalado ainda.)
 9. Escopo: ~16 MB; funcoes estimadas dezenas de milhares; manter automatizado, nada
    de mapa manual.
 
-## 6. Ordem de trabalho sugerida
+## 6. Ordem de trabalho sugerida (plano inicial; itens 1-5 e 7-8 feitos, ver Estado)
 1. Fixar toolchain; conferir hash do CRC/SHA da ROM em um script.
 2. Decoder Thumb+ARM em Python + teste contra `objdump`/Capstone (corpus: a ROM toda).
 3. Descoberta de funcoes a partir de 0x080000C0, IRQ (0x08000100), ponteiros em ROM;
@@ -206,19 +232,22 @@ exigir Linux. devkitARM apenas para conferir/desmontar. (Nada instalado ainda.)
 4. Lifter de um conjunto minimo + emissor; recompilar so crt0 + main inicial.
 5. Runtime minimo: memoria + I/O + DISPCNT/VRAM -> mostrar tela (Nintendo logo/Hal).
 6. Interpretador de referencia; teste diferencial com mGBA (trace de registradores).
+   (Mudou: o teste diferencial usa Unicorn por instrucao e funcao; mGBA foi descartado.)
 7. Crescer cobertura: DMA, timers, IRQ/VBlank, SWI HLE, entrada.
 8. Som (M4A + FIFO), SRAM, depois polimento (video/audio opcional).
 
 ## Decisoes
 - Toolchain: Windows nativo (sem WSL). Analisador em Python + emissor para C; runtime em C com SDL2.
 - ROM local renomeada para `baserom.gba`.
-- (pendente) Reusar ideias dos projetos acima; nao copiar codigo sem checar licenca.
+- Reusar so ideias dos projetos acima; nenhum codigo copiado (decisao mantida).
 
 ## Aprendizados
 - A ROM era `Kirby & The Amazing Mirror (USA).gba`; agora e `baserom.gba`.
-- So seguir `bl` a partir do entry acha ~620 funcoes (0.35%): o jogo despacha quase tudo
-  por tabelas de ponteiros (`bx r0`). Varrer a ROM por ponteiros com bit Thumb que apontam
-  para `push {..,lr}` elevou para ~11.5k funcoes. E heuristica: precisa de validacao.
+- So seguir `bl` a partir do entry acha ~620 funcoes (0,35%): o jogo despacha quase tudo por
+  tabelas de ponteiros. Varrer a ROM por ponteiros Thumb para `push {..,lr}` leva a ~5,7 mil.
+  (Uma versao anterior deste texto dizia ~11,5k: era bug meu, `bls/blt/ble` contados como
+  chamadas; ver "Comparacao de analisadores".)
+- Dos ~5,1 mil `bx rN`, quase todos sao retornos (`pop {r0}; bx r0`), nao saltos.
 - `python -I` ignora o site-packages do usuario (capstone nao e achado); rodar sem `-I`.
 - Entry = `B 0x080000C0`; main em Thumb 0x08152A04 chamado por `bx` do crt0.
 
@@ -243,8 +272,8 @@ Thumb (`add;ldr;mov pc`, tamanho pelo `cmp #n`) -> varre a ROM por ponteiros par
 `push {..,lr}` perto do codigo conhecido (heuristica, origem `ptr-scan`) -> classifica bytes.
 
 Resultado atual (B8KE v0): header ok (logo, 0x96, checksum), ~607k instrucoes (294 ARM,
-resto Thumb), **5669 funcoes**: 2140 `bl`, 3110 `ptr-scan`, 386 `addr-taken-leaf` (extras do
-Riven, tier A/B), 16 `m4a-jump-table`, 6 `bx-const`, 3 `ram-code`, 5 `ram-ptr`, 1 `adr`, 2 `entry`. 146 tabelas de
+resto Thumb), **5670 funcoes**: 2140 `bl`, 3110 `ptr-scan`, 386 `addr-taken-leaf` (extras do
+Riven, tier A/B), 16 `m4a-jump-table`, 1 `runtime`, 6 `bx-const`, 3 `ram-code`, 5 `ram-ptr`, 1 `adr`, 2 `entry`. 146 tabelas de
 salto (1539 entradas), ~7.4% da ROM e Thumb. Indiretos nao resolvidos: 12 (stubs
 `_call_via_rN` e `bx` soltos; `pop {rN}; bx rN` e retorno). 0 pontos nao decodificam; 4
 conflitos ARM/Thumb (bloco RAM 2, ver abaixo). Confianca: 5252 high, 387 medium, 30 low.
@@ -295,6 +324,27 @@ o runtime grava: `0814F958,thumb`). Enderecos com ou sem `0x`. Regras:
 Ciclo: jogo roda -> runtime grava `extra_functions.csv` -> `python tools/analyze_rom.py` absorve
 -> `python tools/check_map.py` (confere regressao; `--update` se intencional) -> recompilar.
 Como o arquivo do runtime cresce com o jogo, o baseline muda quando ele muda: esperado.
+
+### `--merge-runtime`: absorver o que o jogo executa
+`python tools/analyze_rom.py --merge-runtime` (apos rodar o jogo no runtime do Nasus):
+1. guarda o `map.json` anterior, regera a analise (le `build/recomp/program/extra_functions.csv`);
+2. imprime e grava em `build/analysis/merge_log.csv` (uma linha por merge: data, enderecos do
+   runtime, quantos eram novos, funcoes novas no total, por `source`, lista de enderecos). O
+   total pode ser maior que o do runtime: callees de uma funcao nova entram por `bl`;
+3. atualiza `build/analysis/baseline.json` SO se nada regrediu (`high`->`low`, continuacoes
+   perdidas, blocos RAM mudando); a contagem pode crescer sem limite. Se regrediu, o baseline
+   fica como esta e o relatorio diz o motivo. Sem a flag a analise nao toca no baseline.
+Exemplo real: 0x0802FC14 (callback folha sem `push`, so alcancavel por ponteiro em struct):
+`runtime_new=1, functions_new=1, source=runtime`, total 5669 -> 5670.
+Invariante em `check_map.py`: toda funcao ROM de `extra_functions.csv` esta no mapa.
+
+### Alvos de switch x funcoes (`orphan_switch_targets.csv`)
+Para cada alvo de `jumptables.csv` o analisador checa se alguma funcao do mapa contem a
+instrucao no seu fluxo (nao so `lo<=x<hi`) e se e a MESMA funcao do `site` do switch. Hoje:
+719 alvos distintos em 146 tabelas, **0 orfaos, 0 em outra funcao**. Os alvos pertencem a
+funcao do switch (por construcao: sao empilhados com o dono da funcao) e `lo/hi` os cobrem,
+inclusive em funcoes grandes (0x08070164: 276 insns, 0x08070164..0x08070402). Colunas: site,
+table, target, site_function, target_function, kind (`orphan` | `other-function`).
 
 ### Funcoes sem retorno alcancavel (`noreturn.csv`, coluna `noreturn_kind`)
 24 funcoes, todas explicadas (0 `suspect`):
@@ -552,6 +602,46 @@ WinGet, saidas em `build/hw/`: `frame_bg_obj.ppm`, `frame_mode3.ppm`). Resultado
   com PA/PD, WININ/WINOUT com bit de OBJ+mosaico, VCount IRQ ao mudar LYC. Janela SDL2: aguardando o usuario.
 Rodar tudo: `hw/tests/run.ps1` (test_frame, test_ppu, test_audio).
 
+### 7. Saida de audio SDL, PSG e custo do passo (quarta rodada)
+**Saida SDL2 (`hw/audio_sdl.h/.c`)** - `audio_open()` (48000 Hz = `hw_audio_rate()`, estereo, int16;
+0 ok, <0 erro com mensagem em stderr, sem crash), `audio_push(lr, frames)`, `audio_queued()`,
+`audio_underruns()`, `audio_dropped()`, `audio_close()`. Anel de 16384 quadros + callback SDL; fila
+limitada a **200 ms** (excedente: descarta o mais antigo e conta em `audio_dropped`); sem dado = silencio
+(conta em `audio_underruns`; 2-3 no inicio e normal). Uso no laco, 1x por quadro:
+`n = hw_audio_read(tmp, 4096); audio_push(tmp, n);`. Compilar junto de `hw.c`: `hw/audio_sdl.c`, `-lSDL2`.
+Demos: `hw/tests/run_demo.ps1` (janela; X toca uma nota PSG) e `run_demo.ps1 -Demo audio -Seconds 2`
+(PCM quadrada 567 Hz na 1a metade, pulso PSG 440 Hz na 2a). Verificado so com `SDL_AUDIODRIVER=dummy`
+(sem som audivel nesta maquina de teste): o fluxo roda e, com driver invalido, sai com mensagem e codigo 2.
+**PSG (canais 1-4) em hw.c, mixado ao PCM**
+- Canais: 1 pulso + sweep (SOUND1CNT_L/H/X = 0x60/0x62/0x64), 2 pulso (0x68/0x6C), 3 onda (0x70/0x72/0x74,
+  WAVE_RAM 0x90-0x9F em 2 bancos; a CPU acessa o banco que NAO esta tocando; bit5 = 64 amostras),
+  4 ruido (0x78/0x7C, LFSR 15 ou 7 bit). SOUNDCNT_L (0x80) enables/volume por lado, SOUNDCNT_H bits 0-1
+  = razao PSG 25/50/100%, SOUNDCNT_X bit7 master (desligar zera os registradores PSG), bits 0-3 de leitura =
+  status dos canais.
+- Sequenciador de 512 Hz (32768 ciclos): length 256 Hz, sweep 128 Hz, envelope 64 Hz. Trigger = bit 15 de CNT_X
+  (nao fica gravado); length reload ao escrever o campo; DAC off (envelope 0 e dir 0 / bit7 do CNT_L da onda)
+  impede o canal de ligar. Frequencias: pulso 131072/(2048-f) Hz, onda 65536/(2048-f) Hz.
+- Mix: nivel centrado (+-vol), x(vol_mestre+1) x razao(1/2/4) x 32 => vol 15 a 100% = +-15360 (PCM 8 bit a
+  100% = 256 por unidade). Amostrado em retencao de ordem zero a 48 kHz, sem filtro/bias analogico.
+- Testes `hw/tests/test_psg.c` (OK): T1 pulso 440 ciclos/s (esperado 439,8) e amplitude 15360; T2 envelope
+  (vol 15 -> 9 apos 6 passos, 0 em ~234 ms); T3 length corta em ~125 ms e status desliga; T4 sweep estoura 2047 e
+  desliga; T5 canal 2; T6 onda 442 ciclos/s (esperado 442,8) e banco da CPU; T7 ruido +-vol com 4759 transicoes;
+  T8 master off.
+- NAO feito: SOUNDBIAS/nivel analogico, mistura exata de saturacao, frequencia de sweep com `n` nao-escrito
+  quando shift=0, padrao do primeiro duty-step na troca de frequencia (usa a nova na proxima volta),
+  glitches de leitura de WAVE_RAM durante a reproducao, audio dos canais com troca de banco no meio do ciclo.
+**Custo de `hw_step`** (`hw/tests/bench_step.c`, -O2, 600 quadros, cena com BG + 32 sprites):
+| Cena | passo fixo 128 | passo por evento (novo) |
+|---|---|---|
+| A: PPU, sem audio | 1.35-1.39 ms/quadro | 1.33-1.35 |
+| B: PPU + PCM + PSG 1-4 | 1.42-1.44 | 1.40-1.43 |
+| C: forced blank (so passo/timers/DMA) | 0.030-0.033 | 0.010 |
+Orcamento de um quadro = 16,7 ms: ~8% (PPU+audio). O passo em si custa 0.01 ms (0,06%); o custo e a renderizacao
+por scanline (render_line), nao `hw_step`. O passo agora vai direto para o proximo evento (fim de HBlank/linha) e,
+com audio ligado, ate a proxima amostra de saida (assim FIFO/PSG ficam exatos a <1 amostra); sem audio nao ha teto.
+Nao ha ganho a buscar em `hw_step`; se o PPU virar gargalo no jogo real, o proximo passo e pular linhas quando
+nada mudou (cache de linha), nao mexer no passo.
+
 - Cuidado para o runtime: `hw_irq_pending` ja aplica IME e IE&IF; o runtime so decide o despacho.
   O registro BIOS_IF (0x03007FF8) e IWRAM, fica a cargo do runtime ao tratar VBlankIntrWait.
 
@@ -731,6 +821,44 @@ hardware de blend. Nenhuma mudanca foi feita para "passar".
   0B x555, 11 x1, 12 x15, 14 x2. Um unico aviso do barramento: `read8 0x100F0D55` (regiao
   inexistente; ponteiro lixo vindo do jogo ou de um erro nosso - NAO investigado).
 
+### Janela, ritmo, velocidade, audio (Nasus)
+- **Abrir e jogar:** `python -m recomp.program --window [escala]` (recompila se preciso, converge o
+  mapa em 700 quadros sem janela e abre `build/recomp/program/kirby.exe`). Direto:
+  `kirby.exe baserom.gba --window 3 [--sav F] [--keys ...] [--snap ...]`. `kirby.exe` + `SDL2.dll`
+  vem do mesmo build (`build_window`; SDL2 devel MinGW em `C:\libs\SDL2-2.32.2_64-w64-mingw32`
+  ou `SDL2_DIR`; linka a import lib `libSDL2.dll.a`, nao a estatica). `rt_boot.exe` segue sem
+  janela (testes, `--keys/--snap/--frames`).
+- **Teclas** (definidas em `hw/window_sdl.c`): Z=A, X=B, Backspace=SELECT, Enter=START, setas,
+  S=R, A=L, Esc ou fechar a janela = sair (grava o save no `atexit`). Com `--keys`, o roteiro
+  tambem vale (mesclado depois da leitura da janela).
+- **Ritmo:** 59,7275 quadros/s (280896 ciclos @ 16,78 MHz) com `QueryPerformanceCounter`; dorme
+  `Sleep(1)` so enquanto faltar >2 ms e gira no resto; se ficar >5 quadros atrasado, ressincroniza.
+  Nao dorme se o PC for mais lento (so conta "quadros atrasados"). Teste (300 quadros, janela
+  escala 2): 5,40 s para 5,02 s ideais - os ~0,4 s extras sao abertura da janela; 7 quadros
+  atrasados (os primeiros, com compilacao de SDL/janela).
+- **Velocidade real, sem limite de tempo** (`--bench --bench-from N`, 2600 quadros com o roteiro
+  de teclas ate a 1a fase): total **580 quadros/s (9,7x tempo real)**; trecho de fase q.2000..2600:
+  **563 quadros/s (9,4x)**. O custo e **87% `hw_step`** (PPU por linha + FIFO/timers + DMA):
+  438.823 chamadas, 1672 ciclos/chamada media, 3,90 s dos 4,48 s; o codigo do jogo recompilado leva
+  so 0,58 s. Ou seja, o gargalo nao e a recompilacao; se precisar de mais folga, otimizar o
+  render do `hw/` (passos de <=128 ciclos = ~2200 iteracoes/quadro, Gwen). Folga atual >9x.
+- **Audio:** por quadro chamo `hw_audio_read(buf, 4096)` (rate 48 kHz, ~804 amostras/quadro) e
+  entrego a `audio_push(buf, n)` se existir (simbolo fraco); senao descarta. Medido: 2,10 M
+  amostras estereo em 2600 quadros = 43,7 s de audio para 43,5 s de jogo (consistente).
+  Saida real de audio: pendente da Gwen (`audio_push`).
+- **Leitura em 0x100F0D55** (impressa uma vez com contexto; `rt_window.c: gba_bus_unmapped`):
+  `read8` com r0=0x100F0D55; lr=0x080339D1, sp=0x03007D8C, thumb; r1=08D6CD0C r2=08D60EE8
+  r3=02020EE0 r4=000001A8 r5=0203AD3C r6=08D60A80 r7=0600E4E8 r8=02020EE0 r9=08D60EE4
+  r10=08D6CD0C r12=02000000. Pilha de retornos esperados (interna -> externa): 080339D0
+  080333CE 08124026 08142686 08141EB2 08152D3A 08151CF8 08152A12; ultima chamada direta
+  08034FA8 (`pc` exato nao e mantido pelo codigo gerado; a pilha e o melhor indicio:
+  funcao que retorna para 0x080339D0 = quem le o byte). 0x100F0D55 nao e endereco de GBA:
+  provavelmente soma de ponteiro + indice com base errada (r4=0x1A8 e indice) - investigar a
+  funcao em ~0x08034FA8 / chamador 0x080339D0.
+- Rodadas do `iterate` agora usam o ULTIMO dump (`pc=`) no stderr (dumps informativos de
+  diagnostico apareciam antes e confundiam a descoberta de overlays). Novo overlay achado
+  em fase: 0x03007D18 (WriteSram na pilha com outro sp) e 0x030001F8 (ARM, SoundMainRAM).
+
 ### O que falta / riscos
 - Interpretador de fallback: endereco de RAM sem overlay ainda **aborta**; ROM sem funcao
   vira "retorna" (logado). Codigo em RAM que mude depois nao e achado sozinho fora do
@@ -830,3 +958,22 @@ Correcao em `tools/continuations.py` (falsos positivos apontados pela Poppy): ig
 <= 2 instrucoes (0x0814F890) e pais que contem `svc` (SoftReset 0x0815931C nunca retorna).
 Agora o script lista 0 pares: o mapa congelado ja absorveu as 49 continuacoes reais
 (`functions.csv` tem a coluna `continuations`), entao o script serve so como verificacao.
+
+## Leitura em 0x100F0D55: origem encontrada (Riven)
+**Causa (alta confianca na cadeia, media na conclusao): o proprio jogo le essa posicao quando um
+indice vale 0xFFFF; nao e erro do recompilador.**
+- Quem le: `0x08034FA8` (chamada em 0x080339CC com r0=0, caminho `r4==0`). Em 0x08035008 faz
+  `ptr = [0x08D6CD0C + 4*hw]` e em 0x0803500C `ldrb [ptr + 0x46]`.
+- `hw` e o halfword em `obj+0x60`, com `obj = 0x02020EE0 + byte[0x0203AD3C] * 0x1A8` (EWRAM).
+- A tabela `0x08D6CD0C` tem **1022 entradas validas** (zeros/ponteiros); depois vira outros dados
+  da ROM. Com `hw = 0xFFFF` a entrada lida e `0x08DACD08` = `0x100F0D0F`, e `+0x46` da
+  `0x100F0D55` (exatamente o endereco do aviso).
+- `0xFFFF` e a sentinela classica "sem objeto/sprite" (u16 = -1); a funcao nao a testa. Em
+  hardware real a leitura em 0x10... devolve o valor de barramento aberto, sem travar; o byte
+  so vira `r1 = (b << 9) + 0x5300` e o resultado alimenta um CpuSet de 0x80 palavras para VRAM
+  (0x060077A0 e 0x060074A0), que depois e sobrescrito.
+- **Conclusao:** comportamento do original (codigo que roda com o slot "vazio"). O runtime devolve 0
+  para regiao inexistente (contrato do `gba_bus.h`), o que e inofensivo aqui. Nao precisa de
+  correcao; se quiser fidelidade, devolver o ultimo valor lido (barramento aberto).
+- **Nao verificado:** que o jogo original tambem passa por 0xFFFF nesse ponto (so tenho a cadeia
+  estatica + o dump do Nasus). Para confirmar de verdade seria preciso um emulador de referencia.

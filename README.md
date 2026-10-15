@@ -24,10 +24,12 @@ not an emulator. Think of it as translating the compiled game once, ahead of tim
 | ARM/Thumb → C recompiler | working — the game boots and runs 8,000+ frames without aborting |
 | Hardware model | wired in: tiled/affine backgrounds, sprites, windows, blending, DMA, timers, PCM audio |
 | Picture | the title screen, the opening cutscene and the first level render correctly (saved as images) |
-| Window and keyboard | SDL2 window written and tested on a demo; not yet connected to the game |
-| Sound output and save | PCM audio is generated; not yet sent to speakers. Save file (32 KiB) works |
+| Window and keyboard | works: `python -m recomp.program --window 3` (Z/X = A/B, Enter = Start, arrows) |
+| Sound output | PCM and PSG audio are generated and an SDL2 audio output exists, but it is not yet linked into the game executable |
+| Save | works: 32 KiB `baserom.sav` |
 
-Numbers, decisions and open problems are in [`NOTES.md`](NOTES.md) (written in Portuguese).
+Numbers, decisions and open problems: an English summary in [`NOTES.en.md`](NOTES.en.md), and the
+full working log in [`NOTES.md`](NOTES.md) (Portuguese).
 
 ## How it works
 
@@ -64,7 +66,7 @@ baserom.gba ──► analysis ──► function map ──► recompiler ─�
 | [`recomp/`](recomp) | decoder, C emitter and runtime |
 | [`hw/`](hw) | GBA hardware model and its tests |
 | [`tests/`](tests) | recompiler tests (instruction-level comparison against Unicorn) |
-| [`NOTES.md`](NOTES.md) | technical notes, decisions and results |
+| [`NOTES.en.md`](NOTES.en.md), [`NOTES.md`](NOTES.md) | technical summary (English) and full working log (Portuguese) |
 | [`ROLES.md`](ROLES.md) | who owns what, for the parallel workstreams |
 
 ## Running it
