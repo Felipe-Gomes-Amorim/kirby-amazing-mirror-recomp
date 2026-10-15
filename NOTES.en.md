@@ -91,7 +91,7 @@ the BIOS sound driver. What it asks of the hardware:
 |---|---|
 | Output | PCM through FIFO A/B, fed by DMA1/DMA2 in sound-FIFO mode (`DMAxCNT_H = 0xB600`) |
 | Routing (`SOUNDCNT_H`) | `0xA90E`: channel A → right, channel B → left, both on Timer 0 |
-| Sample rate | 18,157 Hz: Timer 0 reload `-924` cycles, 304 samples per frame |
+| Sample rate | 15,768 Hz: Timer 0 reload `-1064` cycles, 264 samples per frame, DMA restarted every 6 frames |
 | Mixer | 1 KiB routine copied from ROM `0x0814F46C` to IWRAM `0x03000060` (Thumb entry `0x03000061`) |
 | Per frame | `m4aSoundVSync` (`0x0814FA3C`) then `SoundMain` (`0x0814F3E8`) |
 | PSG channels | also driven by the engine (square, wave, noise) |

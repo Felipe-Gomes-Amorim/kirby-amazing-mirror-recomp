@@ -40,10 +40,12 @@ janela, teclado, audio PCM+PSG e save. O que resta e precisao e acabamento, nao 
 - [ ] **Ligar `hw/audio_sdl.c` ao `kirby.exe`**: `rt_window.c` so chama `audio_push` fraco (descarta) e nao
   chama `audio_open`; hoje o jogo roda **sem som**
 - [x] Som ligado ao `kirby.exe` (audio_open + audio_push por quadro; `--mute`, `--audio-raw`)
-- [ ] **Estalo no canal esquerdo (~1x/s)** relatado pelo usuario; a correcao de pacing do Nasus nao eliminou
+- [x] Estalo no canal esquerdo: causa achada (latencia do IRQ de VBlank + DMA lendo alem do buffer) e corrigida
+  (`hw_step_irq`, relogio congelado no handler); **a confirmar de ouvido pelo usuario**
+- [ ] Volume do PSG ~2x alto (razao PSG/PCM 0,47, deveria ser 0,25): ainda nao corrigido em `hw/hw.c`
 - [ ] Conferir o som contra uma referencia (mGBA) - so o usuario ouviu, sem comparacao
 - [x] Leitura em 0x100F0D55: origem achada (indice 0xFFFF, comportamento do original; ver secao propria)
-- [ ] Interpretador de fallback para codigo em RAM nao previsto (hoje aborta)
+- [x] Interpretador de fallback para codigo em RAM (`recomp/runtime/rt_interp.c`): 0 divergencias vs compilado
 - [ ] Oraculo de programa inteiro (testes diferenciais de `bl`/pilha/IRQ)
 - [ ] Precisao de timing por ciclo; multiplayer por cabo fora do escopo
 - [ ] Licenca do repositorio e revisao dos trechos desmontados deste arquivo
@@ -275,11 +277,11 @@ Thumb (`add;ldr;mov pc`, tamanho pelo `cmp #n`) -> varre a ROM por ponteiros par
 `push {..,lr}` perto do codigo conhecido (heuristica, origem `ptr-scan`) -> classifica bytes.
 
 Resultado atual (B8KE v0): header ok (logo, 0x96, checksum), ~607k instrucoes (294 ARM,
-resto Thumb), **5670 funcoes**: 2140 `bl`, 3110 `ptr-scan`, 386 `addr-taken-leaf` (extras do
-Riven, tier A/B), 16 `m4a-jump-table`, 1 `runtime`, 6 `bx-const`, 3 `ram-code`, 5 `ram-ptr`, 1 `adr`, 2 `entry`. 146 tabelas de
+resto Thumb), **5671 funcoes**: 2140 `bl`, 3110 `ptr-scan`, 386 `addr-taken-leaf` (extras do
+Riven, tier A/B), 16 `m4a-jump-table`, 1 `runtime`, 1 `runtime-log`, 6 `bx-const`, 3 `ram-code`, 5 `ram-ptr`, 1 `adr`, 2 `entry`. 146 tabelas de
 salto (1539 entradas), ~7.4% da ROM e Thumb. Indiretos nao resolvidos: 12 (stubs
 `_call_via_rN` e `bx` soltos; `pop {rN}; bx rN` e retorno). 0 pontos nao decodificam; 4
-conflitos ARM/Thumb (bloco RAM 2, ver abaixo). Confianca: 5252 high, 387 medium, 30 low.
+conflitos ARM/Thumb (bloco RAM 2, ver abaixo). Confianca: 5252 high, 389 medium, 30 low.
 Opcoes: `--extra-functions CSV` (padrao build/indirect/new_functions.csv; `''` desliga),
 `--confidence CSV` (padrao build/indirect/confidence.csv; coluna `confidence`).
 
@@ -341,6 +343,21 @@ Exemplo real: 0x0802FC14 (callback folha sem `push`, so alcancavel por ponteiro 
 `runtime_new=1, functions_new=1, source=runtime`, total 5669 -> 5670.
 Invariante em `check_map.py`: toda funcao ROM de `extra_functions.csv` esta no mapa.
 
+### Entradas do runtime: logs, `ram-alias` e `runtime_seen.csv`
+Alem de `extra_functions.csv`, o analisador le `build/recomp/program/unresolved*.log`
+(`addr,mode,lr=..,sp=..`; linhas de texto livre sao ignoradas) como `source=runtime-log`.
+Normalizacao: espelhos de ROM 0x0A/0x0C -> 0x08; bit Thumb limpo. Classificacao:
+- endereco em **0x02/0x03xxxxxx** (rotina copiada para pilha/EWRAM/IWRAM, ex.: ReadSram/
+  VerifySram em `sp` variavel): **`ram-alias`**, NAO vira funcao do mapa. Vai para
+  `build/analysis/ram_alias.csv` e `map.json: ram_aliases`; o runtime as resolve por conteudo.
+- endereco de ROM sem funcao: entra como funcao (e seus callees), como qualquer extra.
+- fora disso (0x0E.. SRAM, inexistente): ignorado.
+`--merge-runtime` tambem acumula tudo que o runtime ja pediu em `build/analysis/runtime_seen.csv`
+(addr,mode,source,first_seen,note), lido nas execucoes seguintes: o mapa nao perde uma funcao
+quando o runtime apaga/reescreve seus logs (aconteceu com 0x0801870C: `unresolved.log` das 14:28
+sumiu antes do merge; funcao valida, struct-init com LCG, `bx lr` em 0x08018746). A invariante
+do `check_map.py` cobre `extra_functions.csv` e `unresolved*.log` (so enderecos ROM).
+
 ### Alvos de switch x funcoes (`orphan_switch_targets.csv`)
 Para cada alvo de `jumptables.csv` o analisador checa se alguma funcao do mapa contem a
 instrucao no seu fluxo (nao so `lo<=x<hi`) e se e a MESMA funcao do `site` do switch. Hoje:
@@ -371,13 +388,14 @@ Enderecos sao inteiros (decimal). Mudancas incompativeis incrementam o numero do
 { schema, rom, rom_base,
   header: {title, game_code, maker_code, version, header_checksum_ok, entry_branch_target, ...},
   functions: [ { addr, mode("arm"|"thumb"), lo, hi, insns, bytes,
-                 source("entry|bl|ptr-scan|addr-taken-leaf|m4a-jump-table|m4a-runtime|runtime|bx-const|adr|ram-code|ram-ptr"),
+                 source("entry|bl|ptr-scan|addr-taken-leaf|m4a-jump-table|m4a-runtime|runtime|runtime-log|bx-const|adr|ram-code|ram-ptr"),
                  tier("A"|"B"|null), confidence("high|medium|low|unscored"),
                  jumptable(bool), has_return(bool), continuations(int),
                  noreturn_kind(str|null), store_addr(int|null), exec_addr(int|null),
                  ram_block(int|null) } ],          # ordenado por addr
   regions: [ {start, end, size, kind("arm|thumb|literal_pool|jumptable|data")} ],  # [start,end)
   ram_code: [ {block, site, method, store, exec, size, compressed, mode} ],
+  ram_aliases: [ {addr, mode, seen_in[]} ],        # PCs em RAM/pilha vistos pelo runtime (NAO sao funcoes)
   continuations: [ {child, parent, why} ],          # filho e parte da funcao `parent`
   jump_tables: [ {site, table, mode, targets[]} ],
   unresolved_indirect: [ {addr, insn} ] }
@@ -644,6 +662,46 @@ por scanline (render_line), nao `hw_step`. O passo agora vai direto para o proxi
 com audio ligado, ate a proxima amostra de saida (assim FIFO/PSG ficam exatos a <1 amostra); sem audio nao ha teto.
 Nao ha ganho a buscar em `hw_step`; se o PPU virar gargalo no jogo real, o proximo passo e pular linhas quando
 nada mudou (cache de linha), nao mexer no passo.
+
+### 8. Estalo no canal esquerdo - causa (Gwen)
+**Resumo:** nao ha assimetria entre DMA1/FIFO A e DMA2/FIFO B em `hw/`; o estalo vem de o **reinicio do DMA
+do M4A cair as vezes depois de um pedido de FIFO**, o que faz o DMA ler 16 bytes **alem do fim** do buffer
+PCM. Nos dois canais acontece; so e audivel no B porque o que vem depois do buffer B e uma tabela de ponteiros
+(`49 F8 14 08 B9 F8 14 08 ...` = 0x0814F849, 0x0814F8B9) e o que vem depois do buffer A e o inicio do buffer B
+(amostras validas). O gatilho e a **latencia do IRQ de VBlank no runtime** (varia de 0 a ~8000 ciclos).
+- **Medido** (stage 1, 3500 quadros, `--audio-raw` + log temporario no hw): `m4aSoundVSync` faz, nos DOIS
+  canais e no mesmo ciclo, `CNT=0x84400004` -> `CNT_H=0x0400` -> `CNT_H=0xB600`, a cada **6 quadros**
+  (1685376 ciclos). Os buffers sao de 0x630 = **1584 B** cada (A em 0x030008B0, B em 0x03000EE0; B termina em
+  0x03001510). Timer0 reload = **0xFBD8 = -1064** => **264 amostras/quadro = 15768 Hz** (o NOTES do Riven diz
+  18157 Hz/304: o campo de frequencia do modo e 1-based, indice 5 = 15768 Hz, 1584/264 = 6 quadros exatos,
+  **zero folga no buffer**). Reinicios em ~584 periodos: 310 com 396 palavras (99 pedidos), **137 com 400
+  (100 pedidos: le 1600 B)**, **136 com 392 (98 pedidos: pula 16 B)**. As 137 leituras alem do fim sao
+  exatamente os `49 F8` vistos no fluxo do B (src 0x03001510 = fim do buffer B), e o salto isolado de 18688
+  (= 73*256) no L tem sempre a fase 0.77 do quadro, em multiplos de 6 quadros.
+- **Mecanismo:** a FIFO pede 16 B quando restam <=16. Com 1584 amostras por periodo = 99 pedidos exatos, o
+  numero de pedidos entre dois reinicios e `99 - e_p + e_(p+1)`, onde e=1 se o reinicio chegou DEPOIS do
+  pedido que cai logo apos o VBlank. Latencia constante => 99 sempre (correto). Latencia que oscila ao redor
+  do pedido => 0->1: 100 pedidos (le alem do fim = estalo no B); 1->0: 98 pedidos (16 amostras puladas).
+- **O runtime causa o jitter** (`recomp/runtime/gba_bios.c`): `rt_tick` soma 24 ciclos/chamada e so avanca o
+  hw a cada 1232; `rt_tick_loop` avanca **8192** de uma vez; o IRQ so e entregue depois do passo. Resultado:
+  reinicio em vcount=160, line_cyc 0..1300 (distribuicao uniforme), e as vezes em 161. Sem isso o reinicio
+  cairia sempre ~0 ciclos apos o VBlank (o pedido critico fica ~896 ciclos depois, margem de ~0,9 linha).
+- **Experimento** (hw_step parando no IRQ e descartando o resto, so para teste): leituras alem do fim
+  137 -> 14, periodos de 98 pedidos 136 -> 13, reinicios todos em vcount=160/line_cyc<100 salvo 13 em 161.
+- **O que hw/ entrega:** `uint32_t hw_step_irq(uint32_t cycles)` (hw.h): como `hw_step`, mas para no instante em
+  que uma interrupcao habilitada (IME&IE&IF) FICA pendente e devolve os ciclos consumidos; o chamador entrega
+  o IRQ e continua com o resto. Tambem: o passo de `hw_step` agora termina exatamente no estouro de timer (antes
+  o pop da FIFO podia atrasar ate 349 ciclos). Teste `hw/tests/test_m4a_sync.c` (OK): A e B pedem nos mesmos
+  instantes/offsets; com latencia constante (0..5000) sempre 99 pedidos, L==R e nenhum ponteiro; com
+  latencia 0/1000 alternada: 98,100,98,100... pedidos, ponteiro (73) so no L (como medido no jogo);
+  `hw_step_irq` para exatamente no VBlank.
+- **Pedido ao runtime** (ROLES.md): usar `hw_step_irq` em `rt_tick`, `rt_tick_loop` e `vblank_intr_wait`
+  (entregar o IRQ no ciclo exato e depois gastar o resto), e nao avancar o hw enquanto roda o handler de IRQ
+  (relogio congelado ate o retorno), para o reinicio cair sempre no mesmo ponto (e_p constante).
+- **Descartado:** FIFO A vs B (mesma logica, `cur` repete a ultima amostra no underflow nos dois), latch de
+  SAD/DAD (recarregado do registrador em 0->1 nos dois), contagem de palavras (4 por pedido, ignora CNT_L).
+  O `0x8440` do `CNT=0x84400004` com o DMA ja armado nao dispara transferencia (so troca o campo de timing),
+  igual ao mGBA; o `0x0400` desarma e `0xB600` rearma recarregando SAD.
 
 - Cuidado para o runtime: `hw_irq_pending` ja aplica IME e IE&IF; o runtime so decide o despacho.
   O registro BIOS_IF (0x03007FF8) e IWRAM, fica a cargo do runtime ao tratar VBlankIntrWait.
@@ -916,6 +974,54 @@ hardware de blend. Nenhuma mudanca foi feita para "passar".
   porta) - quem reproduziu o crash deve rodar o mesmo trajeto com este build e confirmar que
   a fase seguinte carrega.
 
+### Interpretador de fallback (Nasus) - `recomp/runtime/rt_interp.c`
+- **O que e:** interpretador ARM/Thumb (ARMv4T) em C, mesma semantica do emissor: PC le +8/+4
+  (+12 com shift por registrador e em STR/STM), LDR rotaciona, STR/STRH alinham, LDM/STM,
+  B/BL/BX, MUL/MULL, MRS/MSR, SWI -> HLE, laco com `rt_tick_loop` (tempo e IRQ). Sem LDRD/SWP/
+  coprocessador (ignorados). O decoder e reescrito em C (decode.py nao roda no runtime); a
+  fidelidade vem do teste diferencial abaixo.
+- **Quando entra:** `rt_call` sem funcao recompilada -> (1) alias SRAM; (2) registra 1x em
+  `unresolved.log` (`ENDERECO,modo,lr=,sp=,body=<32 bytes em hex>`); (3) interpreta ate o `pc`
+  cair numa funcao conhecida ou em um retorno esperado por frame C externo (`rt_rets`/IRQ).
+  `bl` para funcao compilada vira chamada C normal e a interpretacao continua depois dela.
+  Vale para RAM (overlay desconhecido) e ROM fora do mapa (antes: "retorna", aproximacao).
+  Fora das duas regioes (ex.: 0x100F0D55, saltos lixo) ainda aborta.
+- **Abort que sobra** imprime os **64 bytes em pc + hash FNV-1a (64 e 32 bytes)**, alem de
+  pc/lr/regs/ultimas chamadas, para decidir overlay ou alias:
+  `[rt] SEM FUNCAO em XXXXXXXX (thumb): 64 bytes=...` / `hash do corpo ...`.
+- **Construcao (`iterate`) nao muda:** usa `--stop-on-unresolved` (aborta no 1o miss, ROM ou RAM)
+  para continuar descobrindo overlays/handlers; o fallback so atua em execucao normal/`kirby.exe`.
+- **Testes** (`rt_boot.exe baserom.gba --selftest-interp`):
+  1. corpo de VerifySram copiado para 3 enderecos da pilha (0x03007CEC, 0x03007B80, EWRAM
+     0x02002340), alias desligado: o fallback da r0/sp/r4 **iguais** ao nativo (igual e diferente).
+  2. **diferencial**: 150 funcoes recompiladas da ROM (<=0x100 bytes) x 6 estados aleatorios,
+     compilado x interpretado (r0-r14, NZCV, pc, modo, EWRAM+IWRAM): **571 execucoes comparadas,
+     0 divergencias** (23 com limite de laco/abort ignoradas), 123 M instrucoes interpretadas.
+  3. **jogo inteiro forcado ao interpretador** (`--no-sram-alias --no-overlays`: mixer SoundMainRAM,
+     handler de IRQ em IWRAM e rotinas SRAM todos interpretados): 6000 quadros, 12072 entradas,
+     141 M instrucoes, 0 abortos; **quadro final (PPM) e audio PCM (`--audio-raw`) byte a byte
+     iguais** aos da execucao compilada (4000 quadros, md5 identicos).
+- **Custo:** nada novo acontecendo = 0 entradas, 0 instrucoes (546 q/s, 9,1x). Com TUDO em RAM
+  interpretado: 442 q/s (7,4x), ainda acima de 60. Sem impacto em `--keys`/janela.
+- Limite: 50 M passos por entrada (so avisa 1x e continua no proximo `rt_call`).
+
+### Latencia de IRQ de VBlank: hw_step_irq + relogio congelado no handler (Nasus)
+- Pedido da Gwen (estalo do canal esquerdo = DMA do M4A lendo 16 bytes alem do buffer PCM
+  quando o reinicio cai depois de um pedido de FIFO). So `gba_bios.c`:
+  1. `rt_tick`, `rt_tick_loop` e a espera de `VBlankIntrWait` avancam o hw por `run_cycles()`:
+     `hw_step_irq(left)` ate gastar tudo, **parando no instante em que um IRQ habilitado fica
+     pendente**; a cada parada `grab_frame()` + `rt_irq_service()` entregam o IRQ na hora (latencia
+     ~0). Se `hw_step_irq` devolve 0 (IRQ pendente mas nao entregavel, I=1) avanca com `hw_step`
+     para nao travar. `rt_hwstep_calls/cycles` continuam contados (`timed_step_irq`).
+  2. **Relogio congelado durante o handler** (`in_irq`): `rt_tick` (24 ciclos/chamada) e
+     `rt_tick_loop` retornam sem avancar enquanto o handler de IRQ executa, entao
+     `m4aSoundVSync` roda sempre em VBlank+0.
+- Medido depois (6000 quadros, roteiro de teclas): 590 q/s (9,9x), 1,02 M chamadas de
+  `hw_step_irq`, 1658 ciclos/chamada; 6001 IRQ. Compilado x interpretado (RAM forcada ao
+  interpretador): quadro e audio PCM continuam **byte a byte iguais**; `--selftest-interp` 0
+  divergencias. Nao medi o numero de pedidos de FIFO por periodo (99) nem ouvi: isso e do lado
+  da Gwen (precisa do build novo `kirby.exe`).
+
 ### O que falta / riscos
 - Interpretador de fallback: endereco de RAM sem overlay ainda **aborta**; ROM sem funcao
   vira "retorna" (logado). Codigo em RAM que mude depois nao e achado sozinho fora do
@@ -957,12 +1063,13 @@ SoundDriver* da BIOS). Estrutura `SoundInfo` apontada por `[0x03007FF0]`; campo 
 | DMA1SAD/DAD, DMA2SAD/DAD | SoundInfo+0x350 -> 0x040000A0; SoundInfo+0x980 -> 0x040000A4 | os dois buffers PCM (0x630 = 1584 B cada) |
 | DMA1CNT_H / DMA2CNT_H (0x040000C6 / D2) | 0xB600 | enable, repeat, 32 bit, dest fixo, inicio = FIFO especial |
 | Parar DMA | grava 0x84400004 em DMAxCNT (32 bit) e depois 0x0400 em CNT_H | usado em SoundInit / VSyncOff / VSync |
-| TM0CNT_L 0x04000100 | `-(0x44940 / 304)` = -924 | 924 ciclos por amostra (prescaler 1) |
+| TM0CNT_L 0x04000100 | `-(0x44940 / 264)` = -1064 | 1064 ciclos por amostra (prescaler 1) |
 | TM0CNT_H 0x04000102 | 0x0080 | habilita Timer0, **sem IRQ** |
 | VCOUNT 0x04000006 | espera sair e voltar a 0x9F (159) | para iniciar o Timer0 alinhado ao quadro |
 Modo de som (literal 0x0095FA00 em m4aSoundInit): 10 canais, volume 15, DAC 8 bit, indice de
-frequencia 5 (**18157 Hz**, 304 amostras por quadro); pcmDmaPeriod = 1584/304 = 5; pcmFreq =
-304 * 59,7275 Hz. Tabela de amostras/quadro em ROM 0x08B58604 (u16).
+frequencia 5 (**15768 Hz**, 264 amostras por quadro); pcmDmaPeriod = 1584/264 = 6; pcmFreq =
+264 * 59,7275 Hz. (CORRIGIDO: a 1a versao dizia 18157 Hz/304/5 por eu ter lido o indice 5 como a 6a entrada
+da tabela; a tabela em ROM e 1-based: [96,132,176,224,**264**,304,...].) Tabela de amostras/quadro em ROM 0x08B58604 (u16).
 Canais PSG (SOUND1..4, WAVE_RAM) tambem sao tocados pela engine (funcoes 0x08150354,
 0x08150634, 0x08150B98, 0x08150C50, 0x08157210, 0x0803A1F4): implementar depois da FIFO.
 
@@ -970,12 +1077,12 @@ Canais PSG (SOUND1..4, WAVE_RAM) tambem sao tocados pela engine (funcoes 0x08150
 1. FIFO A/B de 8 palavras (32 bytes), amostras assinadas de 8 bit. Timer0 estourando consome
    1 amostra de cada FIFO ligado ao Timer0. Quando sobram <= 16 bytes, DMA1/DMA2 em modo
    especial (CNT_H = 0xB600) transfere 4 palavras de SAD (incrementando), destino fixo.
-2. Saida: esquerda = B, direita = A (SOUNDCNT_H 0xA90E). Reamostrar 18157 Hz -> 48 kHz.
-3. Timer0 em 924 ciclos/amostra (16,78 MHz / 924 = 18157 Hz). Sem timer, nao ha som.
+2. Saida: esquerda = B, direita = A (SOUNDCNT_H 0xA90E). Reamostrar 15768 Hz -> 48 kHz.
+3. Timer0 em 1064 ciclos/amostra (16,78 MHz / 1064 = 15768 Hz). Sem timer, nao ha som.
 4. PSG (canais 1-4) so depois: as notas "normais" do jogo sao PCM via FIFO.
 ### O que o runtime (Nasus) dispara por quadro
 - VBlank IRQ -> tabela 0x030017B0[1] -> `m4aSoundVSync` (0x0814FA3C) -> `SoundMain` (0x0814F3E8)
-  uma vez por quadro (pelo loop principal, via 0x08150110), que escreve ~304 amostras/quadro.
+  uma vez por quadro (pelo loop principal, via 0x08150110), que escreve 264 amostras/quadro.
 - `hw_step` precisa avancar Timer0 e a FIFO ANTES de entregar a IRQ, senao o DMA nunca recarrega.
 - O mixer e Thumb em IWRAM 0x03000061: ja listado como overlay (0x03000060) pelo runtime.
 
@@ -1054,3 +1161,23 @@ informativo, ver secao propria; o fatal e o segundo.)
   primeiros bytes (ate o tamanho conhecido) com os corpos das rotinas SRAM da ROM e **chamar a
   funcao nativa da ROM** com os mesmos registradores; retorna por `bx r1`/`lr` normalmente. Vale
   para qualquer `sp`. Se nao casar com nada, manter o abort atual.
+
+## Analise do estalo e do volume no som (Riven) - `tools/audio_spikes.py`
+Dados: 70,5 s de jogo gravados pelo usuario com `--audio-raw` (`build/hw/pcm.raw`, 48 kHz, estereo).
+**1. Estalo esquerdo = amostras isoladas erradas, so no canal L, travadas ao quadro.**
+- 298 eventos em L sem contrapartida em R; 0 equivalentes em R (R limpo). ~1 a cada 14 quadros.
+- Largura: uma amostra de 15768 Hz (~3 amostras a 48 kHz), saindo do nivel e voltando.
+- **Fase fixa**: 295 de 298 caem no mesmo decimo do quadro (0,7-0,8 do quadro), isto e, no
+  **inicio do VBlank** (linha 160 de 228). Nao ha periodicidade de 5 quadros (pcmDmaPeriod).
+- Altura tipica: -47 (141 vezes) e +71..+83 unidades PCM (valores de 8 bit; x256 em 16 bit).
+- Interpretacao: algo no VBlank (IRQ/`m4aSoundVSync`/`hw_audio_read`) injeta ou repete uma
+  amostra errada so na FIFO B (DMA2). Causa nao identificada; candidatos: reinicio do DMA2 no
+  VBlank pegando dado do buffer que o mixer esta reescrevendo; ordem DMA1 x DMA2; leitura do
+  buffer em hw_step antes do SoundMain terminar.
+**2. "Som de dano mais alto": PSG ~2x alto demais em relacao ao PCM.**
+- GBATek: "Each of the two FIFOs can span the FULL output range (+-200h). Each of the four
+  PSGs can span one QUARTER of the output range (+-80h)". Razao PSG/PCM por canal = 1/4.
+- Em `hw.c`: PCM 100% = 256/unidade (+-32768 = escala cheia), PSG vol 15 x master 8 x 100% x 32
+  = +-15360 => razao 0,47 (deveria ser 0,25, +-7680). Logo o PSG sai ~1,9x (6 dB) mais alto.
+- Nao verificado que o som de dano e PSG; e a explicacao mais provavel para o relato.
+- Pico medido: |L|,|R| max ~23000 (70% da escala), sem clipping.
