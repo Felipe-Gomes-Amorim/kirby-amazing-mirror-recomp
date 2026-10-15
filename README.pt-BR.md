@@ -47,7 +47,7 @@ O Windows pode avisar sobre programa não assinado: o launcher executa um compil
 | Hardware | fundos tiled/afins, sprites, janelas, blending, mosaico, DMA, timers, áudio PCM e PSG |
 | Imagem | título, abertura e a primeira fase aparecem corretos |
 | Launcher | estado da construção, janela 1x–6x, tela cheia, escala Integer / Fit / Stretch, volume, Play |
-| Entrada | teclado e um controle, telas de remapeamento, analógico com zona morta ajustável |
+| Entrada | teclado e um controle (testado com um genérico), telas de remapeamento, analógico com zona morta ajustável |
 | Som | PCM e PSG por SDL2 (ainda não comparado com uma referência) |
 | Save | `<rom>.sav` de 32 KiB ao lado da ROM |
 | Jogar enquanto compila | interpretador agora, jogo compilado na próxima abertura |
@@ -56,8 +56,8 @@ O Windows pode avisar sobre programa não assinado: o launcher executa um compil
 
 - Os testes se concentram na **primeira área**; fases profundas, chefes e todos os poderes não foram
   verificados. Reporte falhas com `%LOCALAPPDATA%\KirbyRecomp\launcher.log`.
-- O **caminho do controle ainda não foi testado com um controle físico** (nos testes usou-se um
-  joystick virtual do SDL).
+- O suporte a controle foi **testado com um controle genérico** e funciona; outros modelos (Xbox,
+  PlayStation, Switch Pro) devem funcionar pelos mapeamentos do SDL, mas não foram testados.
 - Só a ROM USA. Multiplayer por cabo não está implementado.
 - O tempo é aproximado (não é preciso por ciclo); o executável não é assinado.
 

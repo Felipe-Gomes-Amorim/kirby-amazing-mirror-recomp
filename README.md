@@ -48,7 +48,7 @@ Windows may warn about an unsigned program: the launcher runs a compiler and the
 | Hardware model | tiled/affine backgrounds, sprites, windows, blending, mosaic, DMA, timers, PCM and PSG audio |
 | Picture | title screen, opening cutscene and the first level render correctly |
 | Launcher | build status, window size 1x–6x, fullscreen, Integer / Fit / Stretch scaling, volume, Play |
-| Input | keyboard and one controller, remapping screens, analog stick with adjustable dead zone |
+| Input | keyboard and one controller (tested with a generic pad), remapping screens, analog stick with adjustable dead zone |
 | Sound | PCM and PSG through SDL2 audio (not compared against a reference yet) |
 | Save | 32 KiB `<rom>.sav` next to the ROM |
 | Play while building | interpreter now, compiled game on the next start |
@@ -57,8 +57,8 @@ Windows may warn about an unsigned program: the launcher runs a compiler and the
 
 - Testing is concentrated in the **first area**; deep levels, bosses and every copy ability are
   unverified. Please report crashes with `%LOCALAPPDATA%\KirbyRecomp\launcher.log`.
-- The **controller path has not been tried with a physical controller** yet (a virtual SDL
-  joystick was used in tests).
+- Controller support was **tried with one generic controller** and works; other models (Xbox,
+  PlayStation, Switch Pro) are expected to work through SDL's mappings but are untested.
 - USA ROM only. Link-cable multiplayer is not implemented.
 - Timing is approximate (not cycle-accurate); the executable is not code-signed.
 

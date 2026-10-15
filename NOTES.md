@@ -1979,3 +1979,7 @@ Feedback com capturas (tela cheia 1903x1079 mostrava o jogo em 1440x960 = 6x int
   desenhada) para o usuario calibrar. 8 direcoes (diagonais pelas combinacoes), histerese para nao oscilar na borda.
 - Teclas reservadas (Esc, F11, F1) nao sao remapeaveis; troca ao detectar conflito; Reset por aba.
 - Desenho do controle: vetorial proprio (corpo, L/R, cruzeta, A/B, Select/Start), sem assets da Nintendo.
+
+### Controle fisico testado (usuario)
+Testado com **um controle generico**: funciona (leitura por posicao, analogico, remapeamento). Modelos Xbox, PlayStation e
+Switch Pro seguem sem teste proprio; dependem dos mapeamentos do SDL_GameController.
