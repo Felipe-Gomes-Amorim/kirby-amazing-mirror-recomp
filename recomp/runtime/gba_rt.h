@@ -11,6 +11,14 @@ void rt_set_mode(Cpu *, uint32_t mode);
 void rt_dump(Cpu *, const char *why);
 void rt_abort(Cpu *, const char *why); /* imprime pc/lr/regs e termina (exit 2) */
 
+/* contadores / estado (impressos pelo rt_boot) */
+extern uint64_t rt_irq_delivered, rt_irq_biosif_by_handler, rt_irq_biosif_by_runtime,
+    rt_irq_ack_by_runtime, rt_frames_done, rt_frames_limit, rt_unresolved_count;
+extern const char *rt_unresolved_path;
+const uint32_t *rt_last_frame(void);
+extern uint32_t rt_loop_site;
+void rt_irq_service(Cpu *);
+
 /* opcoes do HLE */
 extern int rt_opt_stop_at_vblank_wait; /* 1: para na 1a VBlankIntrWait (teste do crt0) */
 extern int rt_swi_count[256];

@@ -41,6 +41,8 @@ def build_fuzz(thumb, n_insns, seed):
             w = rng.getrandbits(32)
             if rng.random() < 0.6:
                 w = (w & 0x0FFFFFFF) | (AL << 28)
+            if rng.random() < 0.1:   # multiplicacoes longas (umull/smlal...)
+                w = (w & 0xF0FFFF0F) | 0x00800090
             blob = struct.pack('<4I', w, BX_LR_ARM, BX_LR_ARM, 0)
         rom = Rom(bytes(words) + blob)
         try:

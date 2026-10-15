@@ -182,9 +182,16 @@ static void ram_reset(uint32_t flags) {
     if (flags & 0x80) { clear_range32(0x04000000, 0x60); clear_range32(0x040000B0, 0x50); }
 }
 
-static void irq_deliver(Cpu *c) {
-    uint16_t pend = hw_irq_pending();
-    if (!pend || (c->psr_if & 0x80)) return;
+/* Entrega uma IRQ como o stub da BIOS: salva o contexto, entra em modo IRQ com
+ * r0 = 0x04000000 e lr = RT_IRQ_RET, chama o handler em [0x03007FFC] e restaura. */
+uint64_t rt_irq_delivered, rt_irq_biosif_by_handler, rt_irq_biosif_by_runtime,
+    rt_irq_ack_by_runtime;
+static const uint32_t *last_frame;
+uint64_t rt_frames_done, rt_frames_limit;
+static uint64_t rt_frames_counted;
+const uint32_t *rt_last_frame(void) { return last_frame; }
+
+static void irq_deliver(Cpu *c, uint16_t pend) {
     uint32_t sr[13], sflags[4] = {c->n, c->z, c->c, c->v};
     uint32_t smode = c->mode, sthumb = c->thumb, spsr_if = c->psr_if, spc = c->pc;
     memcpy(sr, c->r, sizeof sr);
@@ -195,14 +202,64 @@ static void irq_deliver(Cpu *c) {
     uint32_t vec = gba_read32(IRQ_VECTOR);
     c->thumb = vec & 1;
     c->pc = vec & ~1u;
-    rt_run_until(c, RT_IRQ_RET);
+    rt_irq_delivered++;
+    { extern int rt_trace_psr; if (rt_trace_psr) fprintf(stderr, "[irq] entrega pend=%04X vec=%08X de modo %02X pc=%08X\n", pend, vec, smode, spc); }
+    if (!rt_run_until(c, RT_IRQ_RET)) rt_abort(c, "handler de IRQ voltou a um frame externo");
+    { extern int rt_trace_psr; if (rt_trace_psr) fprintf(stderr, "[irq] handler voltou pc=%08X modo=%02X\n", c->pc, c->mode); }
     if (c->stop) return;
+    /* a BIOS nao reconhece IF; o handler do jogo normalmente faz. Se nao fez, o
+     * runtime garante (senao a IRQ dispara de novo para sempre). */
+    uint32_t iflag = gba_read16(0x04000202);
+    if (iflag & pend) {
+        gba_write16(0x04000202, iflag & pend); /* w1c */
+        rt_irq_ack_by_runtime++;
+    }
+    if (gba_read16(BIOS_IF) & pend) {
+        rt_irq_biosif_by_handler++;
+    } else {
+        gba_write16(BIOS_IF, gba_read16(BIOS_IF) | pend);
+        rt_irq_biosif_by_runtime++;
+    }
     rt_set_mode(c, smode);
     memcpy(c->r, sr, sizeof sr);
     c->n = sflags[0]; c->z = sflags[1]; c->c = sflags[2]; c->v = sflags[3];
     c->thumb = sthumb;
     c->psr_if = spsr_if;
     c->pc = spc;
+}
+
+/* chamado em pontos seguros (limites de chamada) e dentro das esperas da BIOS */
+void rt_irq_service(Cpu *c) {
+    if (c->psr_if & 0x80) return;
+    uint16_t pend = hw_irq_pending();
+    if (pend) irq_deliver(c, pend);
+}
+
+static void grab_frame(void) {
+    const uint32_t *fb = hw_frame_ready();
+    if (fb) {
+        last_frame = fb;
+        rt_frames_done++;
+    }
+}
+
+void rt_tick(Cpu *c) {
+    static uint32_t acc;
+    acc += 24; /* estimativa grosseira de ciclos por chamada de funcao */
+    if (acc < 1232) return;
+    hw_step(acc);
+    acc = 0;
+    grab_frame();
+    rt_irq_service(c);
+}
+
+uint32_t rt_loops, rt_loop_site;
+
+void rt_tick_loop(Cpu *c, uint32_t site) {
+    rt_loop_site = site;
+    hw_step(8192); /* ~1024 voltas de um laco curto */
+    grab_frame();
+    rt_irq_service(c);
 }
 
 static int vblank_intr_wait(Cpu *c, uint32_t next) {
@@ -213,13 +270,19 @@ static int vblank_intr_wait(Cpu *c, uint32_t next) {
         c->stop = RT_STOP_VBLANK_WAIT;
         return 1;
     }
-    for (uint64_t guard = 0; !(gba_read16(BIOS_IF) & 1); guard++) {
-        if (guard > 2000000) rt_abort(c, "VBlankIntrWait: deadlock (nenhum IRQ de VBlank chegou)");
+    /* sem IE/DISPSTAT de VBlank o jogo travaria no hw real tambem */
+    for (unsigned guard = 0; !(gba_read16(BIOS_IF) & 1); guard++) {
+        if (guard > 228 * 3) rt_abort(c, "VBlankIntrWait: nenhum IRQ de VBlank em 3 quadros");
         hw_step(1232);
-        irq_deliver(c);
+        grab_frame();
+        rt_irq_service(c);
         if (c->stop) return 1;
     }
     c->pc = next;
+    if (rt_frames_limit && ++rt_frames_counted >= rt_frames_limit) {
+        c->stop = RT_STOP_FRAMES;
+        return 1;
+    }
     return 0;
 }
 

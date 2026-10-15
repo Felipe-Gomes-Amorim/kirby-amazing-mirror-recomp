@@ -67,8 +67,14 @@ def decode_arm(w, addr):
                        odd=not (w & (1 << 21)) and ((w >> 12) & 15) != 0)
         if (w & 0x90) == 0x90 and (w & 0x60) != 0:
             return _arm_lsh(w, ins, addr)
+        if (w & 0x0F8000F0) == 0x00800090:
+            hi, lo = (w >> 16) & 15, (w >> 12) & 15
+            rm, rs = w & 15, (w >> 8) & 15
+            return ins('mull', rdhi=hi, rdlo=lo, rm=rm, rs=rs, signed=bool(w & (1 << 22)),
+                       acc=bool(w & (1 << 21)), s=bool(w & (1 << 20)),
+                       odd=15 in (hi, lo, rm, rs) or hi == lo or hi == rm or lo == rm)
         if (w & 0x90) == 0x90:
-            raise Unsupported('mul-long/swp')
+            raise Unsupported('swp')
         return _arm_dp(w, ins, imm=False)
     if top == 1:
         return _arm_dp(w, ins, imm=True)

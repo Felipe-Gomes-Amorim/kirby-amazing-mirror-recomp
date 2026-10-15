@@ -22,20 +22,25 @@ def hx(v):
 
 
 class Function:
-    def __init__(self, entry, thumb, insns):
+    def __init__(self, entry, thumb, insns, jump_targets=frozenset()):
         self.entry, self.thumb, self.insns = entry, thumb, insns  # insns: {addr: Insn}
+        # alvos de `bl` que sao continuacao da MESMA funcao (agbcc usa bl como salto longo)
+        self.jump_targets = frozenset(jump_targets)
+
+    suffix = ''    # overlays: variantes de codigo diferente no mesmo endereco
 
     @property
     def name(self):
-        return 'fn_%08X' % self.entry
+        return 'fn_%08X%s' % (self.entry, self.suffix)
 
 
 # ------------------------------------------------------------ discovery
-def discover(read16, entry, thumb, max_insns=300, max_span=0x400):
+def discover(read16, entry, thumb, max_insns=300, max_span=0x400, jump_targets=frozenset(),
+             extra_seeds=()):
     """Segue o fluxo a partir de `entry`. Levanta Unsupported se algo no caminho
     nao for suportado. Desvios incondicionais para longe (> max_span) viram saida
     (tail call); `bl` e tratado como chamada que retorna."""
-    insns, todo = {}, [entry]
+    insns, todo = {}, [entry] + list(extra_seeds)
     while todo:
         a = todo.pop()
         if a in insns:
@@ -51,13 +56,15 @@ def discover(read16, entry, thumb, max_insns=300, max_span=0x400):
                 succ.append(f['target'])
             if i.cond != AL:
                 succ.append(i.next)
+        elif i.kind == 'b' and f['link'] and f['target'] in jump_targets:
+            succ.append(f['target'])      # `bl` usado como salto longo: nao retorna aqui
         elif i.kind == 'bx' or _writes_pc(i):
             if i.cond != AL:
                 succ.append(i.next)
         else:
             succ.append(i.next)
         todo.extend(succ)
-    return Function(entry, thumb, insns)
+    return Function(entry, thumb, insns, jump_targets)
 
 
 def _writes_pc(i):
@@ -166,6 +173,19 @@ class Emitter:
         out = ['{', 'uint32_t res = %s;' % e, 'cpu->r[%d] = res;' % f['rd']]
         if f['s']:
             out.append('SETNZ(res);')   # C: indefinido em ARMv4; mantido
+        out.append('}')
+        return out
+
+    def mull(self, i):
+        f = i.f
+        a, b = ('(int64_t)(int32_t)', '(int64_t)(int32_t)') if f['signed'] else ('(uint64_t)', '(uint64_t)')
+        out = ['{', 'uint64_t p = (uint64_t)(%s%s * %s%s);' % (
+            a, self.reg(f['rm'], i), b, self.reg(f['rs'], i))]
+        if f['acc']:
+            out.append('p += ((uint64_t)cpu->r[%d] << 32) | cpu->r[%d];' % (f['rdhi'], f['rdlo']))
+        out += ['cpu->r[%d] = (uint32_t)p;' % f['rdlo'], 'cpu->r[%d] = (uint32_t)(p >> 32);' % f['rdhi']]
+        if f['s']:
+            out += ['cpu->n = (uint32_t)(p >> 63);', 'cpu->z = (p == 0);']   # C/V: indefinidos
         out.append('}')
         return out
 
@@ -296,12 +316,16 @@ class Emitter:
         else:
             tgt = t & ~1
             callee_thumb = 1 if i.thumb else 0   # `bl` Thumb->Thumb; ARM `bl` -> ARM
-            out += ['cpu->pc = %s;' % hx(tgt), 'cpu->thumb = %du;' % callee_thumb]
+            out += ['cpu->pc = %s;' % hx(tgt), 'cpu->thumb = %du;' % callee_thumb, 'rt_tick(cpu);',
+                    'if (cpu->stop) return;']
             if tgt in self.known:
                 out.append('fn_%08X(cpu);' % tgt)
             else:
                 out.append('rt_call(cpu);')
-        out += ['if (cpu->pc != %s) rt_run_until(cpu, %s);' % (hx(i.next), hx(i.next)),
+        nxt = hx(i.next)
+        out.insert(1, 'rt_rets[rt_depth++ & 4095u] = %s;' % nxt)
+        out += ['rt_depth--;',
+                'if (cpu->pc != %s) { if (!rt_run_until(cpu, %s)) return; }' % (nxt, nxt),
                 'if (cpu->stop) return;']
         return out
 
@@ -319,11 +343,18 @@ class Emitter:
 
     def b(self, i):
         f = i.f
+        if f['link'] and f['target'] in self.fn.jump_targets and f['target'] in self.fn.insns:
+            return ['cpu->r[14] = %s;' % hx(i.next | (1 if i.thumb else 0)),
+                    'goto L_%08X;' % f['target']]
         if self.rt and f['link']:
             return self.call(i)
         out = []
         if f['link']:
             out.append('cpu->r[14] = %s;' % hx(i.next | (1 if i.thumb else 0)))
+        if self.rt and not f['link'] and f['target'] <= i.addr and f['target'] in self.fn.insns:
+            # laco: a cada 1024 voltas avanca o hw e permite IRQ (espera por flag/VCOUNT)
+            out.append('if ((++rt_loops & 0x3FFu) == 0) { rt_tick_loop(cpu, %s); '
+                       'if (cpu->stop) return; }' % hx(i.addr))
         return out + self.branch(f['target'])
 
     def insn(self, i):
@@ -338,7 +369,8 @@ class Emitter:
             lines.append('N_%08X:;' % i.addr)
         # cai para a proxima instrucao; se ela nao pertence a funcao, sai
         terminal = i.cond == AL and (i.kind == 'bx' or (i.kind == 'b' and not i.f['link'])
-                                     or _writes_pc(i))
+                                     or _writes_pc(i)
+                                     or (i.kind == 'b' and i.f['target'] in self.fn.jump_targets))
         if not terminal and i.next not in self.fn.insns:
             lines.append('    cpu->pc = %s; return;' % hx(i.next))
         return lines
@@ -370,7 +402,7 @@ def emit_unit(funcs):
 def emit_program(funcs, read16, nshards=8):
     """Programa completo p/ o runtime: (header de prototipos, [shards .c], tabela .c)."""
     funcs = sorted(funcs, key=lambda f: f.entry)
-    known = {f.entry: f for f in funcs}
+    known = {f.entry: f for f in funcs if f.entry >= 0x08000000}   # overlays: via tabela
     protos = ['#include "gba_cpu.h"'] + ['RC_API void %s(Cpu *cpu);' % f.name for f in funcs]
     head = '#include "rc_protos.h"\n#pragma clang diagnostic ignored "-Wunused-label"\n\n'
     # shard estavel por endereco (adicionar overlays nao muda os shards da ROM);
@@ -383,8 +415,15 @@ def emit_program(funcs, read16, nshards=8):
     for f in funcs:
         hi = max(i.next for i in f.insns.values())
         sig = 0
-        if f.entry < 0x08000000:   # overlay em RAM: assinatura dos 4 primeiros bytes
-            sig = (read16(f.entry) or 0) | ((read16(f.entry + 2) or 0) << 16)
+        if f.entry < 0x08000000:   # overlay em RAM: FNV-1a 32 dos bytes [lo, hi)
+            sig = 0x811C9DC5
+            words = getattr(f, 'words', None)    # bytes do codigo no momento da descoberta
+            if words is None:
+                words = [read16(a) or 0 for a in range(f.entry, hi, 2)]
+            for w in words:
+                for b in (w & 0xFF, w >> 8):
+                    sig = ((sig ^ b) * 0x01000193) & 0xFFFFFFFF
+            sig = sig or 1
         table.append('    {%s, %s, %d, %s, %s},' % (hx(f.entry), hx(hi), int(f.thumb), f.name, hx(sig)))
     table += ['};', 'const unsigned rc_table_n = %d;' % len(funcs)]
     return ('\n'.join(protos) + '\n', [head + '\n\n'.join(s) + '\n' for s in shards],

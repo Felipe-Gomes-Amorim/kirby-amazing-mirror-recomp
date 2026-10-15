@@ -25,6 +25,10 @@ void rc_st16(Cpu *c, uint32_t a, uint32_t v) { (void)c; gba_write16(a, v); }
 void rc_st8(Cpu *c, uint32_t a, uint32_t v) { (void)c; gba_write8(a, v); }
 int rc_trace(Cpu *c, uint32_t addr) { (void)c; (void)addr; return 0; }
 
+#define HISTN 16
+#define HISTM1 15
+static uint32_t hist[HISTN];
+static unsigned hist_n;
 /* ---- modos / CPSR ---- */
 static int bank_idx(uint32_t mode) { return (mode == 0x1F ? 0x10 : (int)mode) & 15; }
 
@@ -40,7 +44,10 @@ void rt_set_mode(Cpu *c, uint32_t nm) {
     c->mode = nm;
 }
 
+int rt_trace_psr;
 void rc_msr(Cpu *c, uint32_t mask, uint32_t v) {
+    if (rt_trace_psr && rt_trace_psr-- > 0)
+        fprintf(stderr, "[psr] msr mask=%u v=%08X (modo %02X sp=%08X lr=%08X) call=%08X\n", mask, v, c->mode, c->r[13], c->r[14], hist[(hist_n + HISTM1) % HISTN]);
     if (mask & 1) {
         rt_set_mode(c, v);
         c->psr_if = v & 0xC0;
@@ -59,12 +66,10 @@ uint32_t rc_mrs(Cpu *c) {
 }
 
 /* ---- despacho ---- */
-#define HIST 16
-static uint32_t hist[HIST];
-static unsigned hist_n;
+#define HIST HISTN
 uint64_t rt_ncalls;
 
-static const RcFunc *lookup(uint32_t a) {
+static const RcFunc *lookup(uint32_t a, uint32_t thumb) {
     unsigned lo = 0, hi = rc_table_n;
     while (lo < hi) { /* primeiro indice com .lo > a */
         unsigned mid = (lo + hi) / 2;
@@ -73,7 +78,18 @@ static const RcFunc *lookup(uint32_t a) {
     }
     for (unsigned k = 1; k <= 16 && k <= lo; k++) { /* funcoes podem se intercalar */
         const RcFunc *f = &rc_table[lo - k];
-        if (a >= f->lo && a < f->hi) return f;
+        if (a < f->lo || a >= f->hi || f->thumb != thumb) continue;
+        if (f->sig) { /* overlay em RAM: so vale se o codigo na RAM for o recompilado */
+            uint32_t h = 0x811C9DC5u;
+            for (uint32_t p = f->lo; p < f->hi; p += 2) {
+                uint32_t w = gba_read16(p);
+                h = (h ^ (w & 0xFF)) * 0x01000193u;
+                h = (h ^ (w >> 8)) * 0x01000193u;
+            }
+            if (!h) h = 1;
+            if (h != f->sig) continue;
+        }
+        return f;
     }
     return 0;
 }
@@ -111,21 +127,76 @@ void rt_abort(Cpu *c, const char *why) {
     exit(2);
 }
 
+const char *rt_unresolved_path;
+uint64_t rt_unresolved_count;
+int rt_stop_on_unresolved;
+
+/* ROM valida sem funcao recompilada: registra uma vez e trata como retorno (`bx lr`).
+ * Sem interpretador isso e uma APROXIMACAO: o log diz exatamente onde. */
+static int unresolved_rom(Cpu *c, uint32_t a) {
+    static uint32_t seen[4096];
+    unsigned h = (a >> 1) & 4095;
+    int dup = 0;
+    for (unsigned k = 0; k < 4096 && seen[(h + k) & 4095]; k++)
+        if (seen[(h + k) & 4095] == a) { dup = 1; break; }
+    if (!dup) {
+        for (unsigned k = 0; k < 4096; k++)
+            if (!seen[(h + k) & 4095]) { seen[(h + k) & 4095] = a; break; }
+        if (rt_unresolved_path) {
+            FILE *f = fopen(rt_unresolved_path, "a");
+            if (f) {
+                fprintf(f, "%08X,%s,lr=%08X,sp=%08X\n", a, c->thumb ? "thumb" : "arm", c->r[14],
+                        c->r[13]);
+                fclose(f);
+            }
+        }
+    }
+    rt_unresolved_count++;
+    if (rt_stop_on_unresolved) rt_abort(c, "ROM sem funcao recompilada (--stop-on-unresolved)");
+    uint32_t t = c->r[14];
+    uint32_t np = t & ((t & 1) ? ~1u : ~3u);
+    if (np == a) return 0;
+    c->thumb = t & 1;
+    c->pc = np;
+    return 1;
+}
+
 void rt_call(Cpu *c) {
     uint32_t a = c->pc;
-    const RcFunc *f = lookup(a);
-    if (!f) rt_abort(c, "endereco sem funcao recompilada (candidato a interpretador/mapa)");
-    if (f->thumb != c->thumb) rt_abort(c, "modo ARM/Thumb incompativel com a funcao");
-    if (f->sig && gba_read32(f->lo) != f->sig)
-        rt_abort(c, "codigo em RAM (overlay) mudou desde a recompilacao");
+    const RcFunc *f = lookup(a, c->thumb);
+    if (!f && a >= 0x08000000u && a < 0x08000000u + gba_rom_size() && unresolved_rom(c, a)) return;
+    if (!f) rt_abort(c, "endereco sem funcao recompilada (RAM/overlay ou ROM sem saida)");
     hist[hist_n++ % HIST] = a;
+    if (rt_trace_psr && rt_irq_delivered) {
+        static int n;
+        if (n++ < 80)
+            fprintf(stderr, "[call] %08X %s lr=%08X modo=%02X\n", a, c->thumb ? "T" : "A", c->r[14],
+                    c->mode);
+    }
     rt_ncalls++;
     f->fn(c);
     if (c->pc == a && !c->stop) rt_abort(c, "funcao saiu sem avancar o pc (alvo fora do conjunto)");
 }
 
-void rt_run_until(Cpu *c, uint32_t ret) {
-    while (c->pc != ret && !c->stop) rt_call(c);
+uint32_t rt_rets[4096];
+uint32_t rt_depth;
+
+int rt_run_until(Cpu *c, uint32_t ret) {
+    unsigned base = rt_depth;
+    rt_rets[rt_depth++ & 4095u] = ret;
+    for (;;) {
+        if (c->pc == ret || c->stop) {
+            rt_depth = base;
+            return 1;
+        }
+        for (unsigned k = 0; k < base; k++) {
+            if (rt_rets[k & 4095u] == c->pc) { /* retorno de um frame externo: desenrola */
+                rt_depth = base;
+                return 0;
+            }
+        }
+        rt_call(c);
+    }
 }
 
 void rt_cpu_reset(Cpu *c) {

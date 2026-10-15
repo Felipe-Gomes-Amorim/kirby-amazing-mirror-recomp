@@ -21,12 +21,30 @@ from .harness import ROOT, RUNTIME, Rom, zig_cc
 OUT = os.path.join(ROOT, 'build', 'recomp', 'program')
 
 
+def load_continuations(csv_path):
+    """build/analysis/continuations.csv -> ({pai: [filhos]}, {filhos que sao `bl` longo})."""
+    p = os.path.join(os.path.dirname(csv_path), 'continuations.csv')
+    kids, jumps = {}, set()
+    if os.path.exists(p):
+        with open(p) as f:
+            for r in csv.DictReader(f):
+                c, par = int(r['addr_filho'], 16), int(r['addr_pai'], 16)
+                kids.setdefault(par, []).append(c)
+                if 'stack-return' in r['motivo']:
+                    jumps.add(c)
+    return kids, jumps
+
+
 def load_functions(rom, csv_path):
     funcs, bad = [], {}
-    for row in csv.DictReader(open(csv_path)):
+    kids, jumps = load_continuations(csv_path)
+    with open(csv_path) as f:
+        rows = list(csv.DictReader(f))
+    for row in rows:
         a, thumb = int(row['addr'], 16), row['mode'] == 'thumb'
         try:
-            funcs.append(discover(rom.read16, a, thumb, max_insns=20000, max_span=0x100000))
+            funcs.append(discover(rom.read16, a, thumb, max_insns=20000, max_span=0x100000,
+                                  jump_targets=jumps, extra_seeds=kids.get(a, ())))
         except Unsupported as e:
             bad[a] = str(e)
     return funcs, bad
@@ -89,7 +107,8 @@ def build(rom, funcs, bad=None, jobs=8, nshards=16, verbose=True):
     def compile_one(src):
         with open(src, 'rb') as fh:
             h = hashlib.sha1(hdr.digest() + fh.read()).hexdigest()[:10]
-        obj = src[:-2] + '_%s.o' % h
+        os.makedirs(os.path.join(OUT, 'obj'), exist_ok=True)
+        obj = os.path.join(OUT, 'obj', os.path.basename(src)[:-2] + '_%s.o' % h)
         if not os.path.exists(obj):
             r = subprocess.run(zig_cc() + ['-c', '-O1', '-w', '-I', RUNTIME, '-I', OUT, src, '-o', obj],
                                capture_output=True, text=True)
@@ -98,6 +117,7 @@ def build(rom, funcs, bad=None, jobs=8, nshards=16, verbose=True):
         return obj
 
     rt_srcs = [os.path.join(RUNTIME, n) for n in ('gba_bus.c', 'gba_rt.c', 'gba_bios.c', 'rt_main.c')]
+    rt_srcs.append(os.path.join(ROOT, 'hw', 'hw.c'))   # strong: substitui os stubs fracos
     t1 = time.time()
     with ThreadPoolExecutor(jobs) as ex:
         objs = list(ex.map(compile_one, srcs + rt_srcs))
@@ -110,39 +130,95 @@ def build(rom, funcs, bad=None, jobs=8, nshards=16, verbose=True):
     return exe
 
 
-def boot(exe, rom_path, dump):
-    r = subprocess.run([exe, rom_path, '--dump', dump], capture_output=True, text=True)
+def boot(exe, rom_path, dump, extra=()):
+    r = subprocess.run([exe, rom_path, '--dump', dump] + list(extra), capture_output=True, text=True)
     return r.returncode, r.stdout, r.stderr
 
 
-def iterate(rom_path, csv_path, jobs=8, max_iter=40, verbose=True):
+def _same_code(old, new, snap, rom):
+    """True se `new` e `old` tem o mesmo conjunto de instrucoes e bytes."""
+    if set(old.insns) != set(new.insns):
+        return False
+    return all(old.insns[a].raw == new.insns[a].raw for a in old.insns)
+
+
+def iterate(rom_path, csv_path, jobs=8, max_iter=40, verbose=True, boot_args=()):
     """Recompila, roda ate falhar, e se a falha for codigo em RAM (overlay), descobre
     a funcao no snapshot da RAM e repete. Retorna (rc, stdout, stderr, overlays)."""
     rom = RamRom(open(rom_path, 'rb').read())
     funcs, bad = load_functions(rom, csv_path)
     overlays = {}
     dump = os.path.join(OUT, 'ram_dump.bin')
+    unres = os.path.join(OUT, 'unresolved.log')
+    extra_csv = os.path.join(OUT, 'extra_functions.csv')   # semente: log de nao resolvidos
     os.makedirs(OUT, exist_ok=True)
+    have = {f.entry for f in funcs}
+    extras = []
+    if os.path.exists(extra_csv):
+        with open(extra_csv) as fh:
+            extras = [l.strip().split(',') for l in fh if l.strip()]
+
+    def add_extra(addr, thumb):
+        if addr in have:
+            return False
+        try:
+            f = discover(rom.read16, addr, thumb, max_insns=5000, max_span=0x2000)
+        except Unsupported:
+            return False
+        funcs.append(f)
+        have.add(addr)
+        return True
+
+    for a, m in extras:
+        add_extra(int(a, 16), m == 'thumb')
     for it in range(max_iter):
+        if os.path.exists(unres):
+            os.remove(unres)
         ram_rom = RamRom(rom.data, open(dump, 'rb').read() if os.path.exists(dump) and overlays else None)
         exe = build(ram_rom, funcs + list(overlays.values()), bad, jobs, verbose=verbose and it == 0)
-        rc, out, err = boot(exe, rom_path, dump)
+        rc, out, err = boot(exe, rom_path, dump, list(boot_args) + ['--stop-on-unresolved'])
+        new = []
+        if os.path.exists(unres):   # semente: ROM sem funcao, qualquer que seja o desfecho
+            with open(unres) as fh:
+                for line in fh:
+                    a, m_ = line.split(',')[:2]
+                    if add_extra(int(a, 16), m_ == 'thumb'):
+                        new.append((a, m_))
+        if new:
+            extras += [list(x) for x in new]
+            with open(extra_csv, 'w') as fh:
+                fh.write(''.join('%s,%s\n' % tuple(x) for x in extras))
+            if verbose:
+                print('[unresolved] +%s' % ' '.join(a for a, _ in new))
+            continue
+        if '--stop-on-unresolved' in err:
+            # nao deu para decodificar o alvo: segue com a aproximacao "retorna" (logada)
+            rc, out, err = boot(exe, rom_path, dump, boot_args)
         if rc == 0:
             return rc, out, err, overlays
         m = re.search(r'pc=([0-9A-F]{8}) lr=.*? (thumb|arm) ', err)
         if 'sem funcao recompilada' not in err or not m:
             return rc, out, err, overlays
         pc, thumb = int(m.group(1), 16), m.group(2) == 'thumb'
-        if pc >= 0x08000000 or pc in overlays:
+        if pc >= 0x08000000:
             return rc, out, err, overlays
         snap = RamRom(rom.data, open(dump, 'rb').read())
         try:
-            overlays[pc] = discover(snap.read16, pc, thumb, max_insns=5000, max_span=0x4000)
+            f = discover(snap.read16, pc, thumb, max_insns=5000, max_span=0x4000)
+            same = [k for k in overlays if k[0] == pc]
+            f.suffix = '_v%d' % len(same) if same else ''
+            hi = max(i.next for i in f.insns.values())
+            f.words = [snap.read16(a) or 0 for a in range(pc, hi, 2)]
+            # variante identica a uma ja emitida = nada mudou: evita laco infinito
+            if any(_same_code(overlays[k], f, snap, rom) for k in same):
+                return rc, out, err + '\n[overlay] variante repetida em %08X\n' % pc, overlays
+            overlays[(pc, len(same))] = f
+            pc_key = (pc, len(same))
         except Unsupported as e:
             return rc, out, err + '\n[overlay] nao consegui decodificar %08X: %s\n' % (pc, e), overlays
         if verbose:
-            print('[overlay] +%08X (%s, %d insns)' % (pc, 'thumb' if thumb else 'arm',
-                                                      len(overlays[pc].insns)))
+            print('[overlay] +%08X%s (%s, %d insns)' % (
+                pc, f.suffix, 'thumb' if thumb else 'arm', len(f.insns)))
     return rc, out, err, overlays
 
 
@@ -151,8 +227,16 @@ def main():
     ap.add_argument('--rom', default=os.path.join(ROOT, 'baserom.gba'))
     ap.add_argument('--functions', default=os.path.join(ROOT, 'build', 'analysis', 'functions.csv'))
     ap.add_argument('--jobs', type=int, default=8)
+    ap.add_argument('--timeout', type=int, default=120, help='watchdog do runtime (s)')
+    ap.add_argument('--frames', type=int, default=0, help='roda N quadros (0 = para na 1a espera)')
     a = ap.parse_args()
-    rc, out, err, overlays = iterate(a.rom, a.functions, a.jobs)
+    args = ['--timeout', str(a.timeout), '--unresolved', os.path.join(OUT, 'unresolved.log'),
+            '--ppm', os.path.join(OUT, 'last_frame.ppm')]
+    if os.path.exists(args[1]):
+        os.remove(args[1])
+    if a.frames:
+        args += ['--frames', str(a.frames)]
+    rc, out, err, overlays = iterate(a.rom, a.functions, a.jobs, boot_args=args)
     print(out)
     print(err[-3000:])
     return rc

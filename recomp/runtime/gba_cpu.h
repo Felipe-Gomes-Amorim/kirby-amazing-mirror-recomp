@@ -28,7 +28,7 @@ typedef struct Cpu {
     uint32_t stop;       /* != 0: o runtime pediu para parar (ver RT_STOP_*) */
 } Cpu;
 
-enum { RT_STOP_NONE = 0, RT_STOP_VBLANK_WAIT = 1, RT_STOP_STOPCALL = 2, RT_STOP_ERROR = 3 };
+enum { RT_STOP_NONE = 0, RT_STOP_VBLANK_WAIT = 1, RT_STOP_STOPCALL = 2, RT_STOP_ERROR = 3, RT_STOP_FRAMES = 4 };
 
 /* funcoes recompiladas: tabela gerada (rc_table, ordenada por lo) */
 typedef struct RcFunc {
@@ -42,7 +42,14 @@ extern const unsigned rc_table_n;
 
 /* runtime (gba_rt.c / gba_bios.c) */
 void rt_call(Cpu *);                       /* executa a funcao em cpu->pc ate sair */
-void rt_run_until(Cpu *, uint32_t ret);    /* despacha ate cpu->pc == ret */
+/* despacha ate cpu->pc == ret; devolve 0 se o controle voltou a um frame MAIS EXTERNO
+ * (a pilha guest saltou frames: pop {pc} de epilogo compartilhado, etc.) */
+int rt_run_until(Cpu *, uint32_t ret);
+extern uint32_t rt_rets[4096]; /* retornos esperados dos frames C ativos */
+extern uint32_t rt_depth;
+extern uint32_t rt_loops;
+void rt_tick_loop(Cpu *, uint32_t site);   /* desvio para tras: tempo + IRQ */
+void rt_tick(Cpu *);                       /* avanca o hw e entrega IRQ (ponto seguro) */
 int rt_swi(Cpu *, uint32_t num, uint32_t next); /* != 0: sair da funcao (cpu->pc ja setado) */
 uint32_t rc_mrs(Cpu *);
 void rc_msr(Cpu *, uint32_t fieldmask, uint32_t v);

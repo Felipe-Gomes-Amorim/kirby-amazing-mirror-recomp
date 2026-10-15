@@ -78,9 +78,12 @@ class BiosTest(unittest.TestCase):
 class BootTest(unittest.TestCase):
     def test_boot_to_first_vblank_wait(self):
         from recomp import program
-        rc, out, err, overlays = program.iterate(ROM, MAP, verbose=False)
+        rc, out, err, overlays = program.iterate(
+            ROM, MAP, verbose=False, boot_args=['--timeout', '120', '--frames', '600'])
         self.assertEqual(rc, 0, err[-2000:])
-        self.assertIn('primeira VBlankIntrWait', out)
+        self.assertIn('RT_STOP frames', out)
+        self.assertIn('nao_resolvidos=0', out)
+        self.assertRegex(out, r'IRQ entregues=60[01]')
 
 
 if __name__ == '__main__':
