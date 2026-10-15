@@ -96,6 +96,11 @@ completos estão em [`NOTES.md`](NOTES.md), seção "Recompilador mínimo".
 [gba-recomp](https://github.com/JRickey/gba-recomp),
 [gbarecomp](https://github.com/mstan/gbarecomp). Detalhes e licenças em `NOTES.md`.
 
+## Licença
+
+O código e a documentação deste projeto estão sob a [licença MIT](LICENSE). Isso cobre apenas este
+projeto: *Kirby & The Amazing Mirror* pertence à Nintendo e à HAL Laboratory e não está incluído.
+
 ## Aviso legal
 
 Projeto não oficial e sem fins comerciais, sem vínculo com a Nintendo, a HAL Laboratory ou

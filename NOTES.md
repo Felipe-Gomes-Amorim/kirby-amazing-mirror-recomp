@@ -52,7 +52,7 @@ janela, teclado, audio PCM+PSG e save. O que resta e precisao e acabamento, nao 
 - [ ] Iniciar interpretando enquanto compila (troca de DLL no mesmo processo; proposta do Nasus)
 - [ ] Oraculo de programa inteiro (testes diferenciais de `bl`/pilha/IRQ)
 - [ ] Precisao de timing por ciclo; multiplayer por cabo fora do escopo
-- [ ] Licenca do repositorio e revisao dos trechos desmontados deste arquivo
+- [x] Licenca MIT (`LICENSE`); listagens da ROM removidas deste arquivo (so descricao + exemplo proprio)
 
 ## Fatos da ROM (verificados nesta maquina)
 - Arquivo local: `baserom.gba` (renomeado do nome original "Kirby & The Amazing Mirror
@@ -114,45 +114,35 @@ codigo sem checar licenca e sem entender; este e um projeto de aprendizado.
 - Chamada: `BL` (Thumb: par de halfwords de 22 bits; ARM: 1 word). Retorno: `bx lr` ou
   `pop {..., pc}`. Argumentos em r0-r3, retorno r0 (AAPCS, aqui via agbcc/GCC antigo).
 
-### Exemplo real 1: crt0 em 0x080000C0 (ARM)
-```
-080000C0  e3a00012  mov  r0,#0x12              ; modo IRQ
-080000C4  e129f000  msr  CPSR_c,r0
-080000C8  e59fd028  ldr  sp,[pc,#0x28]         ; = 0x03007FA0 (pilha IRQ)
-080000CC  e3a0001f  mov  r0,#0x1f              ; modo System
-080000D0  e129f000  msr  CPSR_c,r0
-080000D4  e59fd018  ldr  sp,[pc,#0x18]         ; = 0x03007E80 (pilha usuario)
-080000D8  e59f10e0  ldr  r1,[pc,#0xe0]         ; = 0x03007FFC (vetor de IRQ na IWRAM)
-080000DC  e28f0018  add  r0,pc,#0x18           ; r0 = 0x08000100 (handler de IRQ)
-080000E0  e5810000  str  r0,[r1]
-080000E4  e59f10d8  ldr  r1,[pc,#0xd8]         ; = 0x08152A05 (main, Thumb!)
-080000E8  e1a0e00f  mov  lr,pc
-080000EC  e12fff11  bx   r1                    ; ARM -> Thumb: chama 0x08152A04
-080000F0  eafffff2  b    0x080000C0            ; se main voltar, reinicia
-```
-(Decodificado a mao; confira com `objdump` / Capstone depois.) Mostra: modos, pilhas em
-IWRAM, vetor de IRQ em 0x03007FFC, e o primeiro `bx` ARM->Thumb.
+### O que a ROM faz no arranque (descrito, sem copiar o codigo)
+O codigo de inicializacao (`crt0`, em `0x080000C0`, ARM) faz o que quase todo jogo de GBA faz:
+1. entra no modo **IRQ**, define a pilha dessa modalidade (IWRAM `0x03007FA0`);
+2. entra no modo **System** e define a pilha normal (`0x03007E80`);
+3. grava o endereco do tratador de interrupcoes (`0x08000100`) no vetor de IRQ da IWRAM (`0x03007FFC`);
+4. chama o `main` com um `bx` **ARM -> Thumb** (`0x08152A04`, Thumb) e, se ele retornar, recomeca.
+O tratador de IRQ em `0x08000100` le **IE e IF** do bloco de I/O (`0x04000200`), calcula `IE & IF`
+(interrupcoes pendentes e habilitadas) e salta por uma tabela em IWRAM (`0x030017B0`), um endereco por fonte.
+Um `main` Thumb tipico de agbcc abre com `push {lr}`, chama sub-rotinas com `bl` (par de halfwords)
+e retorna com `pop {r0}; bx r0` (retorno "interworking").
+*Quem quiser ver as instrucoes reais pode desmontar a propria ROM nesses enderecos (por exemplo,
+`python tools/romhdr.py baserom.gba`); este texto nao reproduz a listagem do jogo.*
 
-### Exemplo real 2: Thumb em 0x08152A04
+### Exemplo didatico (escrito para este texto, nao e da ROM)
 ```
-b500        push {lr}
-f7fe fdc1   bl   0x0815158C      ; BL = 2 halfwords; alvo = (addr+4) + sext(hi)<<12 + lo<<1
-f6ad fbdf   bl   ...
-f7ff f921   bl   ...
-bc01        pop  {r0}
-4700        bx   r0              ; retorno "interworking" via pop+bx
-```
-`B530 push {r4,r5,lr}` / `B081 sub sp,#4` / `4825 ldr r0,[pc,#0x94]` em 0x08152A20 sao
-o prologo tipico de funcao GCC.
+@ ARM -> Thumb e volta: o bit 0 do endereco escolhe o modo
+        ldr   r1, =rotina_thumb + 1      @ +1 => bit 0 = 1 => Thumb
+        mov   lr, pc                     @ PC ja vale "esta instrucao + 8" em ARM
+        bx    r1                         @ salta e troca de modo
 
-### Exemplo real 3: handler de IRQ em 0x08000100 (ARM)
+rotina_thumb:                            @ 16 bits por instrucao
+        push  {r4, lr}
+        bl    outra_funcao               @ em Thumb o BL e um par de halfwords
+        pop   {r4}
+        pop   {r0}
+        bx    r0                         @ retorno 'interworking' (volta para ARM ou Thumb)
 ```
-e2833c02  add r3,r3,#0x200      ; r3 = 0x04000000 (a BIOS entrega) -> 0x04000200 = REG_IE
-e5932000  ldr r2,[r3]           ; IE (low) | IF (high)
-e0021822  and r1,r2,r2,lsr #16  ; r1 = IE & IF  (interrupcoes pendentes e habilitadas)
-```
-Note o "operando 2 com shift" do ARM e a condicional (`ne`, `eq` etc.) em muitas
-instrucoes; em Thumb, condicoes so em branches.
+Note o "operando 2 com shift" do ARM (`and r1, r2, r2, lsr #16`) e a condicional (`ne`, `eq`...) em
+quase todas as instrucoes ARM; em Thumb, condicoes so em branches.
 
 ### O que um recompilador precisa de ARM/Thumb
 Decodificar ~15 familias: data-processing (mov/add/sub/and/cmp...), load/store
@@ -1391,8 +1381,8 @@ Dados: 70,5 s de jogo gravados pelo usuario com `--audio-raw` (`build/hw/pcm.raw
 Relato do usuario com log (`PARADA: funcao saiu sem avancar o pc (alvo fora do conjunto)`,
 `pc=0809DE38 lr=080A390F r1=0809DA50`).
 **1. Tabela de salto truncada em 64 entradas (bug do mapa).**
-- `0x0809DA30..0x0809DA48`: `ldrb [r0+0x82]; subs r0,#5; cmp r0,#0xD5; bls ...; ldr r0,[tab+4*i]; mov pc,r0`
-  => o limite real e `0xD5`, ou seja **214 entradas**. `jumptables.csv` registrou **64**: o
+- `0x0809DA30..0x0809DA48`: o indice vem de um byte do objeto (`obj+0x82`) menos 5; a funcao testa
+  `indice <= 0xD5` e salta pela tabela (`mov pc, ...`) => o limite real e `0xD5`, ou seja **214 entradas**. `jumptables.csv` registrou **64**: o
   analisador corta em 64. O alvo `0x0809DE38` e a entrada de um indice > 63, ausente do conjunto
   de rotulos da funcao, entao o runtime parou.
 - Mesmo corte em **4 tabelas** (so as 4 com exatamente 64 entradas; ver `build/indirect/jumptable_cap_fix.csv`):

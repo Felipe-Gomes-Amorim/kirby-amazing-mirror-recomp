@@ -105,6 +105,11 @@ commands are in [`NOTES.md`](NOTES.md), section "Recompilador mínimo".
 [gbarecomp](https://github.com/mstan/gbarecomp) were used as references. Details and
 licences are in `NOTES.md`.
 
+## Licence
+
+The code and documentation of this project are under the [MIT licence](LICENSE). That covers this
+project only: *Kirby & The Amazing Mirror* belongs to Nintendo and HAL Laboratory and is not included.
+
 ## Legal
 
 Unofficial, non-commercial project, not affiliated with Nintendo, HAL Laboratory or any
