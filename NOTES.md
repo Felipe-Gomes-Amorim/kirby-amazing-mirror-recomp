@@ -1486,3 +1486,44 @@ Copia de `git archive HEAD` + so a ROM, sem `build/`, 8 jobs, mesma maquina de d
 - Pendente: medir de novo a construcao do zero com isso (esperado: menos rodadas do `iterate`).
 - Onde esta o tempo: cada rodada recompila shards; 16 shards x ~600 mil instrucoes em C. Opcoes:
   `-O1`/`-Os`, menos C por instrucao, so o fecho alcancavel, e iniciar interpretando.
+
+## Launcher `KirbyRecomp.exe` e pacote de release (Riven) - primeira versao
+**Pecas** (`launcher/`, `tools/package_release.py`):
+| Arquivo | Papel |
+|---|---|
+| `launcher/stub.c` -> `KirbyRecomp.exe` | stub Win32 minimo (subsystem windows, sem console): executa `python\pythonw.exe app\launcher\launcher.py <args>`; `--console` usa `python.exe` |
+| `launcher/launcher.py` | arrastar/escolher ROM (dialogo Win32 via ctypes), SHA-1 (so USA), copia os fontes para `%LOCALAPPDATA%\KirbyRecomp\work`, roda `tools/build_all.py` lendo o progresso, abre `kirby.exe` |
+| `launcher/ui_dll.c` -> `kirby_ui.dll` | fachada de `hw/window_sdl.c` (janela de progresso da Gwen) chamada por ctypes |
+| `tools/package_release.py` | monta `dist/KirbyRecomp/` (python embutido + capstone, fontes, zig, SDL2), compila stub e DLL com o proprio zig, **audita** e falha se entrar ROM/save/C gerado/exe do jogo |
+**Camadas:** `KirbyRecomp.exe` -> Python embutido (so stdlib + capstone) -> `build_all.py` -> `recomp.program`
+-> zig compila o C gerado -> `kirby.exe` em `%LOCALAPPDATA%\KirbyRecomp\<sha1>`. Cache valido enquanto o
+carimbo dos fontes nao muda (`build.ok`).
+**Armadilhas achadas ao empacotar:**
+1. `recomp/harness.py` importava `unicorn` (oraculo de teste) no topo: o build nao funciona sem ele. Agora e
+   import opcional (so os testes precisam).
+2. O Python *embeddable* **ignora `PYTHONPATH`** e o diretorio do script/`-m`. Solucao: `import site` no `_pth`
+   + `Lib/site-packages/kirby_work.pth` que insere `$KIRBY_WORK` em `sys.path`.
+3. Link da DLL: usar a import lib `libSDL2.dll.a`, nao a estatica (mesma regra do `program.py`).
+4. `program.py` procurava o mapa em `<out>/analysis/`; `build_all.py` agora passa `--functions` explicito.
+**Tamanho (sem compactar):** python 30 MB, sdl2 21 MB, **zig 361 MB** (o resto do app e pequeno): 417 MB. O zig e
+o item a enxugar (so ha necessidade de `x86_64-windows-gnu`: libc mingw, headers, compiler-rt).
+
+### Teste de instalacao limpa do launcher (Riven)
+Pacote montado por `tools/package_release.py`, executado com ambiente vazio (`env -i`, PATH so com
+System32, `LOCALAPPDATA` vazio), caminho com espacos (`Kirby Recomp Test`), ROM com outro nome
+(`Kirby & The Amazing Mirror (USA).gba`), sem Python do sistema e sem `.venv`:
+| Item | Resultado |
+|---|---|
+| 1a execucao (`KirbyRecomp.exe ROM --build-only`) | **6 min 04 s**, saida 0 |
+| etapas | analise 14 s, indiretos 6 s, confianca 6 s, analise 2a passada 17 s, **compilar 321 s** |
+| `[unresolved]` no log | **0** (as tabelas de ponteiros ja entram na analise; nao ha rodadas extras) |
+| 2a execucao | **0,27 s** (cache valido, carimbo dos fontes) |
+| jogo gerado, headless 2600 quadros + roteiro de teclas | `RT_STOP frames`, `nao_resolvidos=0`, quadro 2000 com `DISPCNT=1B40` (1a fase) |
+- Compilar levou 321 s contra 146 s medidos pelo Nasus: aqui o zig estava **sem cache global** (1o uso
+  compila compiler-rt etc.), em ambiente limpo, com 8 jobs. Em PCs com menos nucleos esperar mais.
+- Pacote **enxuto** (zig reduzido a `x86_64-windows-gnu`): 347 MB sem compactar (zig 291 MB, python 30 MB,
+  sdl2 21 MB). O `zig.exe` sozinho tem 177 MB. Zip ainda nao medido.
+- Pendente: teste interativo (arrastar a ROM, ver a janela de progresso), zip final, avisos de licenca
+  (zig MIT, SDL2 zlib, Python PSF, capstone BSD) em `README.txt`, e assinatura do exe (antivirus).
+- **Pacote enxuto, mesmo teste limpo:** 4 min 32 s no total (compilar 233 s), `kirby.exe` gerado, saida 0.
+  Zip do pacote enxuto: **95 MB** (347 MB sem compactar). Nao ha nada do jogo dentro (auditoria passa).

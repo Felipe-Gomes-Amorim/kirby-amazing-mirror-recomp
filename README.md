@@ -69,7 +69,21 @@ baserom.gba ──► analysis ──► function map ──► recompiler ─�
 | [`NOTES.en.md`](NOTES.en.md), [`NOTES.md`](NOTES.md) | technical summary (English) and full working log (Portuguese) |
 | [`ROLES.md`](ROLES.md) | who owns what, for the parallel workstreams |
 
-## Running it
+## Quick start (no Python needed)
+
+Build the release folder once with `python tools/package_release.py --zip` (about 95 MB zipped), or
+download a release when one is published. Then:
+
+1. Have your own ROM (USA, game code `B8KE`).
+2. **Drag the ROM onto `KirbyRecomp.exe`.**
+3. The first run builds the game on your machine (about 5 minutes, with a progress window). The next
+   runs start in under a second.
+
+The generated game lives in `%LOCALAPPDATA%\KirbyRecomp`; the package itself contains no game data.
+Controls: Z = A, X = B, Enter = Start, Backspace = Select, arrows, A/S = L/R, F11 = fullscreen, Esc = quit.
+Windows may warn about an unsigned program: the launcher runs a compiler and the program it produces.
+
+## Running it from the source tree
 
 Requirements (Windows): Python 3.13 and a C compiler (GCC from WinLibs, or `zig cc`).
 
