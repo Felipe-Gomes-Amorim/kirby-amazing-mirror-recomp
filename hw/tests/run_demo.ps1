@@ -14,7 +14,11 @@ $out = Join-Path $root "build\hw"
 New-Item -ItemType Directory -Force $out | Out-Null
 $common = @("-std=c11", "-O1", "-Wall", "-Wextra", "-I$Sdl\include\SDL2")
 $srcs = @("$root\hw\hw.c", "$root\hw\audio_sdl.c")
-if ($Demo -eq "minimize") {
+if ($Demo -eq "ui") {
+    # teste headless (driver dummy): ini, soltar arquivo, progresso, icone, titulo, tela cheia
+    & $gcc @common -o "$out\test_launcher_ui.exe" "$root\hw\config_ini.c" "$root\hw\window_sdl.c" "$root\hw\tests\test_launcher_ui.c" "-L$Sdl\lib" -lSDL2
+    $exe = "$out\test_launcher_ui.exe"; $arg = $out
+} elseif ($Demo -eq "minimize") {
     & $gcc @common -o "$out\test_minimize.exe" @srcs "$root\hw\window_sdl.c" "$root\hw\tests\test_minimize.c" "-L$Sdl\lib" -lSDL2
     $exe = "$out\test_minimize.exe"; $arg = [Math]::Max(12, $Seconds)
 } elseif ($Demo -eq "audio") {
