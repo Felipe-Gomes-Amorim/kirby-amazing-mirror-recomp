@@ -221,5 +221,10 @@ void gba_bus_unmapped(uint32_t addr, int size, int is_write) {
     uint32_t d = rt_depth;
     for (uint32_t k = 0; k < 14 && k < d; k++) fprintf(stderr, " %08X", rt_rets[(d - 1 - k) & 4095u]);
     fprintf(stderr, "\n");
-    rt_dump(c, "contexto do acesso sem regiao (pc exato nao e mantido; ver pilha acima)");
+    {   /* informativo: o jogo segue (nao e parada) */
+        extern const char *rt_dump_label;
+        rt_dump_label = "AVISO";
+        rt_dump(c, "contexto do acesso sem regiao (pc exato nao e mantido; ver pilha acima)");
+        rt_dump_label = "PARADA";
+    }
 }

@@ -336,9 +336,52 @@ static int selftest_differential(Cpu *c, unsigned nfuncs, unsigned nstates) {
     return fails;
 }
 
+/* entrar no MEIO de funcoes recompiladas em enderecos que nao sao instrucao do conjunto: nao pode
+ * abortar o processo; deve cair no interpretador (rt_outside_hits) */
+static int selftest_outside_set(Cpu *c) {
+    extern uint64_t rt_outside_hits;
+    int tries = 0, aborted = 0;
+    uint64_t h0 = rt_outside_hits;
+    for (unsigned fi = 0; fi < rc_table_n && tries < 400; fi += 7) {
+        const RcFunc *f = &rc_table[fi];
+        if (f->lo < 0x08000000u || f->hi - f->lo < 0x20 || f->hi - f->lo > 0x200) continue;
+        for (uint32_t a = f->lo + 2; a < f->hi && tries < 400; a += 6, tries++) {
+            rt_cpu_reset(c);
+            for (int i = 0; i < 13; i++) c->r[i] = 0x03000100u + 16u * (unsigned)i;
+            c->r[13] = 0x03007E00u;
+            c->r[14] = RT_IRQ_RET | f->thumb;
+            c->thumb = f->thumb;
+            c->pc = a;
+            c->mode = 0x1F;
+            rt_depth = 0;
+            rt_rets[rt_depth++] = RT_IRQ_RET;
+            rt_test_budget = 500;
+            jmp_buf jb;
+            rt_abort_jmp = &jb;
+            rt_quiet = 1;
+            if (setjmp(jb) == 0) {
+                rt_call(c);
+                if (c->pc != RT_IRQ_RET && !c->stop) rt_run_until(c, RT_IRQ_RET);
+            } else {
+                aborted++;
+            }
+            rt_abort_jmp = 0;
+            rt_quiet = 0;
+            rt_depth = 0;
+            rt_test_budget = 0;
+            c->stop = 0;
+        }
+    }
+    fprintf(stderr, "[selftest-interp] entradas no meio de funcoes: %d tentativas, %llu caiam fora do conjunto "
+            "(interpretadas), %d abortos por salto para regiao invalida\n", tries,
+            (unsigned long long)(rt_outside_hits - h0), aborted);
+    return rt_outside_hits == h0 && tries > 0;   /* tem que ter exercitado o caminho */
+}
+
 int rt_selftest_interp(Cpu *c) {
     int f = selftest_fallback_sram(c);
     fprintf(stderr, "[selftest-interp] corpos SRAM em 3 enderecos da pilha: %s\n", f ? "FALHOU" : "OK");
     f += selftest_differential(c, 150, 6);
+    f += selftest_outside_set(c);
     return f;
 }

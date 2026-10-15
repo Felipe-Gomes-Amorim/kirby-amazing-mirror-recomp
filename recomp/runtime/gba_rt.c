@@ -98,8 +98,10 @@ static const RcFunc *lookup(uint32_t a, uint32_t thumb) {
     return 0;
 }
 
+const char *rt_dump_label = "PARADA";   /* "AVISO" para contextos informativos */
+
 void rt_dump(Cpu *c, const char *why) {
-    fprintf(stderr, "\n[rt] PARADA: %s\n", why);
+    fprintf(stderr, "\n[rt] %s: %s\n", rt_dump_label, why);
     fprintf(stderr, "[rt] pc=%08X lr=%08X sp=%08X %s modo=%02X NZCV=%u%u%u%u calls=%llu\n", c->pc,
             c->r[14], c->r[13], c->thumb ? "thumb" : "arm", c->mode, c->n, c->z, c->c, c->v,
             (unsigned long long)rt_ncalls);
@@ -162,6 +164,27 @@ static uint32_t body_hash(uint32_t a, unsigned n) { /* FNV-1a 32 */
     uint32_t h = 0x811C9DC5u;
     for (unsigned i = 0; i < n; i++) h = (h ^ gba_read8(a + i)) * 0x01000193u;
     return h;
+}
+
+uint64_t rt_outside_hits;
+
+static void log_outside(Cpu *c, uint32_t a, const RcFunc *f) {
+    static uint32_t seen[512];
+    unsigned h = (a >> 1) & 511;
+    for (unsigned k = 0; k < 512 && seen[(h + k) & 511]; k++)
+        if (seen[(h + k) & 511] == a) return;
+    for (unsigned k = 0; k < 512; k++)
+        if (!seen[(h + k) & 511]) { seen[(h + k) & 511] = a; break; }
+    if (rt_unresolved_path) {
+        FILE *fp = fopen(rt_unresolved_path, "a");
+        if (fp) {
+            char hex[65];
+            body_hex(hex, a, 32);
+            fprintf(fp, "%08X,%s,lr=%08X,sp=%08X,body=%s,kind=outside-set,fn=%08X..%08X\n", a,
+                    c->thumb ? "thumb" : "arm", c->r[14], c->r[13], hex, f->lo, f->hi);
+            fclose(fp);
+        }
+    }
 }
 
 static void log_unresolved(Cpu *c, uint32_t a) {
@@ -249,7 +272,17 @@ void rt_call(Cpu *c) {
     }
     rt_ncalls++;
     f->fn(c);
-    if (c->pc == a && !c->stop) rt_abort(c, "funcao saiu sem avancar o pc (alvo fora do conjunto)");
+    if (c->pc == a && !c->stop) {
+        /* alvo de salto dinamico (tabela de saltos truncada etc.) fora do conjunto de instrucoes
+         * da funcao: loga 1x e interpreta (como RAM desconhecida); o interpretador nao sai da
+         * regiao da funcao ate o fluxo voltar a uma funcao/retorno conhecido. */
+        log_outside(c, a, f);
+        rt_outside_hits++;
+        extern int rt_interp_run(Cpu *, uint32_t, uint32_t, uint64_t);
+        if (rt_stop_on_unresolved)
+            rt_abort(c, "funcao saiu sem avancar o pc (alvo fora do conjunto)");
+        rt_interp_run(c, f->lo, f->hi, 50000000ull);
+    }
 }
 
 uint32_t rt_rets[4096];
