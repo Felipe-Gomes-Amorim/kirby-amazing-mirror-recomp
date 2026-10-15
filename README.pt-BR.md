@@ -15,10 +15,11 @@ runtime que imita o hardware (vídeo, DMA, timers, interrupções, BIOS).
 
 | Etapa | Situação |
 |---|---|
-| Análise da ROM (código × dados, ARM × Thumb, funções) | feito: ~5,6 mil funções mapeadas |
-| Recompilador ARM/Thumb → C | funciona: o boot (`crt0` → `main`) roda até a 1ª espera de VBlank |
-| Hardware (PPU, DMA, timers, entrada) | modelo inicial pronto, ainda não ligado ao runtime |
-| Tela e som | ainda não |
+| Análise da ROM (código × dados, ARM × Thumb, funções) | feito: 5.651 funções mapeadas |
+| Recompilador ARM/Thumb → C | funciona: o jogo inicia e roda 3.000 quadros sem abortar |
+| Hardware (PPU, DMA, timers, entrada) | ligado ao runtime; renderização de fundos e sprites escrita |
+| Imagem | a tela de título e a abertura (com texto) aparecem no framebuffer; ainda sem janela (precisa do SDL2) |
+| Som e save | analisados e especificados, não implementados |
 
 Mais detalhe, com números e decisões, em [`NOTES.md`](NOTES.md).
 

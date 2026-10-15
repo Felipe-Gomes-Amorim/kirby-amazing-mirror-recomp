@@ -8,13 +8,14 @@ e rodar nativo no PC. NAO e decompilacao matching.
 ## Estado
 - [x] Pesquisar projetos/ferramentas de recomp estatica (GBA e outros) -> secao 1
 - [x] Toolchain: Windows nativo (Python 3.13, capstone, unicorn, zig cc/GCC)
-- [x] Analise da ROM: ARM x Thumb, codigo x dados, mapa com ~5,65 mil funcoes
-  (`tools/analyze_rom.py`), saltos indiretos classificados, confianca por funcao
-- [x] Recompilador gera C compilavel e roda: crt0 -> main -> 1a VBlankIntrWait (`recomp/`)
-- [x] Modelo de hardware inicial: I/O, VBlank/VCOUNT, VRAM/paleta/OAM, saida PPM (`hw/`)
-- [ ] Ligar `hw/` ao runtime e passar da 1a VBlankIntrWait (IRQ real, laco de frames)
-- [ ] PPU de verdade (BG tiled + sprites) e janela/entrada (SDL2)
-- [ ] Som (M4A via DMA/timers), save SRAM
+- [x] Analise da ROM: mapa congelado (`map.json`, 5651 funcoes), regressao em `tools/check_map.py`
+- [x] Recompilador gera C e roda: `python -m recomp.program --frames 3000` sem abortar
+- [x] Hardware ligado ao runtime (VBlank/IRQ por quadro); PPU de BG/sprites escrita
+- [x] Titulo e cutscene de abertura aparecem no framebuffer (~q.600 e ~q.2000)
+- [ ] Janela e teclado (SDL2): `hw/window_sdl.c` escrito, nao compilado (SDL2 nao instalado)
+- [ ] Investigar quadro preto ~q.3000 (fade? nao investigado)
+- [ ] 14 handlers M4A fora do mapa (pedido do Nasus em ROLES.md)
+- [ ] Som (FIFO/Timer0/DMA, depois PSG) e save SRAM (32 KiB)
 - [ ] Interpretador de fallback para codigo em RAM nao previsto
 
 ## Fatos da ROM (verificados nesta maquina)
@@ -259,9 +260,10 @@ funcao e continuacao (`addr-taken-inside-parent`), nao funcao nova.
 Resultado: 33 por `bl` + 16 extras = 49 (-49 funcoes: 5700 -> 5651). Os 51 casos do
 review_low do Riven passam a ter retorno, exceto 0x0814F890 (2 bytes avulsos antes de uma
 funcao) e 0x0815931C (SoftReset: `svc 1; svc 0`, nao retorna). Nova coluna em
-`functions.csv`: `has_return`, `continuations`. Funcoes sem retorno alcancavel: 25 (crt0,
-handler de IRQ, stubs `bx rN`, entradas de RAM-code; legitimas). O "pai" e sempre a
-funcao raiz (cadeias como 0x08153C7A -> 0x08153C8A aparecem todas ligadas a 0x08153184).
+`functions.csv`: `has_return`, `continuations`. O "pai" e sempre a funcao raiz (cadeias como
+0x08153C7A -> 0x08153C8A ficam ligadas a 0x08153184). O `tools/continuations.py` do Riven ainda
+lista 2 pares (0x0814F892<-0x0814F890, 0x08159334<-0x0815931C): sao falsos positivos da regra
+dele ("vizinha sem retorno"); ambos sao funcoes reais chamadas por `bl` de outro lugar.
 Limite: janela fixa de 8 KiB e so alvos a frente; epilogos antes do inicio nao sao pegos.
 
 Saidas novas em `build/analysis/`:
@@ -270,6 +272,51 @@ Saidas novas em `build/analysis/`:
 - `ram_code.csv`: uma linha por copia ROM->RAM (origem, destino, tamanho, quem chama).
 - `map.json`: header, functions[], regions[], ram_code[], jump_tables[], unresolved_indirect[]
   (enderecos como inteiros) - para o recompilador ler sem juntar CSVs.
+
+### Funcoes sem retorno alcancavel (`noreturn.csv`, coluna `noreturn_kind`)
+24 funcoes, todas explicadas (0 `suspect`):
+| kind | qtd | exemplos / motivo |
+|---|---|---|
+| bx-stub | 9 | `_call_via_rN` (0x0815A298..0x0815A2C8) e 0x0814FCE0: `bx rN` solto, despacho |
+| ram-code | 7 | entradas do bloco M4A copiado p/ IWRAM (0x0814F46C..0x0814F80A, 0x08158F54): saem por `bx` |
+| tail-call | 2 | 0x0814F890 (cai em 0x0814F892), 0x0814F8AC (`b 0x0814F892`) |
+| header-branch | 1 | 0x08000000: o `B` do header |
+| crt0 | 1 | 0x080000C0: termina com `b` ao inicio; chama main por `bx r1` |
+| irq-handler | 1 | 0x080000FC: sai por `bx r0` do vetor (despacho) |
+| mode-veneer | 1 | 0x0814F3D8: `adr r2,#0; bx r2` (Thumb->ARM) |
+| infinite-loop | 1 | 0x08151C54: laco principal do jogo (volta a 0x08151C58 para sempre) |
+| softreset-stop | 1 | 0x0815931C: `svc 1; svc 0` (SoftReset) |
+Ajuste feito: `mov ip,lr ... bx ip` (0x0814F878) passou a ser retorno (a copia de lr
+sobrevive a `bl`/`stm`/`pop`).
+
+### Esquema de `build/analysis/map.json` (congelado, `schema = "kirby-amm-map/1"`)
+Enderecos sao inteiros (decimal). Mudancas incompativeis incrementam o numero do schema.
+```
+{ schema, rom, rom_base,
+  header: {title, game_code, maker_code, version, header_checksum_ok, entry_branch_target, ...},
+  functions: [ { addr, mode("arm"|"thumb"), lo, hi, insns, bytes,
+                 source("entry|bl|ptr-scan|addr-taken-leaf|bx-const|adr|ram-code|ram-ptr"),
+                 tier("A"|"B"|null), confidence("high|medium|low|unscored"),
+                 jumptable(bool), has_return(bool), continuations(int),
+                 noreturn_kind(str|null), store_addr(int|null), exec_addr(int|null),
+                 ram_block(int|null) } ],          # ordenado por addr
+  regions: [ {start, end, size, kind("arm|thumb|literal_pool|jumptable|data")} ],  # [start,end)
+  ram_code: [ {block, site, method, store, exec, size, compressed, mode} ],
+  continuations: [ {child, parent, why} ],          # filho e parte da funcao `parent`
+  jump_tables: [ {site, table, mode, targets[]} ],
+  unresolved_indirect: [ {addr, insn} ] }
+```
+Semantica: `lo`/`hi` cobrem a funcao inclusive blocos de continuacao e literal pools
+(use `regions` para saber o que e codigo). Funcao com `exec_addr` roda em RAM nesse
+endereco, guardada na ROM em `store_addr`; `exec = ram_code.exec + (addr - ram_code.store)`.
+
+### Teste de regressao: `python tools/check_map.py [rom] [--update] [--tolerance 2]`
+Roda a analise em `build/check/` e compara com `build/analysis/baseline.json` (derivado da ROM,
+fica em build/, fora do git). Falha (exit 1) se: no. de funcoes varia mais que a tolerancia
+(2%); funcoes do baseline somem alem da tolerancia; qualquer `high` vira `low`; o conjunto de
+continuacoes perde pares; os blocos RAM mudam. Invariantes: checksum do header ok, 0 `suspect`,
+todo pai de continuacao e funcao, todo bloco RAM tem funcoes. Depois de uma mudanca
+INTENCIONAL no analisador: conferir e rodar com `--update`.
 
 ### Codigo copiado ROM -> RAM (ram_code.csv)
 O crt0 NAO copia nada. As copias sao `CpuSet` (swi 0x0B, wrapper 0x081592F4) numa funcao do
@@ -427,6 +474,24 @@ WinGet, saidas em `build/hw/`: `frame_bg_obj.ppm`, `frame_mode3.ppm`). Resultado
   OBJ semitransparente/janela, DMA especial (timing 3: FIFO de som e captura de video ficam
   armados e nunca disparam), som, sincronia de ciclos do DMA (e instantaneo), VCount IRQ ao
   mudar LYC com a linha ja igual, HBlank DMA fora de linhas 0-159 (certo) mas IRQ HBlank em 0-227.
+### 5. PPU por scanline + janela (segunda rodada)
+- `const uint32_t *hw_get_framebuffer(void)` (240x160 XRGB8888, `HW_FB_W/HW_FB_H` em hw.h): sempre
+  valido; linhas ja renderizadas do quadro corrente. `hw_frame_ready()` continua sendo o aviso de quadro completo.
+- Novo: BG afim para modo 1 (BG2) e modo 2 (BG2/BG3): PA/PB/PC/PD, X/Y 28 bits com ponto de
+  referencia interno por linha (relatch em linha 0 e ao escrever X/Y), tamanhos 128..1024, wrap,
+  mapa de 1 byte/entrada, 8bpp. Modos 0-5 de BG agora cobertos; sprites afins/double-size NAO.
+- Testes (`hw/tests/run.ps1`, ambos OK): `test_frame.c` (timing/IRQ/DMA/timer) e `test_ppu.c`
+  (quadro esperado montado a mao, comparado pixel a pixel): tile normal/hflip/vflip/h+v, sprites
+  8x8 com flip, prioridade OBJ vs BG (igual: OBJ vence; pior: BG vence), transparencia, corte nas
+  bordas (x=236 e x=-4), e BG2 afim (identidade, escala PA=2, PD=2 por linha, offset X).
+  Saidas: `build/hw/ppu_scene_a.ppm`, `ppu_scene_b.ppm`.
+- Achado de teste: escrita de byte na VRAM de BG replica o byte nos dois lados (quirk real); codigo
+  do jogo que usa strb em tilemap/tiles precisa de halfword. Isso e comportamento, nao bug.
+- Janela: `hw/window_sdl.h/.c` (`win_open/win_poll/win_keys/win_present/win_close`; Z=A X=B
+  Backspace=Select Enter=Start setas A=L S=R). **Ainda NAO compilado**: SDL2 nao esta instalado.
+  Instalar SDL2 (ex.: `winget`/MSYS2 mingw-w64-ucrt-x86_64-SDL2 ou o zip de desenvolvimento
+  do libsdl.org) fica por conta do usuario; depois: `gcc ... window_sdl.c $(sdl2-config --cflags --libs)`.
+
 - Cuidado para o runtime: `hw_irq_pending` ja aplica IME e IE&IF; o runtime so decide o despacho.
   O registro BIOS_IF (0x03007FF8) e IWRAM, fica a cargo do runtime ao tratar VBlankIntrWait.
 
@@ -489,9 +554,9 @@ bl_sites, first_insn. Cadeias ja resolvidas ate a raiz (ex.: 0x08037326 -> 0x080
 0x08037314). Regerar apos mudar o mapa: `score_functions.py` e depois `continuations.py`.
 
 ## Recompilador minimo (Nasus) - `recomp/`
-Estado: **crt0 (0x080000C0) -> main -> primeira VBlankIntrWait roda recompilado, sem abortar**
-(135 chamadas de funcao, 73x CpuSet, 1x CpuFastSet). 5695 funcoes do mapa (593.951
-instrucoes) viram C; 5 nao decodificam (swi desconhecido/dados).
+Estado: **crt0 (0x080000C0) -> main -> 3000 quadros (titulo e cutscene na tela) recompilado,
+sem abortar**, com `hw/` ligado e IRQ de VBlank real (secao 'hw/ ligado + quadros' abaixo).
+~5660 funcoes do mapa (~593 mil instrucoes) viram C; 2 nao decodificam.
 
 ### Como rodar
 ```
@@ -545,12 +610,119 @@ completo de VBlankIntrWait **nao foram exercitados** (o teste para na 1a espera)
   `bx` Thumb com bits baixos, Rs=pc. MULS: C mantido (indefinido em ARMv4).
 - Chamadas (`bl`) e SWI/MSR/MRS nao entram no fuzz (so no boot).
 
+### hw/ ligado + quadros (Nasus) - `python -m recomp.program --frames N`
+**Passou:** 3000 quadros sem abortar; 3001 IRQ de VBlank entregues (o handler do jogo, em IWRAM
+0x030017F0, ja faz IF e BIOS_IF: "pelo runtime=0"); 0 enderecos de ROM nao resolvidos; SWI:
+05 x3000, 06 (Div) x8500, 08 x8, 0B x352, 0C x1, 12 x16. O framebuffer (`hw_frame_ready`)
+mostra a tela de titulo (~q.600) e a cutscene de abertura com texto (~q.2000); ~q.3000 e
+preto (provavel fade; nao investigado). `--ppm` grava o ultimo quadro.
+- `hw/hw.c` e linkado no `rt_boot` (forte) e substitui os stubs fracos de `gba_bus.c`.
+- `VBlankIntrWait`: `hw_step(1232)` + `hw_frame_ready` + entrega ate `BIOS_IF&1`; guarda de
+  3 quadros (aborta com dump se nenhum VBlank chegar).
+- IRQ: `rt_irq_service` chama o vetor [0x03007FFC] como a BIOS (modo IRQ, r0=0x04000000,
+  lr=0x138, salva/restaura r0-r12/flags/modo/thumb). Se o handler nao limpar IF/BIOS_IF o
+  runtime limpa/OR (contadores impressos). IRQ tambem entra em "pontos seguros": a cada
+  chamada de funcao (`rt_tick`, ~24 ciclos/chamada) e a cada 1024 desvios para tras
+  (`rt_tick_loop`, 8192 ciclos) - esperas por flag/VCOUNT em laco nao travam.
+- `bl` agora registra o retorno esperado (`rt_rets`); se a pilha guest "salta" frames (`pop
+  {r0}; bx r0` de epilogo compartilhado, agbcc) `rt_run_until` desenrola os frames C ate o
+  que espera esse endereco. Antes disso o 1o IRQ abortava em 0x138.
+- `bl` para alvo que e continuacao (salto longo do agbcc): `continuations.csv` -> `goto` no
+  corpo do pai (+ `lr` setado). 49 pares.
+- Nao resolvidos em ROM: gravados 1x em `build/recomp/program/unresolved.log` e tratados
+  como `bx lr` (APROXIMACAO; o log diz onde). `program.iterate` usa esse log como semente:
+  descobre a funcao, recompila so os shards afetados e repete (`--stop-on-unresolved` nas
+  rodadas). Achou 14 handlers do M4A que o mapa nao tem (`mov ip,lr ... bx ip`):
+  0814F938 0814F944 0814F958 0814F96C 0814F99C 0814F9B0 0814F9C4 0814F9D8 0814F9EC 0814FFC0
+  0814FFCC 0814FFE0 0814FF64 0814F8D8 (persistidos em `extra_functions.csv`; **Poppy/Riven:
+  incluam no mapa**). Sem eles o jogo roda um laco infinito no player de trilhas: tratar
+  "retorna" como aproximacao e perigoso.
+- Overlays: agora por (endereco, hash FNV do corpo); SRAM_V113 copia varias rotinas para o
+  mesmo endereco da pilha (0x03007DA0/0x03007D58) -> variantes `fn_03007DA0_v1`. Funcao ARM e
+  Thumb dentro da mesma regiao (0x03000060: SoundMainRAM) = 2 entradas, escolhidas por modo.
+- Decoder: `umull/umlal/smull/smlal` (a rotina 0x0814F3DC usa) - fuzzado contra o Unicorn.
+- Watchdog (`--timeout S`): imprime ultimo desvio para tras, regs e ultimas chamadas.
+
 ### O que falta / riscos
-- Interpretador de fallback: hoje endereco fora da tabela **aborta** com pc/lr/regs e as
-  ultimas 16 chamadas (so overlays estaticos via snapshot funcionam). Codigo em RAM que
-  mude depois e abortado pela assinatura.
-- Sem IRQ real nem hw/ (Gwen): VBlankIntrWait no modo normal depende de
-  `hw_irq_pending/hw_step`; o stub nunca dispara IRQ -> deadlock detectado e abortado.
-- Sem timing; sem validacao de `bl`/pilha contra um oraculo (so o boot).
-- Compilacao de 600k instrucoes em C e lenta (4.5 min); depois: emitir menos C por
-  instrucao (helpers) ou so o fecho alcancavel.
+- Interpretador de fallback: endereco de RAM sem overlay ainda **aborta**; ROM sem funcao
+  vira "retorna" (logado). Codigo em RAM que mude depois nao e achado sozinho fora do
+  `iterate`.
+- Sem teste diferencial de `bl`/pilha/IRQ contra um oraculo de programa inteiro (so o fuzz
+  por instrucao + 40 funcoes + boot). Um oraculo completo (Unicorn + hw/ via ctypes) seria o
+  proximo passo para pegar erros silenciosos como o do player de trilhas.
+- SRAM/save, som real (FIFO/timers dependem do `hw_step`) e entrada nao foram exercitados.
+- Compilacao de 600k instrucoes em C: 4-5 min a frio; depois cache por shard.
+- ArcTan2 e RegisterRamReset: ainda sem conferencia com a BIOS real.
+
+## Som (M4A) e save (SRAM) (Riven)
+Fonte: desmontagem a mao dos enderecos abaixo (capstone) + ram_code.csv da Poppy. E o motor
+**M4A / "MusicPlayer2000"** padrao da biblioteca de som da Nintendo, nao BIOS (o jogo nao usa
+SoundDriver* da BIOS). Estrutura `SoundInfo` apontada por `[0x03007FF0]`; campo `ident` =
+`0x68736D53` ("Smsh"), que e trocado/incrementado para travar o mixer durante a mixagem.
+
+### Enderecos (ROM)
+| Funcao | Endereco | O que faz |
+|---|---|---|
+| `m4aSoundInit` | 0x08150098 | copia o mixer p/ RAM (CpuSet), chama SoundInit, inicia players |
+| `SoundInit` | 0x08150498 | para DMA1/2, SOUNDCNT, FIFO A/B, grava `[0x03007FF0]`, ident |
+| `m4aSoundMode` | 0x08150590 | calcula taxa, configura Timer0, sincroniza em VCOUNT=159 |
+| `m4aSoundMain` (wrapper) | 0x08150110 -> `SoundMain` 0x0814F3E8 | mixa um periodo no buffer PCM; salta p/ 0x03000061 (mixer em RAM, Thumb) |
+| `m4aSoundVSync` | 0x0814FA3C | por VBlank: reinicia DMA1/2 a cada `pcmDmaPeriod` quadros |
+| `VSyncOn` / `VSyncOff` | 0x0815079C / 0x08150720 | liga/desliga DMA de som e limpa o buffer |
+| Mixer em RAM | ROM 0x0814F46C -> IWRAM 0x03000060 (1024 B) | vem do `ram_code.csv` (bloco 0) |
+`m4aSoundVSync` e chamado de 0x08152388 (provavel handler de VBlank). Dispatcher de IRQ do jogo:
+0x08000100 (ARM) le IE&IF e salta pela tabela em IWRAM `0x030017B0` (4 bytes por fonte; VBlank
+= indice 1); bit 13 (gamepak) trava em loop (`b .`).
+
+### O que o motor pede ao hardware (valores lidos no codigo)
+| Registrador | Valor | Significado |
+|---|---|---|
+| SOUNDCNT_X 0x04000084 | 0x008F | master enable (+ bits de status 1-4) |
+| SOUNDCNT_H 0x04000082 | 0xA90E | PSG vol 100%; DMA A e B vol 100%; **A -> direita, B -> esquerda, ambos Timer0**; reseta FIFO A e B |
+| SOUNDBIAS 0x04000089 (byte alto) | `(b & 0x3F) \| 0x40` | resolucao 8 bit / ciclo de amostra 65,5 kHz |
+| FIFO_A / FIFO_B 0x040000A0 / A4 | via DMA1 / DMA2 | 32 bit, destino fixo |
+| DMA1SAD/DAD, DMA2SAD/DAD | SoundInfo+0x350 -> 0x040000A0; SoundInfo+0x980 -> 0x040000A4 | os dois buffers PCM (0x630 = 1584 B cada) |
+| DMA1CNT_H / DMA2CNT_H (0x040000C6 / D2) | 0xB600 | enable, repeat, 32 bit, dest fixo, inicio = FIFO especial |
+| Parar DMA | grava 0x84400004 em DMAxCNT (32 bit) e depois 0x0400 em CNT_H | usado em SoundInit / VSyncOff / VSync |
+| TM0CNT_L 0x04000100 | `-(0x44940 / 304)` = -924 | 924 ciclos por amostra (prescaler 1) |
+| TM0CNT_H 0x04000102 | 0x0080 | habilita Timer0, **sem IRQ** |
+| VCOUNT 0x04000006 | espera sair e voltar a 0x9F (159) | para iniciar o Timer0 alinhado ao quadro |
+Modo de som (literal 0x0095FA00 em m4aSoundInit): 10 canais, volume 15, DAC 8 bit, indice de
+frequencia 5 (**18157 Hz**, 304 amostras por quadro); pcmDmaPeriod = 1584/304 = 5; pcmFreq =
+304 * 59,7275 Hz. Tabela de amostras/quadro em ROM 0x08B58604 (u16).
+Canais PSG (SOUND1..4, WAVE_RAM) tambem sao tocados pela engine (funcoes 0x08150354,
+0x08150634, 0x08150B98, 0x08150C50, 0x08157210, 0x0803A1F4): implementar depois da FIFO.
+
+### O que a Gwen precisa fornecer (ordem sugerida)
+1. FIFO A/B de 8 palavras (32 bytes), amostras assinadas de 8 bit. Timer0 estourando consome
+   1 amostra de cada FIFO ligado ao Timer0. Quando sobram <= 16 bytes, DMA1/DMA2 em modo
+   especial (CNT_H = 0xB600) transfere 4 palavras de SAD (incrementando), destino fixo.
+2. Saida: esquerda = B, direita = A (SOUNDCNT_H 0xA90E). Reamostrar 18157 Hz -> 48 kHz.
+3. Timer0 em 924 ciclos/amostra (16,78 MHz / 924 = 18157 Hz). Sem timer, nao ha som.
+4. PSG (canais 1-4) so depois: as notas "normais" do jogo sao PCM via FIFO.
+### O que o runtime (Nasus) dispara por quadro
+- VBlank IRQ -> tabela 0x030017B0[1] -> `m4aSoundVSync` (0x0814FA3C) -> `SoundMain` (0x0814F3E8)
+  uma vez por quadro (pelo loop principal, via 0x08150110), que escreve ~304 amostras/quadro.
+- `hw_step` precisa avancar Timer0 e a FIFO ANTES de entregar a IRQ, senao o DMA nunca recarrega.
+- O mixer e Thumb em IWRAM 0x03000061: ja listado como overlay (0x03000060) pelo runtime.
+
+### SRAM (biblioteca `SRAM_V113`, string em 0x08D608A0)
+Funcoes (ROM, Thumb), todas com WAITCNT SRAM = 3 (`(WAITCNT & 0xFFFC) | 3`, 0x04000204):
+| Funcao | Endereco | Papel |
+|---|---|---|
+| ReadSram (copia byte) | 0x08159158 | `ldrb/strb` de src para dest, `size` bytes |
+| ReadSramFast | 0x0815917C | copia a funcao acima para a **pilha** e a executa de la |
+| WriteSram | 0x081591E0 | escreve bytes em 0x0E000000+ |
+| VerifySram | 0x08159220 | compara bytes, devolve endereco do 1o diferente ou 0 |
+- Janela de save: 0x0E000000-0x0E007FFF (**32 KiB**, barramento de 8 bit). Formato minimo:
+  arquivo cru de 32768 bytes (`baserom.sav`), criado com 0xFF se nao existir; leitura/escrita
+  imediatas, sem atraso.
+- Cuidado (Nasus): ReadSramFast executa codigo copiado para a pilha (~0x03007Dxx). Isso e o
+  overlay `0x03007D58/0x03007DA0` que voce ja achou; como o conteudo e exatamente a funcao ROM
+  0x08159158 (mesmos bytes), da para tratar o salto como alias em vez de recompilar de novo.
+- Layout interno dos slots/checksums do jogo: nao estudado (so e preciso persistir o array).
+
+### A confirmar (nao verificado por execucao)
+- Que 0x08152388 e o handler de VBlank (so vi a chamada, nao o registro em `0x030017B0`).
+- Interpretacao de bits de SOUNDCNT_H/SOUNDBIAS acima e 59,7275 Hz foram deduzidas do manual do
+  GBA e do codigo; nenhuma foi conferida rodando.

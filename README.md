@@ -20,10 +20,11 @@ not an emulator. Think of it as translating the compiled game once, ahead of tim
 
 | Stage | State |
 |---|---|
-| ROM analysis (code vs. data, ARM vs. Thumb, function map) | done — about 5,600 functions mapped |
-| ARM/Thumb → C recompiler | working — the boot (`crt0` → `main`) runs up to the first VBlank wait |
-| Hardware model (PPU, DMA, timers, input) | initial model written, not yet wired into the runtime |
-| Picture and sound | not yet |
+| ROM analysis (code vs. data, ARM vs. Thumb, function map) | done — 5,651 functions mapped |
+| ARM/Thumb → C recompiler | working — the whole game boots and runs 3,000 frames without aborting |
+| Hardware model (PPU, DMA, timers, input) | wired into the runtime; background and sprite rendering written |
+| Picture | the title screen and the opening cutscene (with text) appear in the framebuffer; no window yet (needs SDL2) |
+| Sound and save | analysed and specified, not implemented |
 
 Numbers, decisions and open problems are in [`NOTES.md`](NOTES.md) (written in Portuguese).
 
