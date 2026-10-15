@@ -17,11 +17,16 @@ nenhuma tabela de salto com exatamente 64 entradas sem `cmp` detectado (teto do 
 Uso:
   python tools/check_map.py [rom.gba]            # verifica
   python tools/check_map.py [rom.gba] --update   # congela o mapa atual como baseline
+  python tools/check_map.py --clean [rom.gba]    # instalacao limpa: do zero (so a ROM) == baseline
 """
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -51,7 +56,8 @@ def snapshot(m):
     }
 
 
-def invariants(m):
+def invariants(m, root=None):
+    root = Path(root) if root else ROOT
     errs = []
     h = m["header"]
     if not h.get("header_checksum_ok"):
@@ -68,7 +74,7 @@ def invariants(m):
     if capped:  # 64 e o teto do analisador: sem `cmp` detectado a tabela pode estar truncada
         errs.append(f"{len(capped)} tabelas de salto com exatamente 64 entradas sem cmp detectado "
                     f"(possivel truncamento): {[(hex(t['site']), hex(t['table'])) for t in capped[:8]]}")
-    prog = ROOT / "build" / "recomp" / "program"
+    prog = root / "build" / "recomp" / "program"
     rt_files = [prog / "extra_functions.csv"] + sorted(prog.glob("unresolved*.log"))
     missing = []
     for rt in rt_files:  # tudo que o runtime executou/pediu e o mapa nao tinha tem que estar no mapa
@@ -121,13 +127,81 @@ def compare(old, new, tol):
     return errs, pct
 
 
+PIPELINE = [("analise(1)", "analyze_rom.py"), ("indiretos", "resolve_indirect.py"),
+            ("confianca", "score_functions.py"), ("analise(2)", "analyze_rom.py")]
+
+
+def clean_install(rom, keep=False):
+    """Constroi o mapa DO ZERO numa pasta temporaria (so tools/*.py + a ROM, sem build/ previo,
+    sem logs do runtime) e exige que bata com o baseline: mesmo conjunto de funcoes, continuacoes,
+    blocos RAM e tabelas. E a validacao que o launcher roda antes de abrir o jogo."""
+    rom = Path(rom or (ROOT / "baserom.gba"))
+    if not rom.exists():
+        sys.exit(f"ROM nao encontrada: {rom}")
+    if not BASELINE.exists():
+        sys.exit("sem baseline: rode `check_map.py --update` num mapa conhecido primeiro")
+    tmp = Path(tempfile.mkdtemp(prefix="kirby_clean_"))
+    try:
+        (tmp / "tools").mkdir()
+        for f in (ROOT / "tools").glob("*.py"):
+            shutil.copyfile(f, tmp / "tools" / f.name)
+        seeds = ROOT / "tools" / "map_seeds.csv"
+        if seeds.exists():
+            shutil.copyfile(seeds, tmp / "tools" / seeds.name)
+        shutil.copyfile(rom, tmp / "baserom.gba")
+        times = []
+        for name, script in PIPELINE:
+            t0 = time.time()
+            r = subprocess.run([sys.executable, str(tmp / "tools" / script), "baserom.gba"], cwd=tmp,
+                               capture_output=True, text=True)
+            times.append((name, time.time() - t0))
+            if r.returncode != 0:
+                print(f"FALHOU (instalacao limpa): {script} saiu com {r.returncode}\n{r.stdout[-600:]}\n{r.stderr[-600:]}")
+                return 1
+        m = json.loads((tmp / "build" / "analysis" / "map.json").read_text(encoding="utf-8"))
+        new = snapshot(m)
+        old = json.loads(BASELINE.read_text(encoding="utf-8"))
+        errs = invariants(m, root=tmp)
+        a0, a1 = set(old["functions"]), set(new["functions"])
+        if a0 != a1:
+            miss, extra = sorted(a0 - a1, key=int), sorted(a1 - a0, key=int)
+            errs.append(f"funcoes diferentes do baseline: {len(miss)} faltam {[hex(int(a)) for a in miss[:6]]}, "
+                        f"{len(extra)} a mais {[hex(int(a)) for a in extra[:6]]} "
+                        f"(faltando = descoberta so em execucao: `analyze_rom.py --export-seeds`)")
+        if sorted(map(tuple, old["continuations"])) != sorted(map(tuple, new["continuations"])):
+            errs.append("continuacoes diferentes do baseline")
+        if old.get("ram_code") != new.get("ram_code"):
+            errs.append("blocos RAM diferentes do baseline")
+        total = sum(t for _, t in times)
+        stats = f"{len(new['functions'])} funcoes, {len(new['continuations'])} continuacoes, " \
+                f"{len(new['ram_code'])} blocos RAM; tempo {total:.0f}s ({', '.join(f'{n} {t:.0f}s' for n, t in times)})"
+        if errs:
+            print("FALHOU (instalacao limpa):")
+            for e in errs:
+                print("  -", e)
+            print("  ", stats)
+            return 1
+        print(f"OK (instalacao limpa): mapa do zero == baseline: {stats}")
+        return 0
+    finally:
+        if keep:
+            print("pasta temporaria mantida:", tmp)
+        else:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--clean", action="store_true",
+                    help="constroi do zero numa pasta temporaria (so a ROM + tools) e compara com o baseline")
+    ap.add_argument("--keep", action="store_true", help="com --clean: nao apagar a pasta temporaria")
     ap.add_argument("rom", nargs="?")
     ap.add_argument("--update", action="store_true", help="congela o mapa atual como baseline")
     ap.add_argument("--tolerance", type=float, default=2.0, help="variacao maxima do no. de funcoes (%%)")
     args = ap.parse_args()
 
+    if args.clean:
+        return clean_install(args.rom, args.keep)
     m = run_analysis(args.rom)
     new = snapshot(m)
     errs = invariants(m)

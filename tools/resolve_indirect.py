@@ -172,6 +172,49 @@ def main():
     ta = sum(1 for v in leafs.values() if v == 'A')
     print(f'address-taken leaf funcs missed by analyzer: {len(leafs)} (tier A table-adjacent {ta}, tier B {len(leafs) - ta})')
 
+    # 4b) function-pointer TABLE completion: a run of >= 5 consecutive Thumb pointers into the code
+    # area where most targets are already known functions is a dispatch table (the M4A command
+    # table is one). Add the remaining entries if they decode to code that reaches a return.
+    # Found because a from-scratch build had to rediscover 13 of them at run time (slow rebuilds).
+    def plausible(t):
+        n, ok = 0, False
+        for i in th.disasm(rom[t - BASE:t - BASE + 200], t):
+            n += 1
+            if i.mnemonic in ('udf', 'ldc', 'stc', 'mcr', 'mrc', 'cdp', 'bkpt'):
+                return False
+            if (i.mnemonic == 'bx') or (i.mnemonic == 'pop' and 'pc' in i.op_str) or \
+                    (i.mnemonic in ('mov', 'movs') and i.op_str.startswith('pc,')):
+                ok = True
+                break
+            if n > 60:
+                break
+        return ok and n >= 2
+
+    tables_done = {}
+    k = 0
+    while k < len(words):
+        if not (isptr(words[k]) and (words[k] & ~1) < code_end):
+            k += 1
+            continue
+        j = k
+        while j < len(words) and isptr(words[j]) and (words[j] & ~1) < code_end:
+            j += 1
+        run = words[k:j]
+        if len(run) >= 5:
+            tg = [w & ~1 for w in run]
+            nk = sum(1 for t in tg if t in known or t in new_funcs or t in leafs)
+            if nk * 2 >= len(tg):          # at least half already functions
+                for t in set(tg):
+                    if t in known or t in new_funcs or t in leafs or t in tables_done or t % 2:
+                        continue
+                    if plausible(t):
+                        tables_done[t] = BASE + k * 4
+        k = j
+    for t in tables_done:
+        leafs.setdefault(t, 'T')
+    print(f'pointer-table completion: {len(tables_done)} functions from '
+          f'{len({v for v in tables_done.values()})} table(s)')
+
     print(f'\nindirect call sites (bl stub): {len(sites)}')
     for k, v in why.most_common():
         print(f'  {k:16s} {v}')
@@ -192,7 +235,7 @@ def main():
         for t, m in sorted(new_funcs.items()):
             w.writerow([f'{t:#010x}', m, 'indirect', ''])
         for t, tier in sorted(leafs.items()):
-            w.writerow([f'{t:#010x}', 'thumb', 'addr-taken-leaf', tier])
+            w.writerow([f'{t:#010x}', 'thumb', 'ptr-table' if tier == 'T' else 'addr-taken-leaf', tier])
     # also: what the stub/veneer 'other' sites look like
     with open(f'{odir}/other_sites.csv', 'w', newline='') as f:
         w = csv.writer(f); w.writerow(['addr', 'insn'])
