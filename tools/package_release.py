@@ -159,7 +159,9 @@ def main():
     shutil.copy2(os.path.join(sdl, 'bin', 'SDL2.dll'), os.path.join(app, 'launcher', 'SDL2.dll'))
     run([zexe, 'cc', '-target', 'x86_64-windows-gnu', '-O2', '-municode', '-Wl,--subsystem,windows',
          os.path.join(ROOT, 'launcher', 'stub.c'), '-o', os.path.join(dist, 'KirbyRecomp.exe')])
-    print('5/6 README')
+    print('5/6 README + third-party notices')
+    with open(os.path.join(dist, 'THIRD_PARTY_NOTICES.txt'), 'w', encoding='utf-8') as f:
+        f.write(NOTICES)
     with open(os.path.join(dist, 'README.txt'), 'w', encoding='utf-8') as f:
         f.write(README)
     print('6/6 audit')
@@ -179,6 +181,21 @@ def main():
         z = shutil.make_archive(dist, 'zip', os.path.dirname(dist), os.path.basename(dist))
         print('zip:', z, f'{os.path.getsize(z) / 1e6:.0f} MB')
 
+
+NOTICES = """This package bundles third-party software. Each keeps its own licence; full texts are in the
+LICENSE files shipped inside the corresponding folder.
+
+  python/                          Python embeddable distribution  - PSF License    https://www.python.org
+  python/Lib/site-packages/capstone  Capstone disassembler         - BSD 3-Clause   https://www.capstone-engine.org
+  app/tools/zig/                   Zig toolchain (C compiler)      - MIT            https://ziglang.org
+                                   (its lib/ directory carries LLVM/clang and mingw-w64 headers under
+                                    their own permissive licences; see lib/ and the LICENSE file)
+  app/sdl2/                        SDL2 development files, SDL2.dll - zlib          https://www.libsdl.org
+
+The launcher, recompiler, runtime and hardware model (app/launcher, app/recomp, app/hw, app/tools/*.py)
+are the sources of https://github.com/Felipe-Gomes-Amorim/kirby-amazing-mirror-recomp .
+This package contains no ROM, BIOS, or any code or data derived from the game.
+"""
 
 README = """Kirby & The Amazing Mirror - Recomp (unofficial)
 =================================================
