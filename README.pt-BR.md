@@ -15,11 +15,12 @@ runtime que imita o hardware (vídeo, DMA, timers, interrupções, BIOS).
 
 | Etapa | Situação |
 |---|---|
-| Análise da ROM (código × dados, ARM × Thumb, funções) | feito: 5.651 funções mapeadas |
-| Recompilador ARM/Thumb → C | funciona: o jogo inicia e roda 3.000 quadros sem abortar |
-| Hardware (PPU, DMA, timers, entrada) | ligado ao runtime; renderização de fundos e sprites escrita |
-| Imagem | a tela de título e a abertura (com texto) aparecem no framebuffer; ainda sem janela (precisa do SDL2) |
-| Som e save | analisados e especificados, não implementados |
+| Análise da ROM (código × dados, ARM × Thumb, funções) | feito: 5.669 funções mapeadas, mapa congelado e com teste de regressão |
+| Recompilador ARM/Thumb → C | funciona: o jogo inicia e roda mais de 8.000 quadros sem abortar |
+| Hardware | ligado: fundos tiled/afins, sprites, janelas, blending, DMA, timers, áudio PCM |
+| Imagem | título, abertura e a primeira fase aparecem corretos (salvos como imagem) |
+| Janela e teclado | janela SDL2 escrita e testada em uma demo; ainda não ligada ao jogo |
+| Saída de som e save | o áudio PCM é gerado, mas não vai para o alto-falante. O arquivo de save (32 KiB) funciona |
 
 Mais detalhe, com números e decisões, em [`NOTES.md`](NOTES.md).
 

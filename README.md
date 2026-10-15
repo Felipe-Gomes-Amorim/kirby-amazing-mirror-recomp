@@ -20,11 +20,12 @@ not an emulator. Think of it as translating the compiled game once, ahead of tim
 
 | Stage | State |
 |---|---|
-| ROM analysis (code vs. data, ARM vs. Thumb, function map) | done — 5,651 functions mapped |
-| ARM/Thumb → C recompiler | working — the whole game boots and runs 3,000 frames without aborting |
-| Hardware model (PPU, DMA, timers, input) | wired into the runtime; background and sprite rendering written |
-| Picture | the title screen and the opening cutscene (with text) appear in the framebuffer; no window yet (needs SDL2) |
-| Sound and save | analysed and specified, not implemented |
+| ROM analysis (code vs. data, ARM vs. Thumb, function map) | done — 5,669 functions mapped, map frozen and regression-tested |
+| ARM/Thumb → C recompiler | working — the game boots and runs 8,000+ frames without aborting |
+| Hardware model | wired in: tiled/affine backgrounds, sprites, windows, blending, DMA, timers, PCM audio |
+| Picture | the title screen, the opening cutscene and the first level render correctly (saved as images) |
+| Window and keyboard | SDL2 window written and tested on a demo; not yet connected to the game |
+| Sound output and save | PCM audio is generated; not yet sent to speakers. Save file (32 KiB) works |
 
 Numbers, decisions and open problems are in [`NOTES.md`](NOTES.md) (written in Portuguese).
 

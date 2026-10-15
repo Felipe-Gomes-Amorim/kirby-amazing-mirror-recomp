@@ -7,16 +7,19 @@ e rodar nativo no PC. NAO e decompilacao matching.
 
 ## Estado
 - [x] Pesquisar projetos/ferramentas de recomp estatica (GBA e outros) -> secao 1
-- [x] Toolchain: Windows nativo (Python 3.13, capstone, unicorn, zig cc/GCC)
-- [x] Analise da ROM: mapa congelado (`map.json`, 5651 funcoes), regressao em `tools/check_map.py`
-- [x] Recompilador gera C e roda: `python -m recomp.program --frames 3000` sem abortar
-- [x] Hardware ligado ao runtime (VBlank/IRQ por quadro); PPU de BG/sprites escrita
-- [x] Titulo e cutscene de abertura aparecem no framebuffer (~q.600 e ~q.2000)
-- [ ] Janela e teclado (SDL2): `hw/window_sdl.c` escrito, nao compilado (SDL2 nao instalado)
-- [ ] Investigar quadro preto ~q.3000 (fade? nao investigado)
-- [ ] 14 handlers M4A fora do mapa (pedido do Nasus em ROLES.md)
-- [ ] Som (FIFO/Timer0/DMA, depois PSG) e save SRAM (32 KiB)
+- [x] Toolchain: Windows nativo (Python 3.13, capstone, unicorn, zig cc/GCC, SDL2 2.32.2)
+- [x] Mapa congelado (`map.json`, 5669 funcoes) + regressao `tools/check_map.py`; handlers M4A incluidos
+- [x] Recompilador roda o jogo: 8000+ quadros, 0 abortos (`python -m recomp.program --frames N`)
+- [x] Hardware ligado: BG tiled/afim, sprites, janelas, blend, mosaico, DMA, timers, FIFO PCM
+- [x] Titulo, abertura e 1a fase renderizam (roteiro de teclas `--keys`, quadros em `build/recomp/frames/`)
+- [x] Save SRAM de 32 KiB (`baserom.sav`)
+- [x] Janela SDL2 compilada e testada em demo (`hw/tests/run_demo.ps1`)
+- [ ] Ligar a janela SDL2 e o teclado ao executavel do jogo (hoje so gera quadros em arquivo)
+- [ ] Saida de audio: `hw_audio_read` existe, falta enviar ao alto-falante (SDL audio) e PSG
+- [ ] Leitura em 0x100F0D55 (endereco inexistente) durante a fase: achar quem gera o ponteiro
+- [ ] Velocidade: nao medida (rodar em tempo real); timing por ciclo e aproximado
 - [ ] Interpretador de fallback para codigo em RAM nao previsto
+- [ ] Licenca do repositorio e revisao dos trechos desmontados do NOTES.md
 
 ## Fatos da ROM (verificados nesta maquina)
 - Arquivo local: `baserom.gba` (renomeado do nome original "Kirby & The Amazing Mirror
@@ -240,11 +243,11 @@ Thumb (`add;ldr;mov pc`, tamanho pelo `cmp #n`) -> varre a ROM por ponteiros par
 `push {..,lr}` perto do codigo conhecido (heuristica, origem `ptr-scan`) -> classifica bytes.
 
 Resultado atual (B8KE v0): header ok (logo, 0x96, checksum), ~607k instrucoes (294 ARM,
-resto Thumb), **5651 funcoes**: 2138 `bl`, 3110 `ptr-scan`, 386 `addr-taken-leaf` (extras do
-Riven, tier A/B), 6 `bx-const`, 3 `ram-code`, 5 `ram-ptr`, 1 `adr`, 2 `entry`. 146 tabelas de
+resto Thumb), **5669 funcoes**: 2140 `bl`, 3110 `ptr-scan`, 386 `addr-taken-leaf` (extras do
+Riven, tier A/B), 16 `m4a-jump-table`, 6 `bx-const`, 3 `ram-code`, 5 `ram-ptr`, 1 `adr`, 2 `entry`. 146 tabelas de
 salto (1539 entradas), ~7.4% da ROM e Thumb. Indiretos nao resolvidos: 12 (stubs
 `_call_via_rN` e `bx` soltos; `pop {rN}; bx rN` e retorno). 0 pontos nao decodificam; 4
-conflitos ARM/Thumb (bloco RAM 2, ver abaixo). Confianca: 5251 high, 372 medium, 28 low.
+conflitos ARM/Thumb (bloco RAM 2, ver abaixo). Confianca: 5252 high, 387 medium, 30 low.
 Opcoes: `--extra-functions CSV` (padrao build/indirect/new_functions.csv; `''` desliga),
 `--confidence CSV` (padrao build/indirect/confidence.csv; coluna `confidence`).
 
@@ -273,6 +276,26 @@ Saidas novas em `build/analysis/`:
 - `map.json`: header, functions[], regions[], ram_code[], jump_tables[], unresolved_indirect[]
   (enderecos como inteiros) - para o recompilador ler sem juntar CSVs.
 
+### Funcoes extras e descoberta em execucao (`--extra-functions`)
+O analisador le, nesta ordem, os CSVs de funcoes extras (flag repetivel; padrao = estes 3;
+`--extra-functions ''` desliga todos). Arquivo ausente e ignorado. A primeira origem que
+registra um endereco vence; o resto conta como "ja conhecida".
+| arquivo | quem escreve | source no mapa |
+|---|---|---|
+| `build/indirect/new_functions.csv` | Riven (`resolve_indirect.py`): folhas com ponteiro em dados | `addr-taken-leaf` (+`tier`) |
+| `build/indirect/m4a_handlers.csv` | Riven: handlers da tabela de saltos do M4A (0x08B58490..) | `m4a-jump-table` / `m4a-runtime` (como no CSV) |
+| `build/recomp/program/extra_functions.csv` | **runtime do Nasus**: o que o jogo executou e o mapa nao tinha | `runtime` (ou a coluna `source`) |
+Formato aceito: `addr,mode,source,tier` com cabecalho, ou SEM cabecalho `addr[,mode]` (como
+o runtime grava: `0814F958,thumb`). Enderecos com ou sem `0x`. Regras:
+- `addr-taken-leaf` que ja foi decodificado dentro de outra funcao vira continuacao (ver acima);
+  as demais fontes (jump table, runtime) SEMPRE sao entradas de funcao.
+- Cada funcao nova e seguida (`bl`, branches), entao callees tambem entram no mapa; por isso
+  o total pode passar do numero de linhas dos CSVs (ex.: M4A: 17 linhas -> +18: o handler
+  chama 0x0814F8AE, entrada do helper `ldr/ldrb` de proximo byte, achada por `bl`).
+Ciclo: jogo roda -> runtime grava `extra_functions.csv` -> `python tools/analyze_rom.py` absorve
+-> `python tools/check_map.py` (confere regressao; `--update` se intencional) -> recompilar.
+Como o arquivo do runtime cresce com o jogo, o baseline muda quando ele muda: esperado.
+
 ### Funcoes sem retorno alcancavel (`noreturn.csv`, coluna `noreturn_kind`)
 24 funcoes, todas explicadas (0 `suspect`):
 | kind | qtd | exemplos / motivo |
@@ -295,7 +318,7 @@ Enderecos sao inteiros (decimal). Mudancas incompativeis incrementam o numero do
 { schema, rom, rom_base,
   header: {title, game_code, maker_code, version, header_checksum_ok, entry_branch_target, ...},
   functions: [ { addr, mode("arm"|"thumb"), lo, hi, insns, bytes,
-                 source("entry|bl|ptr-scan|addr-taken-leaf|bx-const|adr|ram-code|ram-ptr"),
+                 source("entry|bl|ptr-scan|addr-taken-leaf|m4a-jump-table|m4a-runtime|runtime|bx-const|adr|ram-code|ram-ptr"),
                  tier("A"|"B"|null), confidence("high|medium|low|unscored"),
                  jumptable(bool), has_return(bool), continuations(int),
                  noreturn_kind(str|null), store_addr(int|null), exec_addr(int|null),
@@ -488,9 +511,46 @@ WinGet, saidas em `build/hw/`: `frame_bg_obj.ppm`, `frame_mode3.ppm`). Resultado
 - Achado de teste: escrita de byte na VRAM de BG replica o byte nos dois lados (quirk real); codigo
   do jogo que usa strb em tilemap/tiles precisa de halfword. Isso e comportamento, nao bug.
 - Janela: `hw/window_sdl.h/.c` (`win_open/win_poll/win_keys/win_present/win_close`; Z=A X=B
-  Backspace=Select Enter=Start setas A=L S=R). **Ainda NAO compilado**: SDL2 nao esta instalado.
+  Backspace=Select Enter=Start setas A=L S=R). **Compilado e testado** com SDL2 2.32.2 (MinGW devel em
+  `C:\libs\SDL2-2.32.2`): `hw/tests/run_demo.ps1` abre a janela 3x com cena de BG+sprite (setas/Z/Esc);
+  rodou 120 quadros com `SDL_VIDEODRIVER=dummy` sem erro. No SDL2 o `main` precisa de `SDL_MAIN_HANDLED`
+  (ou link com SDL2main). Para o runtime: link `-lSDL2`, copiar `SDL2.dll` ao lado do .exe.
   Instalar SDL2 (ex.: `winget`/MSYS2 mingw-w64-ucrt-x86_64-SDL2 ou o zip de desenvolvimento
   do libsdl.org) fica por conta do usuario; depois: `gcc ... window_sdl.c $(sdl2-config --cflags --libs)`.
+
+### 6. Audio PCM + janelas/blend/mosaico (terceira rodada) - substitui "so armazenado/nao implementado" dos itens 3-4 para estes
+**Audio (Direct Sound A/B)**
+- API (hw.h): `int hw_audio_read(int16_t *lr, int frames)` e `int hw_audio_rate(void)`. Saida fixa em
+  **48000 Hz**, estereo int16 intercalado (L,R), gerada dentro de `hw_step` (o Nasus so chama hw_step e
+  le o buffer de vez em quando). Retorna quantos quadros copiou; anel interno de 16384 quadros (~0,34 s),
+  o mais antigo e descartado se ninguem ler. Escolha de 48 kHz: retencao de ordem zero da amostra atual
+  (sem filtro); 18157 Hz sai como degraus repetidos ~2,64x. Quem quiser 18157 Hz nativo: dividir por rate.
+- FIFO A (0x0A0) / B (0x0A4): 32 bytes cada, escrita 8/16/32 bit empurra bytes (LSB primeiro), cheia = descarta.
+  SOUNDCNT_H bit11/bit15 = reset da FIFO A/B (nao fica gravado). SOUNDCNT_X so o bit 7 e gravavel.
+- Timer 0/1 overflow (selecionado por SOUNDCNT_H bit10/bit14) consome 1 amostra int8 de cada FIFO ligada a ele
+  (FIFO vazia mantem a ultima); com <=16 bytes restantes, DMA1/DMA2 em modo especial (CNT_H timing=3, destino =
+  FIFO_A ou FIFO_B) transfere 4 palavras (src incrementa, dest fixo, ignora CNT_L/repeat), IRQ do DMA se bit14.
+- Mix: L = B (bits 13) [+ A se bit9], R = A (bit8) [+ B se bit12]; amostra*256, volume 100% (bit2/bit3=1) ou 50%;
+  clip em int16. Master = SOUNDCNT_X bit7 (desligado = silencio, FIFO nao consome).
+- Teste `hw/tests/test_audio.c` (OK): onda quadrada 16 +V/16 -V em EWRAM, Timer0 reload -924: 1 s deu 48000
+  quadros e **568 periodos** (esperado 18157,3/32 = 567,4); amplitude A=100*256, B a 50% = 5120; canais nao
+  usados em 0; master off = silencio.
+- NAO feito: PSG (SOUND1-4/WAVE), SOUNDBIAS (nivel/amostragem), SOUNDCNT_L, mistura PSG*volume, interpolacao.
+  O M4A do Kirby toca as notas normais via PCM, entao a FIFO ja deve dar a musica; os canais PSG ficam mudos.
+**PPU**
+- Janelas: WIN0/WIN1 (H/V com wrap quando x1>x2/y1>y2, x2>240 e y2>160 limitados), janela de OBJ (sprite
+  modo 2), WININ/WINOUT por camada (BG0-3, OBJ, efeitos). Prioridade win0 > win1 > obj > fora.
+- Blending: BLDCNT/BLDALPHA/BLDY: alpha (EVA/EVB limitados a 16), brighten, darken; escolhe as duas camadas
+  mais altas visiveis por pixel (inclui backdrop); sprite semitransparente (modo 1) mistura com o alvo 2.
+- Mosaico: BG (MOSAIC H/V, bit 6 do BGxCNT; vertical por cache da linha anterior, serve p/ afim) e OBJ (bit 12
+  do attr0; aproximacao por coordenada de tela).
+- Testes novos em `test_ppu.c` (cena C, valores a mao): janela com bordas inclusivas/exclusivas, alpha 8+8
+  = 0x7B007B, brighten = 0xFF7B7B, darken = 0x840000, alvo fora do BLDCNT sem efeito, mosaico H4 V2 (64 px).
+  Saidas: `build/hw/ppu_window.ppm`, `ppu_mosaic.ppm`.
+- NAO testado/implementado: sprites afins e double-size (ainda ignorados), OBJ janela e sprite semitransparente
+  (codigo existe, sem teste), mosaico de OBJ (sem teste), quirks de blend entre OBJ e janela, BG afim em modos 3-5
+  com PA/PD, WININ/WINOUT com bit de OBJ+mosaico, VCount IRQ ao mudar LYC. Janela SDL2: aguardando o usuario.
+Rodar tudo: `hw/tests/run.ps1` (test_frame, test_ppu, test_audio).
 
 - Cuidado para o runtime: `hw_irq_pending` ja aplica IME e IE&IF; o runtime so decide o despacho.
   O registro BIOS_IF (0x03007FF8) e IWRAM, fica a cargo do runtime ao tratar VBlankIntrWait.
@@ -615,7 +675,7 @@ completo de VBlankIntrWait **nao foram exercitados** (o teste para na 1a espera)
 0x030017F0, ja faz IF e BIOS_IF: "pelo runtime=0"); 0 enderecos de ROM nao resolvidos; SWI:
 05 x3000, 06 (Div) x8500, 08 x8, 0B x352, 0C x1, 12 x16. O framebuffer (`hw_frame_ready`)
 mostra a tela de titulo (~q.600) e a cutscene de abertura com texto (~q.2000); ~q.3000 e
-preto (provavel fade; nao investigado). `--ppm` grava o ultimo quadro.
+preto (era uma transicao: ver 'Fade, teclas...'). `--ppm` grava o ultimo quadro.
 - `hw/hw.c` e linkado no `rt_boot` (forte) e substitui os stubs fracos de `gba_bus.c`.
 - `VBlankIntrWait`: `hw_step(1232)` + `hw_frame_ready` + entrega ate `BIOS_IF&1`; guarda de
   3 quadros (aborta com dump se nenhum VBlank chegar).
@@ -642,6 +702,34 @@ preto (provavel fade; nao investigado). `--ppm` grava o ultimo quadro.
   Thumb dentro da mesma regiao (0x03000060: SoundMainRAM) = 2 entradas, escolhidas por modo.
 - Decoder: `umull/umlal/smull/smlal` (a rotina 0x0814F3DC usa) - fuzzado contra o Unicorn.
 - Watchdog (`--timeout S`): imprime ultimo desvio para tras, regs e ultimas chamadas.
+
+### Fade, teclas, quadros, save (Nasus)
+**Quadro preto ~q.3000 = transicao normal, nao quebra.** Sem teclas: q.2900 DISPCNT=1340,
+BLDALPHA=0010, 312 pixels nao pretos (cutscene sumindo); q.3000 DISPCNT=1240, BLDALPHA=1000,
+0 pixels, paleta 0 = 03E0; q.3100 DISPCNT=1440, pal0=0000, 38.3 mil pixels (tela nova, ~q.3100-4000
+= cena seguinte, q.5000 = DISPCNT 1740 + BLDCNT 0641, cena com sprites). BLDCNT=0000 e BLDY=0000
+em toda a janela 2900-3000 => o fade e feito pela paleta/DISPCNT (jogo zera o BG), nao pelo
+hardware de blend. Nenhuma mudanca foi feita para "passar".
+- `--keys "START@620+8,A@800"` (tecla@quadro[+duracao]); `hw_set_keys` por quadro (ativo em
+  0). Com `START@620,A@800,A@1000,A@1200,START@1400,A@1600,A@1900`: titulo -> menu -> **1a fase
+  na q.2000** (DISPCNT=1B40, BG0-3+OBJ; 4 Kirbys e HUD; estavel ate q.8000).
+- `--snap 600,2000,...` grava `build/recomp/frames/frame_NNNNN.ppm` (via `hw_get_framebuffer`,
+  nao `hw_frame_ready`) e imprime DISPCNT/BG*CNT/BLD*/MOSAIC/WIN*/pal0/IE/IME e pixels nao pretos.
+  `python -m recomp.program --frames 8000 --keys ... --snap ...`.
+- Save: `<rom>.sav` (ou `--sav F`, `--sav none`) = 32 KiB crus, 0xFF se novo, gravado no
+  `atexit`. O jogo escreveu 4736 bytes no primeiro boot (formatacao do save). Barramento 0x0E.. e
+  32 KiB espelhado (era 64 KiB).
+- `ReadSramFast` (0x0815917C) e alias de `ReadSram` (0x08159158): no emissor (`ALIASES`) e em
+  `rt_call` (chamadas por ponteiro). Nao recompila a copia para a pilha; Write/Verify ainda
+  usam overlays em 0x03007Dxx.
+- Handlers do M4A: `build/indirect/m4a_handlers.csv` (17, incluindo F9F8/FA10/FA24) e lido como
+  semente ate a Poppy reingerir; `unresolved.log` continua alimentando `extra_functions.csv`.
+- **Tabelas de salto:** `jumptables.csv` agora entra no `discover` (alvos do `switch` viram parte
+  da funcao). Sem isso, 0x08070164 tinha 161 de 276 instrucoes e abortava ("saiu sem avancar
+  o pc") ao atingir o `case` em 0x08070280. Medido: 593.4k -> 607.9k instrucoes recompiladas.
+- Resultado: **8000 quadros com teclas, 0 abortos, 0 nao resolvidos**, 8001 IRQ; SWI 05 x8000,
+  0B x555, 11 x1, 12 x15, 14 x2. Um unico aviso do barramento: `read8 0x100F0D55` (regiao
+  inexistente; ponteiro lixo vindo do jogo ou de um erro nosso - NAO investigado).
 
 ### O que falta / riscos
 - Interpretador de fallback: endereco de RAM sem overlay ainda **aborta**; ROM sem funcao
@@ -726,3 +814,19 @@ Funcoes (ROM, Thumb), todas com WAITCNT SRAM = 3 (`(WAITCNT & 0xFFFC) | 3`, 0x04
 - Que 0x08152388 e o handler de VBlank (so vi a chamada, nao o registro em `0x030017B0`).
 - Interpretacao de bits de SOUNDCNT_H/SOUNDBIAS acima e 59,7275 Hz foram deduzidas do manual do
   GBA e do codigo; nenhuma foi conferida rodando.
+
+## Handlers do M4A fora do mapa (Riven) - `build/indirect/m4a_handlers.csv`
+Pedido do Nasus (14 funcoes achadas em execucao). Causa: o motor M4A despacha os comandos
+da musica por uma **tabela de saltos em ROM 0x08B58490-0x08B5851C** (entradas Thumb), e so
+as entradas alcancadas por `bl` estavam no mapa. 17 entradas faltavam: 14 que o runtime ja
+viu + 3 que o jogo ainda nao chamou (0x0814F9F8, 0x0814FA10, 0x0814FA24). Todas decodificam
+e chegam a um retorno. Lista: 0x0814F8D8, F938, F944, F958, F96C, F99C, F9B0, F9C4, F9D8,
+F9EC, F9F8, FA10, FA24, FF64, FFC0, FFCC, FFE0. 0x0814FFC0 nao e alvo direto da tabela
+(entrada `ldr r2,[r1,#0x40]`; `ldrb r3,[r2]` = leitura do proximo byte da trilha). A tabela
+seguinte (0x08B58520+) e dado (tabela de bytes 0xE0.., nao codigo).
+Para a Poppy: ingerir `build/indirect/m4a_handlers.csv` com `--extra-functions` (coluna `addr`).
+
+Correcao em `tools/continuations.py` (falsos positivos apontados pela Poppy): ignora pais com
+<= 2 instrucoes (0x0814F890) e pais que contem `svc` (SoftReset 0x0815931C nunca retorna).
+Agora o script lista 0 pares: o mapa congelado ja absorveu as 49 continuacoes reais
+(`functions.csv` tem a coluna `continuations`), entao o script serve so como verificacao.
