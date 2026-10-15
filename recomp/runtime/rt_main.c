@@ -66,7 +66,7 @@ int main(int argc, char **argv) {
     gba_load_rom(rom, (uint32_t)n);
     hw_reset();
     const char *ppm = NULL, *sav = NULL;
-    int window = 0, scale = 3, bench = 0;
+    int window = 0, scale = 3, bench = 0, selftest = 0;
     rt_opt_stop_at_vblank_wait = 1;
     hw_set_keys(0x03FF);
     for (int i = 2; i < argc; i++) {
@@ -76,6 +76,9 @@ int main(int argc, char **argv) {
             if (i + 1 < argc && argv[i + 1][0] >= '1' && argv[i + 1][0] <= '9') scale = atoi(argv[++i]);
         }
         else if (!strcmp(argv[i], "--bench")) bench = 1;
+        else if (!strcmp(argv[i], "--selftest-sram")) selftest = 1;
+        else if (!strcmp(argv[i], "--mute")) { extern int rt_mute; rt_mute = 1; }
+        else if (!strcmp(argv[i], "--audio-raw") && i + 1 < argc) { extern const char *rt_audio_raw; rt_audio_raw = argv[++i]; }
         else if (!strcmp(argv[i], "--bench-from") && i + 1 < argc) { extern uint64_t rt_bench_from; rt_bench_from = (uint64_t)atoll(argv[++i]); }
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) rt_dump_path = argv[++i];
         else if (!strcmp(argv[i], "--unresolved") && i + 1 < argc) rt_unresolved_path = argv[++i];
@@ -105,6 +108,10 @@ int main(int argc, char **argv) {
         if (strcmp(sav, "none")) rt_script_sram(sav);
     }
     rt_cpu = &cpu;
+    if (selftest) {
+        extern int rt_selftest_sram(Cpu *);
+        return rt_selftest_sram(&cpu) ? 1 : 0;
+    }
     rt_script_install();
     if (window || bench) {
         rt_measure = 1;
@@ -131,6 +138,7 @@ int main(int argc, char **argv) {
                       : cpu.stop == RT_STOP_STOPCALL  ? "SWI Stop" : "erro";
     printf("RT_STOP %s pc=%08X lr=%08X sp=%08X calls=%llu\n", why, cpu.pc, cpu.r[14], cpu.r[13],
            (unsigned long long)rt_ncalls);
+    { extern uint64_t rt_sram_alias_hits; printf("SRAM na pilha (alias p/ ROM): %llu usos\n", (unsigned long long)rt_sram_alias_hits); }
     printf("IRQ entregues=%llu (BIOS_IF pelo handler=%llu, pelo runtime=%llu; IF limpo pelo "
            "runtime=%llu) frames_hw=%llu nao_resolvidos=%llu\n",
            (unsigned long long)rt_irq_delivered, (unsigned long long)rt_irq_biosif_by_handler,

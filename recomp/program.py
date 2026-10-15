@@ -164,7 +164,8 @@ def build_window(objs, compile_one):
         return None
     flags = ['-DRT_WINDOW', '-I', inc]
     w = [compile_one(os.path.join(RUNTIME, 'rt_window.c'), flags, 'win'),
-         compile_one(os.path.join(ROOT, 'hw', 'window_sdl.c'), flags, 'win')]
+         compile_one(os.path.join(ROOT, 'hw', 'window_sdl.c'), flags, 'win'),
+         compile_one(os.path.join(ROOT, 'hw', 'audio_sdl.c'), flags, 'win')]
     base = [o for o in objs if not os.path.basename(o).startswith('rt_window_')]
     exe = os.path.join(OUT, 'kirby.exe' if os.name == 'nt' else 'kirby')
     imp = os.path.join(SDL_DIR, 'lib', 'libSDL2.dll.a')   # import lib (nao a estatica)
@@ -288,6 +289,8 @@ def main():
     ap.add_argument('--snap', help='quadros p/ salvar em build/recomp/frames: "600,2000"')
     ap.add_argument('--sav', help='arquivo de save (padrao: <rom>.sav; "none" desliga)')
     ap.add_argument('--bench-from', type=int, default=0, help='marca o inicio do trecho medido')
+    ap.add_argument('--audio-raw', help='grava PCM cru (diagnostico)')
+    ap.add_argument('--mute', action='store_true', help='janela sem som')
     ap.add_argument('--bench', action='store_true', help='mede quadros/s sem limite (use com --frames)')
     ap.add_argument('--window', nargs='?', const=3, type=int, metavar='ESCALA',
                     help='abre kirby.exe com janela SDL2 (escala 1-6)')
@@ -303,6 +306,8 @@ def main():
         args += ['--frames', str(a.frames)]
     if a.bench:
         args += ['--bench']
+        if a.audio_raw:
+            args += ['--audio-raw', a.audio_raw]
         if a.bench_from:
             args += ['--bench-from', str(a.bench_from)]
     if a.window and not a.frames:
@@ -322,6 +327,8 @@ def main():
             print('kirby.exe nao foi gerado (SDL2 em %s?)' % SDL_DIR)
             return 1
         cmd = [exe, a.rom, '--window', str(a.window), '--unresolved', os.path.join(OUT, 'unresolved.log')]
+        if a.mute:
+            cmd.append('--mute')
         for flag, val in (('--keys', a.keys), ('--snap', a.snap), ('--sav', a.sav)):
             if val:
                 cmd += [flag, val]

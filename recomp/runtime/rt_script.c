@@ -139,3 +139,56 @@ void rt_script_sram_save(void) {
         fclose(f);
     }
 }
+
+/* ---- autoteste: rotinas SRAM copiadas para a pilha em sp arbitrario ---- */
+extern uint64_t rt_sram_alias_hits;
+
+int rt_selftest_sram(Cpu *c) {
+    int fails = 0;
+    static const uint32_t sps[] = {0x03007CECu, 0x03007DA0u, 0x03007B10u, 0x02001230u};
+    for (unsigned k = 0; k < sizeof sps / sizeof sps[0]; k++) {
+        uint32_t at = sps[k];
+        /* VerifySram: corpo de 0x08159220 (48 bytes) copiado para `at` */
+        for (uint32_t i = 0; i < 0x30; i++) gba_write8(at + i, gba_read8(0x08159220u + i));
+        for (uint32_t i = 0; i < 8; i++) {
+            gba_write8(0x03007F00u + i, 'A' + i);
+            gba_write8(0x0E000018u + i, 'A' + i);
+        }
+        for (int diff = 0; diff < 2; diff++) {
+            if (diff) gba_write8(0x0E00001Bu, 'x');
+            rt_cpu_reset(c);
+            c->thumb = 1;
+            c->pc = at;
+            c->r[0] = 0x03007F00u;
+            c->r[1] = 0x0E000018u;
+            c->r[2] = 8;
+            c->r[13] = 0x03007E00u;
+            c->r[14] = RT_IRQ_RET | 1;
+            uint32_t sp0 = c->r[13];
+            rt_run_until(c, RT_IRQ_RET);
+            uint32_t want = diff ? 0x0E00001Bu : 0;
+            if (c->r[0] != want || c->r[13] != sp0) {
+                fprintf(stderr, "[selftest] Verify sp=%08X diff=%d: r0=%08X (esperado %08X) sp=%08X\n",
+                        at, diff, c->r[0], want, c->r[13]);
+                fails++;
+            }
+        }
+        /* ReadSram: corpo de 0x08159158 (34 bytes) */
+        for (uint32_t i = 0; i < 0x22; i++) gba_write8(at + i, gba_read8(0x08159158u + i));
+        for (uint32_t i = 0; i < 8; i++) gba_write8(0x0E000040u + i, 0x30 + i);
+        rt_cpu_reset(c);
+        c->thumb = 1;
+        c->pc = at;
+        c->r[0] = 0x0E000040u;
+        c->r[1] = 0x03007F40u;
+        c->r[2] = 8;
+        c->r[13] = 0x03007E00u;
+        c->r[14] = RT_IRQ_RET | 1;
+        rt_run_until(c, RT_IRQ_RET);
+        for (uint32_t i = 0; i < 8; i++)
+            if (gba_read8(0x03007F40u + i) != 0x30 + i) { fails++; fprintf(stderr, "[selftest] Read sp=%08X byte %u\n", at, i); break; }
+    }
+    fprintf(stderr, "[selftest] SRAM na pilha: %s (%d falhas, %llu usos do alias)\n", fails ? "FALHOU" : "OK",
+            fails, (unsigned long long)rt_sram_alias_hits);
+    return fails;
+}

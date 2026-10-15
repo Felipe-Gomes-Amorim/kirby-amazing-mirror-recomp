@@ -161,10 +161,38 @@ static int unresolved_rom(Cpu *c, uint32_t a) {
     return 1;
 }
 
+/* Rotinas da biblioteca SRAM_V113 que o jogo copia para a PILHA (o SRAM nao pode ser acessado
+ * com codigo na ROM) e executa de la; o `sp` varia a cada chamada. Os corpos sao posicao-
+ * independentes: se os bytes em pc batem com o corpo ROM, executa a funcao nativa da ROM
+ * (mesmos registradores; retorna por `bx r0/r1` normalmente). */
+static const struct { uint32_t rom, size; } sram_bodies[] = {
+    {0x08159158u, 0x22}, /* ReadSram   (copiada por ReadSramFast  0x0815917C) */
+    {0x08159220u, 0x30}, /* VerifySram (copiada por VerifySramFast 0x08159250) */
+};
+uint64_t rt_sram_alias_hits;
+
+static uint32_t sram_alias(uint32_t a) {
+    for (unsigned k = 0; k < sizeof sram_bodies / sizeof sram_bodies[0]; k++) {
+        uint32_t i;
+        for (i = 0; i < sram_bodies[k].size; i++)
+            if (gba_read8(a + i) != gba_read8(sram_bodies[k].rom + i)) break;
+        if (i == sram_bodies[k].size) return sram_bodies[k].rom;
+    }
+    return 0;
+}
+
 void rt_call(Cpu *c) {
     uint32_t a = c->pc;
     if (a == 0x0815917Cu && c->thumb) a = c->pc = 0x08159158u; /* ReadSramFast -> ReadSram */
     const RcFunc *f = lookup(a, c->thumb);
+    if (!f && c->thumb && a >= 0x02000000u && a < 0x04000000u) {
+        uint32_t rom_fn = sram_alias(a);
+        if (rom_fn) {
+            rt_sram_alias_hits++;
+            a = c->pc = rom_fn;
+            f = lookup(a, c->thumb);
+        }
+    }
     if (!f && a >= 0x08000000u && a < 0x08000000u + gba_rom_size() && unresolved_rom(c, a)) return;
     if (!f) rt_abort(c, "endereco sem funcao recompilada (RAM/overlay ou ROM sem saida)");
     hist[hist_n++ % HIST] = a;

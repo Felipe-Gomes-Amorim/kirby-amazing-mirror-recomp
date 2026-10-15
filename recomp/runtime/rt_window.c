@@ -16,12 +16,19 @@
 #include "gba_rt.h"
 #ifdef RT_WINDOW
 #include "window_sdl.h"
+#include "audio_sdl.h"
 #endif
 
 int hw_audio_read(int16_t *lr, int frames);
 int hw_audio_rate(void);
 /* quando a Gwen entregar a saida de audio, basta definir audio_push; ate la, descarta */
+#ifndef RT_WINDOW
 __attribute__((weak)) void audio_push(const int16_t *lr, int frames);
+#endif
+int rt_mute;
+const char *rt_audio_raw;   /* --audio-raw FILE: PCM int16 estereo cru (diagnostico) */
+static FILE *raw_f;
+static int audio_on;
 
 Cpu *rt_cpu; /* definido em rt_main.c */
 uint64_t rt_hwstep_calls, rt_hwstep_cycles;
@@ -82,8 +89,41 @@ static void win_hook(uint64_t frame) {
     static int16_t buf[4096 * 2];
     int n = hw_audio_read(buf, 4096);
     audio_frames += (uint64_t)n;
+    if (rt_audio_raw && n > 0) {
+        if (!raw_f) raw_f = fopen(rt_audio_raw, "wb");
+        if (raw_f) fwrite(buf, 4, (size_t)n, raw_f);
+    }
+#ifdef RT_WINDOW
+    if (n > 0 && audio_on) audio_push(buf, n);
+#else
     if (n > 0 && audio_push) audio_push(buf, n);
+#endif
 
+#ifdef RT_WINDOW
+    if (paced && audio_on) {
+        /* RELOGIO DE AUDIO como mestre: espera a fila drenar ate ~3 quadros de video (~50 ms).
+         * A placa consome a 48 kHz no relogio dela; o ritmo do jogo acompanha, entao a fila nunca
+         * enche (sem descartes = sem estalos) nem esvazia. Limite de espera 100 ms (placa parada). */
+        const int target = 3200;   /* ~4 quadros de video (67 ms) */
+        double t0 = rt_now_us();
+        while (audio_queued() > target) {
+            double waited = rt_now_us() - t0;
+            if (waited > 100000) break;
+            int over = audio_queued() - target;
+            if (over > 96) sleep_ms(1);   /* >2 ms a drenar: dorme; senao gira */
+        }
+        next_us = 0;
+        {   /* diagnostico: em que quadro a fila esvaziou */
+            static int last_u, logged;
+            int u = audio_underruns();
+            if (u != last_u && logged++ < 12)
+                fprintf(stderr, "[audio] underrun no quadro %llu (total %d, fila %d)\n",
+                        (unsigned long long)frame, u, audio_queued());
+            last_u = u;
+        }
+        goto paced_done;
+    }
+#endif
     if (paced) { /* QueryPerformanceCounter: dorme so enquanto sobra tempo */
         double now = rt_now_us();
         if (next_us == 0) next_us = now;
@@ -98,6 +138,9 @@ static void win_hook(uint64_t frame) {
             if (rem > 2000) sleep_ms(1);
         }
     }
+#ifdef RT_WINDOW
+paced_done:
+#endif
     if (prev_hook) prev_hook(frame); /* roteiro --keys/--snap */
 }
 
@@ -110,6 +153,10 @@ void rt_window_install(int window, int scale, int pace) {
         fprintf(stderr, "janela: falha ao abrir (SDL)\n");
         exit(1);
     }
+    if (window && !rt_mute) {
+        if (audio_open() < 0) fprintf(stderr, "audio: sem saida (continuando sem som)\n");
+        else audio_on = 1;
+    }
 #else
     if (window) {
         fprintf(stderr, "este executavel foi compilado sem janela (RT_WINDOW)\n");
@@ -121,7 +168,13 @@ void rt_window_install(int window, int scale, int pace) {
 }
 
 void rt_window_close(void) {
+    if (raw_f) fclose(raw_f);
 #ifdef RT_WINDOW
+    if (audio_on) {
+        printf("AUDIO: underruns=%d descartados=%d (fila %d)\n", audio_underruns(), audio_dropped(),
+               audio_queued());
+        audio_close();
+    }
     if (use_window) win_close();
 #endif
 }
