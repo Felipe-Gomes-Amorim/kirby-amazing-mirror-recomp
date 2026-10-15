@@ -159,6 +159,7 @@ def main():
     shutil.copy2(os.path.join(sdl, 'bin', 'SDL2.dll'), os.path.join(app, 'launcher', 'SDL2.dll'))
     run([zexe, 'cc', '-target', 'x86_64-windows-gnu', '-O2', '-municode', '-Wl,--subsystem,windows',
          os.path.join(ROOT, 'launcher', 'stub.c'), '-o', os.path.join(dist, 'KirbyRecomp.exe')])
+    shutil.copy2(os.path.join(ROOT, 'LICENSE'), os.path.join(dist, 'LICENSE'))
     print('5/6 README + third-party notices')
     with open(os.path.join(dist, 'THIRD_PARTY_NOTICES.txt'), 'w', encoding='utf-8') as f:
         f.write(NOTICES)
@@ -193,7 +194,8 @@ LICENSE files shipped inside the corresponding folder.
   app/sdl2/                        SDL2 development files, SDL2.dll - zlib          https://www.libsdl.org
 
 The launcher, recompiler, runtime and hardware model (app/launcher, app/recomp, app/hw, app/tools/*.py)
-are the sources of https://github.com/Felipe-Gomes-Amorim/kirby-amazing-mirror-recomp .
+are the sources of https://github.com/Felipe-Gomes-Amorim/kirby-amazing-mirror-recomp ,
+under the MIT licence (see LICENSE in this folder).
 This package contains no ROM, BIOS, or any code or data derived from the game.
 """
 

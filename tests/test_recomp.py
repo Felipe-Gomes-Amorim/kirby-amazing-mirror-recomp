@@ -1,6 +1,6 @@
 """Testes do recompilador. Rodar: .venv/Scripts/python -m unittest discover -s tests -t .
 
-- decode: encodings conhecidos (crt0 do NOTES.md)
+- decode: encodings de instrucoes ARM/Thumb (vetores sinteticos do manual da ISA)
 - fuzz diferencial por instrucao (ARM e Thumb) contra o Unicorn
 - bios HLE (C, tests/bios_test.c)
 - boot: crt0 -> primeira VBlankIntrWait  (lento: RECOMP_SLOW=1 e baserom.gba + mapa)
@@ -22,20 +22,20 @@ MAP = os.path.join(ROOT, 'build', 'analysis', 'functions.csv')
 
 
 class DecodeTest(unittest.TestCase):
-    def test_arm_crt0(self):
-        i = decode_arm(0xE3A00012, 0x080000C0)          # mov r0,#0x12
+    def test_arm_basic(self):
+        i = decode_arm(0xE3A00012, 0x08001000)          # mov r0,#0x12
         self.assertEqual((i.kind, i.f['op'], i.f['rd'], i.f['op2']), ('dp', 13, 0, ('imm', 0x12, None)))
-        i = decode_arm(0xE129F000, 0x080000C4)          # msr cpsr_fc, r0
+        i = decode_arm(0xE129F000, 0x08001004)          # msr cpsr_fc, r0
         self.assertEqual((i.kind, i.f['mask']), ('msr', 9))
-        i = decode_arm(0xE12FFF11, 0x080000EC)          # bx r1
+        i = decode_arm(0xE12FFF11, 0x08001008)          # bx r1
         self.assertEqual((i.kind, i.f['rm']), ('bx', 1))
-        i = decode_arm(0xEAFFFFF2, 0x080000F0)          # b 0x080000C0
-        self.assertEqual((i.kind, i.f['target']), ('b', 0x080000C0))
-        i = decode_arm(0xE59FD028, 0x080000C8)          # ldr sp,[pc,#0x28]
-        self.assertEqual((i.kind, i.f['rd'], i.f['base']), ('ls', 13, ('const', 0x080000C8 + 8)))
+        i = decode_arm(0xEAFFFFF2, 0x0800100C)          # b 0x08000FDC
+        self.assertEqual((i.kind, i.f['target']), ('b', 0x08000FDC))
+        i = decode_arm(0xE59FD028, 0x08001010)          # ldr sp,[pc,#0x28]
+        self.assertEqual((i.kind, i.f['rd'], i.f['base']), ('ls', 13, ('const', 0x08001010 + 8)))
 
     def test_thumb(self):
-        i = decode_thumb(0xB500, 0x08152A04)            # push {lr}
+        i = decode_thumb(0xB500, 0x08002000)            # push {lr}
         self.assertEqual((i.kind, i.f['load'], i.f['regs']), ('lsm', False, [14]))
         i = decode_thumb(0xBD10, 0)                     # pop {r4,pc}
         self.assertEqual((i.kind, i.f['load'], i.f['regs']), ('lsm', True, [4, 15]))
