@@ -43,6 +43,9 @@ int win_open_progress(const char *title);     /* 0 = ok */
 int win_progress(int percent, const char *text);   /* 0..100; 1 = continua, 0 = o usuario fechou */
 void win_close_progress(void);
 
+/* 5x7 bitmap font: 7 row bytes (bit 4 = leftmost column); unknown characters give the '?' glyph */
+const uint8_t *win_font_rows(int ch);
+
 /* ---- ganchos de teste (leitura de pixels sem tela) ---- */
 int win_icon_pixels(uint32_t *out32x32);      /* ARGB do icone embutido (1024 valores) */
 int win_progress_read(uint32_t *out, int cap, int *w, int *h);   /* ARGB da janela de progresso */

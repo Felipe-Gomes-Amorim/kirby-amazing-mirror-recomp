@@ -1,11 +1,10 @@
-/* test_launcher_ui.c - kirby.ini, soltar arquivo, tela de progresso, icone, titulo e tela cheia.
+/* test_launcher_ui.c - drop file, progress window, icon, title and fullscreen (kirby.ini: test_config_ini.c).
  * Roda sem tela (SDL_VIDEODRIVER=dummy e definido aqui). Independente de recomp/. */
 #define SDL_MAIN_HANDLED
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <SDL.h>
-#include "../config_ini.h"
 #include "../window_sdl.h"
 
 static int fails;
@@ -24,42 +23,7 @@ static int count_color(const uint32_t *px, int w, int h, uint32_t argb) {
 
 int main(int argc, char **argv) {
     const char *dir = argc > 1 ? argv[1] : ".";
-    char ini[600];
-    snprintf(ini, sizeof ini, "%s/test_kirby.ini", dir);
     SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);
-
-    /* ---------------- kirby.ini ---------------- */
-    KirbyConfig c, d;
-    cfg_defaults(&d);
-    CHECK(d.scale == 3 && d.mute == 0 && d.fullscreen == 0 && d.vsync == 0, "padroes: scale=3 mute=0 fullscreen=0 vsync=0");
-    remove(ini);
-    CHECK(cfg_load(ini, &c) == 1, "arquivo inexistente => 1");
-    CHECK(c.scale == 3 && c.mute == 0, "inexistente: mantem os padroes");
-    KirbyConfig w = { 5, 1, 1, 1 };
-    CHECK(cfg_save(ini, &w) == 0, "cfg_save");
-    CHECK(cfg_load(ini, &c) == 0, "cfg_load apos save");
-    CHECK(c.scale == 5 && c.mute == 1 && c.fullscreen == 1 && c.vsync == 1, "ida e volta");
-    write_text(ini, "; comentario\r\n[kirby]\r\n  SCALE = 9 ; fora da faixa\r\nmute=1 # silencio\r\nfullscreen=abc\r\nvsync=1\r\n"
-                    "desconhecido=7\r\nlinha sem igual\r\n");
-    CHECK(cfg_load(ini, &c) == 0, "arquivo manual");
-    CHECK(c.scale == 3, "scale fora da faixa => padrao");
-    CHECK(c.mute == 1 && c.vsync == 1, "mute/vsync lidos com comentarios");
-    CHECK(c.fullscreen == 0, "valor invalido => padrao");
-    write_text(ini, "scale=2x\r\nmute=\r\n");
-    cfg_load(ini, &c);
-    CHECK(c.scale == 3 && c.mute == 0, "'2x' e vazio => padrao");
-    KirbyConfig big = { 99, 7, -1, 0 };
-    cfg_save(ini, &big);
-    cfg_load(ini, &c);
-    CHECK(c.scale == 6 && c.mute == 1 && c.fullscreen == 1 && c.vsync == 0, "save normaliza (scale<=6, flags qualquer nao-zero => 1)");
-    char beside[300];
-    cfg_path_beside("C:\\jogos\\Kirby & The Amazing Mirror (USA).sav", beside, sizeof beside);
-    CHECK(strcmp(beside, "C:\\jogos\\kirby.ini") == 0, "kirby.ini no diretorio do save (barra invertida)");
-    cfg_path_beside("/home/u/roms/baserom.gba", beside, sizeof beside);
-    CHECK(strcmp(beside, "/home/u/roms/kirby.ini") == 0, "kirby.ini no diretorio (barra normal)");
-    cfg_path_beside("baserom.sav", beside, sizeof beside);
-    CHECK(strcmp(beside, "kirby.ini") == 0, "sem diretorio => kirby.ini");
-    remove(ini);
 
     /* ---------------- icone ---------------- */
     uint32_t icon[1024];
