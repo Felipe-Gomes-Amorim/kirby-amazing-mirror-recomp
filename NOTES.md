@@ -34,11 +34,14 @@ janela, teclado, audio PCM+PSG e save. O que resta e precisao e acabamento, nao 
 - [x] Hardware ligado: BG tiled/afim, sprites, janelas, blend, mosaico, DMA, timers, FIFO PCM, PSG
 - [x] Titulo, abertura e 1a fase renderizam; save SRAM de 32 KiB (`baserom.sav`)
 - [x] Janela e teclado: `python -m recomp.program --window [escala]` (Z=A, X=B, Enter=START)
+- [x] Passa da 1a porta (rotina SRAM copiada p/ a pilha reconhecida por conteudo; confirmado pelo usuario)
 - [x] Ritmo de 59,7275 quadros/s; velocidade medida ~9,7x tempo real (gargalo: PPU, nao o codigo recompilado)
 - [x] Saida de audio SDL2 escrita (`hw/audio_sdl.c`); verificada so com driver "dummy"
 - [ ] **Ligar `hw/audio_sdl.c` ao `kirby.exe`**: `rt_window.c` so chama `audio_push` fraco (descarta) e nao
   chama `audio_open`; hoje o jogo roda **sem som**
-- [ ] Ouvir o som de verdade e conferir contra a referencia (mGBA) - nao verificado por humano
+- [x] Som ligado ao `kirby.exe` (audio_open + audio_push por quadro; `--mute`, `--audio-raw`)
+- [ ] **Estalo no canal esquerdo (~1x/s)** relatado pelo usuario; a correcao de pacing do Nasus nao eliminou
+- [ ] Conferir o som contra uma referencia (mGBA) - so o usuario ouviu, sem comparacao
 - [x] Leitura em 0x100F0D55: origem achada (indice 0xFFFF, comportamento do original; ver secao propria)
 - [ ] Interpretador de fallback para codigo em RAM nao previsto (hoje aborta)
 - [ ] Oraculo de programa inteiro (testes diferenciais de `bl`/pilha/IRQ)
@@ -859,6 +862,60 @@ hardware de blend. Nenhuma mudanca foi feita para "passar".
   diagnostico apareciam antes e confundiam a descoberta de overlays). Novo overlay achado
   em fase: 0x03007D18 (WriteSram na pilha com outro sp) e 0x030001F8 (ARM, SoundMainRAM).
 
+### Som no kirby.exe (Nasus)
+- `kirby.exe` agora linka `hw/audio_sdl.c` (mesma `libSDL2.dll.a`). `rt_window_install` chama
+  `audio_open()` (se <0: avisa 1x "audio: sem saida" e segue mudo); por quadro
+  `hw_audio_read(buf,4096)` -> `audio_push(buf,n)`; no fim imprime
+  `AUDIO: underruns=.. descartados=.. (fila ..)` e chama `audio_close()`. `--mute` (tambem em
+  `python -m recomp.program --window --mute`) desliga. O `rt_boot.exe` (sem SDL) mantem o
+  `audio_push` fraco e descarta.
+- **1 minuto de jogo** (3600 quadros, roteiro de teclas ate a fase, ritmo 59,7275, escala 2):
+  60,80 s para 3600 quadros (59,2 q/s; 3 quadros atrasados); 2.902.545 amostras lidas = 60,5 s
+  de audio; **underruns=2, descartados=877 quadros de audio (18 ms no total, 0,03%)**, fila
+  final 7844 quadros (~163 ms, perto do teto de ~200 ms: o produtor anda um pouco a frente do
+  relogio da placa e a fila segura a latencia descartando o mais antigo). Nao ha underruns
+  constantes; os 2 sao da partida. Quem ouve: nao conferi a qualidade a ouvido (sem acesso ao
+  alto-falante daqui) - so contadores. PSG ainda mudo (Gwen).
+- Lembrete: o `iterate` precisa ter visto o trecho antes de abrir a janela (overlay 0x03007D18 da
+  SRAM so aparece apos ~q.2000 com o roteiro): `python -m recomp.program --frames 3600 --bench
+  --keys "..."` uma vez, depois `--window`.
+
+### Estalo no som (esquerdo, ~1/s) - causa e correcao (Nasus)
+- Relato (ouvido): "." no canal esquerdo cerca de 1x/s. Os contadores do teste anterior
+  (`descartados=877`, fila final 163 ms ~ teto de 200 ms) ja apontavam: a fila ficava no teto e
+  `audio_push` descartava amostras do inicio da fila a cada quadro -> degrau no sinal. Como o
+  canal direito estava quase constante naquele trecho, o degrau so e audivel no esquerdo.
+- Conferido nos dados (`--audio-raw F` grava o PCM cru; 3000 quadros): os saltos grandes
+  isolados do L (18688 = 73*256, em t=0.30, 0.50, 0.90, 1.10 s...) sao ataques de notas/
+  percussao da musica (decaem em padrao de 4 amostras a ~18 kHz, repetido 3x a 48 kHz), nao
+  corrupcao: o `hw_audio_read` e o mixer recompilado estao coerentes.
+- Correcao (`rt_window.c`): **o relogio da placa e o mestre**. Em vez de ritmo por QPC, com som
+  ligado o laco espera a fila drenar ate ~4 quadros de video (3200 amostras, 67 ms) antes do
+  proximo quadro (dorme 1 ms por vez; limite 100 ms). Sem som/`--mute`, volta ao QPC.
+- Medido (1 min = 3600 quadros): **descartados=0**, underruns=2 (ambos no quadro 1, antes de
+  haver dado), fila entre ~2600 e 3100, 59,1 q/s, 0 quadros atrasados. Antes: 877 descartes.
+  A confirmar de ouvido por quem tem o alto-falante.
+
+### SRAM na pilha em qualquer sp (Nasus) - correcao do crash da 1a porta
+- Em `rt_call`, endereco em IWRAM/EWRAM (0x02/0x03), Thumb, sem funcao/overlay: compara os bytes
+  em `pc` com os corpos ROM das rotinas SRAM copiadas para a pilha - **ReadSram 0x08159158 (34
+  bytes, ate o `bx r0`)** e **VerifySram 0x08159220 (48 bytes, ate o `bx r1`)**; compara
+  exatamente o tamanho do corpo (nao le alem). Casou: `pc = endereco ROM` e chama a funcao
+  recompilada com os mesmos registradores; o retorno (`pop {r1}; bx r1`) volta ao `lr` normal.
+  Nao casou: abort com pc/lr/regs como antes. WriteSram (0x081591E0) nao e copiada e usa
+  `ldr [pc]` (fica de fora, nao e posicao-independente).
+- Vale para qualquer `sp` (as variantes 0x03007DA0/0x03007D58/0x03007D18/0x03007CEC e o que vier):
+  nao depende mais do `iterate` ter visto aquele sp.
+- **Teste:** `rt_boot.exe baserom.gba --selftest-sram` copia ReadSram e VerifySram para 4
+  enderecos (0x03007CEC, 0x03007DA0, 0x03007B10 e um em EWRAM 0x02001230), executa cada uma via
+  `rt_run_until` e confere r0 (0 se igual, endereco do 1o byte diferente) e que `sp` volta
+  igual; Read confere os 8 bytes copiados: **OK, 0 falhas** (12 usos do alias).
+- Jogo real: roteiro de teclas ate o hub e 6000 quadros: **16 usos do alias**, 0 abortos, 0 nao
+  resolvidos, save com 4736 bytes escritos (formatacao inicial; muda como antes). **Nao cheguei
+  a abrir a 1a porta** (meu roteiro so anda para a direita no hub; nao sei o ponto exato da
+  porta) - quem reproduziu o crash deve rodar o mesmo trajeto com este build e confirmar que
+  a fase seguinte carrega.
+
 ### O que falta / riscos
 - Interpretador de fallback: endereco de RAM sem overlay ainda **aborta**; ROM sem funcao
   vira "retorna" (logado). Codigo em RAM que mude depois nao e achado sozinho fora do
@@ -977,3 +1034,23 @@ indice vale 0xFFFF; nao e erro do recompilador.**
   correcao; se quiser fidelidade, devolver o ultimo valor lido (barramento aberto).
 - **Nao verificado:** que o jogo original tambem passa por 0xFFFF nesse ponto (so tenho a cadeia
   estatica + o dump do Nasus). Para confirmar de verdade seria preciso um emulador de referencia.
+
+## Crash ao abrir a 1a porta: rotina SRAM copiada para a pilha (Riven)
+Log do usuario: `PARADA: endereco sem funcao recompilada pc=03007CEC lr=081592AD sp=03007CEC
+r0=03007DD0 r1=0E000018 r2=8`. (O primeiro "PARADA" do mesmo log, `0x100F0D55`, e so contexto
+informativo, ver secao propria; o fatal e o segundo.)
+- **O que e:** `0x08159250` e `VerifySramFast`: aloca 0xC0 bytes na pilha, **copia `VerifySram`
+  (`0x08159220`, 48 bytes) para `sp`** e salta para la (`mov r2,sp` ... `bx`), porque o SRAM nao
+  pode ser lido com codigo rodando da ROM. Portanto `pc == sp == 0x03007CEC`. Argumentos: r0 =
+  buffer em IWRAM (0x03007DD0), r1 = 0x0E000018 (SRAM), r2 = 8 bytes. E o jogo gravando/verificando
+  o save ao entrar na sala.
+- **Por que so agora:** o endereco depende do `sp` no momento da chamada. Ja vimos 0x03007DA0,
+  0x03007D58, 0x03007D18; esta e uma variante nova (0x03007CEC). Os overlays sao descobertos so
+  no `iterate` offline (700 quadros), entao uma variante que aparece depois da porta aborta.
+- **Corpo e posicao-independente:** 24 instrucoes, sem `ldr [pc,..]`; so branches relativos e
+  `bx r1`. Por isso qualquer copia, em qualquer `sp`, e identica a `0x08159220` (e analogas
+  `0x08159158` ReadSram e as funcoes copiadas por `0x0815917C`/`0x08159250`).
+- **Correcao (Nasus):** no despacho, se `pc` cai em IWRAM/EWRAM sem funcao, comparar os
+  primeiros bytes (ate o tamanho conhecido) com os corpos das rotinas SRAM da ROM e **chamar a
+  funcao nativa da ROM** com os mesmos registradores; retorna por `bx r1`/`lr` normalmente. Vale
+  para qualquer `sp`. Se nao casar com nada, manter o abort atual.
