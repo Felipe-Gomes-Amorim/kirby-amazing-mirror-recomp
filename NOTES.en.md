@@ -41,8 +41,9 @@ python tools/analyze_rom.py                       # function map -> build/analys
 .venv/Scripts/python -m recomp.program --frames 2000 --keys "START@620+8,A@800" --snap 2000
 ```
 
-Keys in the window: Z = A, X = B, Backspace = Select, Enter = Start, arrow keys, S = R, A = L,
-Esc = quit. The first compile takes several minutes; later runs reuse cached objects.
+Keys in the window (defaults): X = A, Z = B, Enter = Start, Backspace = Select, arrow keys, S = R, A = L,
+F1 = back to the launcher, F11 = fullscreen, Esc = quit. A launcher window (size, fullscreen, scaling, volume, Play)
+is shown first; settings live in `kirby.ini` next to the ROM.
 
 ## 4. Architecture
 
