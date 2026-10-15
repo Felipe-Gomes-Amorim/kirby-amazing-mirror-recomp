@@ -35,6 +35,12 @@ static int16_t aring[ARING * 2];
 static uint32_t a_w, a_r;
 static uint64_t a_acc;
 
+typedef struct { int on, len, vol, envt, pos, shadow, swt, swen; int32_t t; } Psg;
+static Psg ps[4];            /* 0=pulso+sweep 1=pulso 2=onda 3=ruido */
+static uint32_t lfsr, seq_acc;
+static int seq_step;
+static uint8_t wave[2][16];  /* WAVE_RAM: 2 bancos de 16 bytes (32 amostras de 4 bit) */
+
 static inline uint16_t R16(int o) { return (uint16_t)(io[o] | io[o + 1] << 8); }
 static inline void W16(int o, uint16_t v) { io[o] = (uint8_t)v; io[o + 1] = (uint8_t)(v >> 8); }
 static inline uint16_t V16(uint32_t o) { return (uint16_t)(vram[o] | vram[o + 1] << 8); }
@@ -48,6 +54,7 @@ void hw_reset(void) {
     memset(dma, 0, sizeof dma); memset(rd_ok, 0, sizeof rd_ok);
     memset(aff_x, 0, sizeof aff_x); memset(aff_y, 0, sizeof aff_y);
     memset(fifo, 0, sizeof fifo); a_w = a_r = 0; a_acc = 0;
+    memset(ps, 0, sizeof ps); memset(wave, 0, sizeof wave); lfsr = 0x7FFF; seq_acc = 0; seq_step = 0;
     frame_flag = 0; keyinput = 0x03FF; if_reg = 0; line_cyc = 0; vcount = 0;
     W16(DISPCNT, 0x0080);   /* forced blank, como a BIOS deixa */
     mark(0x00, 0x00); mark(0x04, 0x0E); mark(0x48, 0x4A); mark(0x50, 0x52); mark(0x60, 0x9E);
@@ -138,8 +145,126 @@ static void audio_timer_overflow(int t) {
         if (f->cnt <= 16) fifo_request(c);
     }
 }
+/* ---- PSG (canais 1-4) ---- */
+static const uint8_t duty_pat[4] = { 0x01, 0x81, 0x87, 0x7E };   /* MSB primeiro */
+static const int len_reg_x[4] = { 0x64, 0x6C, 0x74, 0x7C };
+static const int env_reg[4] = { 0x62, 0x68, 0, 0x78 };
+
+static int ps_freq(int c) { return R16(len_reg_x[c]) & 0x7FF; }
+static int ps_period(int c) {                         /* ciclos de CPU entre passos */
+    switch (c) {
+    case 0: case 1: return (2048 - ps_freq(c)) * 16;
+    case 2: return (2048 - ps_freq(2)) * 8;
+    default: {
+        uint16_t r = R16(0x7C); int d = r & 7, sh = r >> 4 & 15;
+        return (d ? d * 64 : 32) << sh;
+    }
+    }
+}
+static void psg_off_all(void) { memset(ps, 0, sizeof ps); }
+static void psg_trigger(int c) {
+    Psg *p = &ps[c];
+    int dac = c == 2 ? (R16(0x70) & 0x80) != 0 : (R16(env_reg[c]) & 0xF800) != 0;
+    p->on = dac;
+    if (!p->len) p->len = c == 2 ? 256 : 64;
+    if (c != 2) { uint16_t e = R16(env_reg[c]); p->vol = e >> 12; p->envt = e >> 8 & 7; }
+    p->t = ps_period(c);
+    if (c == 2) p->pos = 0;
+    if (c == 3) lfsr = 0x7FFF;
+    if (c == 0) {
+        uint16_t sw = R16(0x60); int sh = sw & 7, tm_ = sw >> 4 & 7;
+        p->shadow = ps_freq(0); p->swt = tm_ ? tm_ : 8; p->swen = tm_ || sh;
+        if (sh) {
+            int n = p->shadow + ((sw & 8) ? -(p->shadow >> sh) : (p->shadow >> sh));
+            if (n > 2047) p->on = 0;
+        }
+    }
+}
+static void psg_seq_tick(int step) {
+    if (!(step & 1)) {                                           /* length: 256 Hz */
+        for (int c = 0; c < 4; c++)
+            if (ps[c].on && (R16(len_reg_x[c]) & 0x4000) && ps[c].len > 0 && --ps[c].len == 0) ps[c].on = 0;
+    }
+    if (step == 2 || step == 6) {                                /* sweep: 128 Hz */
+        Psg *p = &ps[0];
+        uint16_t sw = R16(0x60); int sh = sw & 7, tm_ = sw >> 4 & 7;
+        if (p->on && p->swen && --p->swt <= 0) {
+            p->swt = tm_ ? tm_ : 8;
+            if (tm_) {
+                int n = p->shadow + ((sw & 8) ? -(p->shadow >> sh) : (p->shadow >> sh));
+                if (n > 2047) p->on = 0;
+                else if (sh) {
+                    p->shadow = n;
+                    W16(0x64, (uint16_t)((R16(0x64) & ~0x7FF) | n));
+                    int n2 = n + ((sw & 8) ? -(n >> sh) : (n >> sh));
+                    if (n2 > 2047) p->on = 0;
+                }
+            }
+        }
+    }
+    if (step == 7) {                                             /* envelope: 64 Hz */
+        for (int c = 0; c < 4; c++) {
+            if (c == 2 || !ps[c].on) continue;
+            uint16_t e = R16(env_reg[c]); int t = e >> 8 & 7;
+            if (!t) continue;
+            if (--ps[c].envt <= 0) {
+                ps[c].envt = t;
+                if (e & 0x800) { if (ps[c].vol < 15) ps[c].vol++; }
+                else if (ps[c].vol > 0) ps[c].vol--;
+            }
+        }
+    }
+}
+static void psg_advance(uint32_t cycles) {
+    for (int c = 0; c < 4; c++) {
+        Psg *p = &ps[c];
+        if (!p->on) continue;
+        int32_t rem = (int32_t)cycles;
+        while (rem > 0) {
+            int32_t per = ps_period(c);
+            if (p->t > rem) { p->t -= rem; break; }
+            rem -= p->t; p->t = per;
+            if (c < 2) p->pos = (p->pos + 1) & 7;
+            else if (c == 2) p->pos = (p->pos + 1) & ((R16(0x70) & 0x20) ? 63 : 31);
+            else {
+                uint32_t b = (lfsr ^ (lfsr >> 1)) & 1;
+                lfsr = (lfsr >> 1) | (b << 14);
+                if (R16(0x7C) & 8) lfsr = (lfsr & ~0x40u) | (b << 6);
+            }
+        }
+    }
+    seq_acc += cycles;
+    while (seq_acc >= 32768) { seq_acc -= 32768; psg_seq_tick(seq_step); seq_step = (seq_step + 1) & 7; }
+}
+/* soma os canais PSG em L/R (escala: nivel*vol_mestre*razao*32; PCM 8 bit = 256/unidade) */
+static void psg_mix(int *L, int *R) {
+    uint16_t cl = R16(0x80), ch = R16(0x82);
+    int ratio = (ch & 3) == 0 ? 1 : (ch & 3) == 1 ? 2 : 4;
+    int sl = 0, sr = 0;
+    for (int c = 0; c < 4; c++) {
+        Psg *p = &ps[c];
+        if (!p->on) continue;
+        int v;
+        if (c < 2) { uint8_t pat = duty_pat[R16(c ? 0x68 : 0x62) >> 6 & 3]; v = ((pat >> (7 - p->pos)) & 1) ? p->vol : -p->vol; }
+        else if (c == 2) {
+            int bank = (R16(0x70) & 0x20) ? (p->pos >> 5) : (R16(0x70) >> 6 & 1);
+            int i = p->pos & 31, b = wave[bank][i >> 1];
+            int smp = (i & 1) ? b & 15 : b >> 4;
+            uint16_t h = R16(0x72);
+            int vc = h >> 13 & 3;
+            int mul = (h & 0x8000) ? 3 : vc == 1 ? 4 : vc == 2 ? 2 : vc == 3 ? 1 : 0;
+            v = (smp * 2 - 15) * mul / 4;
+        } else v = (lfsr & 1) ? -p->vol : p->vol;
+        if (cl >> (12 + c) & 1) sl += v;
+        if (cl >> (8 + c) & 1) sr += v;
+    }
+    *L += sl * ((cl >> 4 & 7) + 1) * ratio * 32;
+    *R += sr * ((cl & 7) + 1) * ratio * 32;
+}
+
 static int16_t clip16(int v) { return (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v); }
 static void audio_gen(uint32_t cycles) {
+    if (R16(0x84) & 0x80) psg_advance(cycles);
     a_acc += (uint64_t)cycles * AUDIO_RATE;
     while (a_acc >= 16777216ull) {
         a_acc -= 16777216ull;
@@ -151,6 +276,7 @@ static void audio_gen(uint32_t cycles) {
             if (h >> 9 & 1) L += a;
             if (h >> 12 & 1) R += b;
             if (h >> 13 & 1) L += b;
+            psg_mix(&L, &R);
         }
         if (a_w - a_r >= ARING) a_r = a_w - ARING + 1;        /* sobrescreve o mais antigo */
         aring[(a_w % ARING) * 2] = clip16(L);
@@ -421,7 +547,15 @@ void hw_step(uint32_t cycles) {
     while (cycles) {
         uint32_t to = line_cyc < CYC_HBL ? CYC_HBL - line_cyc : CYC_LINE - line_cyc;
         uint32_t c = cycles < to ? cycles : to;
-        if (c > 128) c = 128;                       /* granularidade p/ audio/timers */
+#ifdef HW_STEP_CAP
+        if (c > HW_STEP_CAP) c = HW_STEP_CAP;       /* so para medir a versao antiga (passo fixo) */
+#else
+        if (R16(0x84) & 0x80) {                      /* audio ligado: no maximo ate a proxima amostra de saida */
+            uint32_t to_s = (uint32_t)((16777216ull - a_acc + AUDIO_RATE - 1) / AUDIO_RATE);
+            if (to_s == 0) to_s = 1;
+            if (c > to_s) c = to_s;
+        }
+#endif
         timers_advance(c); audio_gen(c); line_cyc += c; cycles -= c;
         if (line_cyc == CYC_HBL) enter_hblank();
         else if (line_cyc == CYC_LINE) end_line();
@@ -449,6 +583,7 @@ static uint16_t io_rd16(uint32_t o) {
     case IF:     return if_reg;
     case 0x100: case 0x104: case 0x108: case 0x10C: return tm[(o - 0x100) >> 2].cnt;
     case IME:    return R16(IME) & 1;
+    case 0x84:   return (uint16_t)((R16(0x84) & 0x80) | ps[0].on | ps[1].on << 1 | ps[2].on << 2 | ps[3].on << 3);
     }
     return R16(o);
 }
@@ -466,7 +601,17 @@ static void io_wr16(uint32_t o, uint16_t v) {
         if (v & 0x0800) fifo_reset(0);
         if (v & 0x8000) fifo_reset(1);
         W16(o, v & 0x770F); return;
-    case 0x84: W16(o, (uint16_t)((R16(o) & 0x7F) | (v & 0x80))); return;
+    case 0x84:
+        if (!(v & 0x80)) { psg_off_all(); memset(&io[0x60], 0, 0x22); }   /* master off zera os registradores PSG */
+        W16(o, (uint16_t)(v & 0x80)); return;
+    case 0x62: W16(o, v); ps[0].len = 64 - (v & 63); return;
+    case 0x68: W16(o, v); ps[1].len = 64 - (v & 63); return;
+    case 0x72: W16(o, v); ps[2].len = 256 - (v & 255); return;
+    case 0x78: W16(o, v); ps[3].len = 64 - (v & 63); return;
+    case 0x64: case 0x6C: case 0x74: case 0x7C:
+        W16(o, v & 0x7FFF);
+        if (v & 0x8000) psg_trigger(o == 0x64 ? 0 : o == 0x6C ? 1 : o == 0x74 ? 2 : 3);
+        return;
     }
     if (o >= 0x100 && o <= 0x10E) {
         int t = (o - 0x100) >> 2;
@@ -492,6 +637,11 @@ uint32_t hw_read(uint32_t addr, int size) {
     case 4:
         o = addr & 0xFFFFFF;
         if (o >= 0x400) return 0;
+        if (o >= 0x90 && o < 0xA0) {
+            uint32_t v = 0; int bk = !(R16(0x70) >> 6 & 1);
+            for (int i = size - 1; i >= 0; i--) v = v << 8 | wave[bk][((o & ~(uint32_t)(size - 1)) + i) & 15];
+            return v;
+        }
         if (size == 1) return (io_rd16(o) >> ((o & 1) * 8)) & 0xFF;
         if (size == 2) return io_rd16(o);
         return io_rd16(o) | (uint32_t)io_rd16(o + 2) << 16;
@@ -514,6 +664,11 @@ void hw_write(uint32_t addr, int size, uint32_t v) {
         o = addr & 0xFFFFFF;
         if (o >= 0x400) return;
         if (o >= 0xA0 && o < 0xA8) { fifo_push(o >= 0xA4, v, size); return; }
+        if (o >= 0x90 && o < 0xA0) {
+            int bk = !(R16(0x70) >> 6 & 1);
+            for (int i = 0; i < size; i++) wave[bk][((o & ~(uint32_t)(size - 1)) + i) & 15] = (uint8_t)(v >> (8 * i));
+            return;
+        }
         if (size == 4) { io_wr16(o & ~3u, (uint16_t)v); io_wr16((o & ~3u) + 2, (uint16_t)(v >> 16)); }
         else if (size == 2) io_wr16(o, (uint16_t)v);
         else if ((o & ~1u) == IF) io_wr16(IF, (uint16_t)((v & 0xFF) << ((o & 1) * 8)));   /* w1c so no byte */

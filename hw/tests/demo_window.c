@@ -1,5 +1,5 @@
 /* demo_window.c - abre a janela SDL2 e mostra uma cena do PPU (BG de tiles + sprite).
- * Setas movem o sprite; Z/X trocam a cor do fundo; Esc fecha. Uso: demo_window.exe [quadros]
+ * Setas movem o sprite; Z troca a cor do fundo; X toca uma nota PSG (se houver audio); Esc fecha. Uso: demo_window.exe [quadros]
  * (com [quadros] > 0 sai sozinho depois desse numero de quadros). Nao usa recomp/. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +7,7 @@
 #include <SDL.h>           /* so para SDL_Delay */
 #include "../hw.h"
 #include "../window_sdl.h"
+#include "../audio_sdl.h"
 
 static uint8_t ewram[0x40000];
 static int is_hw(uint32_t a) { return (a >> 24) >= 4 && (a >> 24) <= 7; }
@@ -57,7 +58,11 @@ int main(int argc, char **argv) {
     int limit = argc > 1 ? atoi(argv[1]) : 0;
     setup();
     if (win_open("Kirby recomp - hw demo", 3) != 0) return 1;
-    int px = 100, py = 60, hscroll = 0;
+    int audio_ok = audio_open() == 0;     /* sem placa de som: segue mudo */
+    if (audio_ok) {
+        hw_write(0x04000084, 2, 0x0080); hw_write(0x04000082, 2, 0x0002); hw_write(0x04000080, 2, 0x1177);
+    }
+    int px = 100, py = 60, hscroll = 0, xprev = 0;
     for (int frame = 0; win_poll() && (!limit || frame < limit); frame++) {
         uint16_t k = win_keys();
         hw_set_keys(k);
@@ -66,6 +71,11 @@ int main(int argc, char **argv) {
         if (!(k & 0x40)) py--;
         if (!(k & 0x80)) py++;
         if (!(k & 0x01)) gba_write16(0x05000000, c15((frame >> 1) & 31, 2, 8));
+        if (!(k & 0x02) && !xprev) {          /* X: nota de pulso ~440 Hz com envelope */
+            hw_write(0x04000062, 2, 0xF000 | 0x0080 | 0x0300);
+            hw_write(0x04000064, 2, 1750 | 0x8000);
+        }
+        xprev = !(k & 0x02);
         hscroll++;
         gba_write16(0x04000010, (uint16_t)(hscroll >> 1));       /* BG0HOFS: scroll continuo */
         gba_write16(0x07000000, (uint16_t)(py & 255) | 2 << 14);
@@ -74,8 +84,10 @@ int main(int argc, char **argv) {
         hw_step(280896);
         const uint32_t *f = hw_frame_ready();
         win_present(f ? f : hw_get_framebuffer());
+        if (audio_ok) { int16_t tmp[2 * 4096]; audio_push(tmp, hw_audio_read(tmp, 4096)); }
         SDL_Delay(16);
     }
+    if (audio_ok) audio_close();
     win_close();
     return 0;
 }
