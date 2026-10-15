@@ -12,7 +12,10 @@
  * The window follows the video options: size = 240*scale x 160*scale (never below 480x320, the logical
  * canvas of the UI), "Fullscreen" applies to the launcher too, and "Scaling" picks how the canvas is
  * mapped to the window: integer (whole-number zoom, black bars), fit (aspect preserved) or stretch
- * (fills the window). All UI text is English; the font has no accents. */
+ * (fills the window). The KEYBOARD / CONTROLLER pages are editable (click or Enter on a button of the GBA
+ * outline, then press the new key/button; Esc cancels; used keys are swapped; Esc/F11/F1 are refused).
+ * The first connected game controller can also drive the whole UI (d-pad + south = OK, east = back).
+ * All UI text is English; the font has no accents. */
 #ifndef LAUNCHER_UI_H
 #define LAUNCHER_UI_H
 #include <stdint.h>
@@ -47,6 +50,11 @@ KL_API void kl_test_set_focus(const char *id);
 KL_API int kl_test_snapshot(uint32_t *out, int cap, int *w, int *h);       /* ARGB of the last frame (KL_W x KL_H) */
 KL_API const char *kl_test_page(void);            /* "main" or "keyboard" / "controller" info page */
 KL_API void kl_test_video(int *win_w, int *win_h, int *fullscreen);        /* actual window size / state */
+KL_API unsigned kl_test_window_id(void);        /* SDL window id: simulated events must carry it */
+KL_API int kl_test_capture(void);                 /* CFG_BTN_* being remapped, -1 = none */
+KL_API const char *kl_test_note(void);            /* current warning/confirmation line ('' = none) */
+KL_API void kl_test_fake_pad(int present, int axis_x, int axis_y);   /* -1 = use the real controller */
+KL_API int kl_test_pad_present(void);
 
 #define KL_W 480    /* logical canvas */
 #define KL_H 320

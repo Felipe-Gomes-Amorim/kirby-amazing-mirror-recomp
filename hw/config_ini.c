@@ -157,6 +157,11 @@ int cfg_load(const char *ini_path, KirbyConfig *c) {
     cfg_defaults(c);
     FILE *f = fopen(ini_path, "rb");
     if (!f) return 1;
+    {   /* skip a UTF-8 BOM (Notepad adds one) so the first key is not lost */
+        unsigned char bom[3];
+        size_t got = fread(bom, 1, 3, f);
+        if (!(got == 3 && bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF)) fseek(f, 0, SEEK_SET);
+    }
     char line[256], sec[32] = "";
     g_have_scaling = g_have_int = g_int_val = 0;
     while (fgets(line, sizeof line, f)) {

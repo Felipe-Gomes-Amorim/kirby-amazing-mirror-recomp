@@ -182,6 +182,22 @@ int main(int argc, char **argv) {
     cfg_load(ini, &d);
     CHECK(d.scaling == CFG_SCALING_INTEGER, "integer_scale=1 survives a re-save as scaling=integer");
 
+    /* ---- UTF-8 BOM (Notepad) must not hide the first key ---- */
+    {
+        FILE *f = fopen(ini, "wb");
+        if (f) {
+            fputc(0xEF, f); fputc(0xBB, f); fputc(0xBF, f);
+            fputs("[video]\r\nscale=5\r\n[audio]\r\nvolume=40\r\n", f);
+            fclose(f);
+        }
+        cfg_load(ini, &c);
+        CHECK(c.scale == 5 && c.volume == 40, "BOM at the start of the file is skipped");
+        f = fopen(ini, "wb");
+        if (f) { fputs("scale=4\r\n", f); fclose(f); }
+        cfg_load(ini, &c);
+        CHECK(c.scale == 4, "file shorter than 3 bytes of BOM is read normally");
+    }
+
     /* ---- save normalises garbage ---- */
     KirbyConfig bad;
     memset(&bad, 0, sizeof bad);

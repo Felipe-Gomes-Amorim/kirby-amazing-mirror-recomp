@@ -30,4 +30,11 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host "== test_kirby_ui (kirby_ui.dll)"
 & "$out\test_kirby_ui.exe" $out
 if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE }
+# 4) editable keyboard / controller pages (events carry the window id; controller simulated)
+& $gcc @flags -o "$out\test_kirby_ui_edit.exe" "$root\hw\tests\test_kirby_ui_edit.c" "$root\hw\config_ini.c" `
+    "-L$out" -lkirby_ui "-L$Sdl\lib" -lSDL2
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Write-Host "== test_kirby_ui_edit (kirby_ui.dll)"
+& "$out\test_kirby_ui_edit.exe" $out
+if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE }
 exit $rc
