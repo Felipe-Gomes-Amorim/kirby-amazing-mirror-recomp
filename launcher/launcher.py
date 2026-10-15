@@ -164,6 +164,18 @@ class UI:
             self.dll = None
 
 
+def cancel_confirmed():
+    if CONSOLE:
+        return True
+    try:
+        # MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_TOPMOST ; IDYES == 6
+        return ctypes.windll.user32.MessageBoxW(
+            None, 'Cancelar a construcao do jogo?\n\nSe voce nao fechou a janela de progresso, escolha Nao.',
+            'Kirby Recomp', 0x00000004 | 0x00000020 | 0x00000100 | 0x00040000) == 6
+    except Exception:
+        return False
+
+
 def build(rom, out_dir, stamp, ui):
     env = dict(os.environ)
     env['KIRBY_ZIG'] = os.path.join(APP, 'tools', 'zig', 'zig.exe')
@@ -214,8 +226,13 @@ def build(rom, out_dir, stamp, ui):
         pct = min(99, done_w + w * frac)
         mm, ss = divmod(int(time.time() - t0), 60)
         if not ui.update(pct, '%s %s  (%d:%02d)' % (STEPS[cur][0], name, mm, ss)):
-            p.kill()
-            return False, ['cancelado']
+            # the window reported "closed": never cancel silently, ask first (and keep going on "No")
+            log('janela de progresso reportou fechamento (%d:%02d); pedindo confirmacao' % (mm, ss))
+            if cancel_confirmed():
+                p.kill()
+                return False, ['cancelado']
+            ui.close()                   # keep building, without the window
+            ui.dll = None
     rc = p.wait()
     buildlog.close()
     if rc == 0:

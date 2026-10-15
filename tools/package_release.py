@@ -165,7 +165,16 @@ def main():
         f.write(NOTICES)
     with open(os.path.join(dist, 'README.txt'), 'w', encoding='utf-8') as f:
         f.write(README)
-    print('6/6 audit')
+    print('6/6 audit (python syntax of everything shipped, then forbidden files)')
+    import ast
+    for root, _, files in os.walk(app):
+        for f in files:
+            if f.endswith('.py') and 'zig' not in root:
+                path = os.path.join(root, f)
+                try:
+                    ast.parse(open(path, encoding='utf-8').read(), path)
+                except SyntaxError as e:
+                    sys.exit(f'SYNTAX ERROR in shipped file {path}: {e}')
     bad = audit(dist)
     if bad:
         print('AUDIT FAILED - these must not be shipped:')
