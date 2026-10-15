@@ -77,6 +77,9 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--bench")) bench = 1;
         else if (!strcmp(argv[i], "--selftest-sram")) selftest = 1;
+        else if (!strcmp(argv[i], "--selftest-interp")) selftest = 2;
+        else if (!strcmp(argv[i], "--no-sram-alias")) { extern int rt_no_alias; rt_no_alias = 1; }
+        else if (!strcmp(argv[i], "--no-overlays")) { extern int rt_skip_overlays; rt_skip_overlays = 1; }
         else if (!strcmp(argv[i], "--mute")) { extern int rt_mute; rt_mute = 1; }
         else if (!strcmp(argv[i], "--audio-raw") && i + 1 < argc) { extern const char *rt_audio_raw; rt_audio_raw = argv[++i]; }
         else if (!strcmp(argv[i], "--bench-from") && i + 1 < argc) { extern uint64_t rt_bench_from; rt_bench_from = (uint64_t)atoll(argv[++i]); }
@@ -110,7 +113,8 @@ int main(int argc, char **argv) {
     rt_cpu = &cpu;
     if (selftest) {
         extern int rt_selftest_sram(Cpu *);
-        return rt_selftest_sram(&cpu) ? 1 : 0;
+        extern int rt_selftest_interp(Cpu *);
+        return (selftest == 2 ? rt_selftest_interp(&cpu) : rt_selftest_sram(&cpu)) ? 1 : 0;
     }
     rt_script_install();
     if (window || bench) {
@@ -138,6 +142,9 @@ int main(int argc, char **argv) {
                       : cpu.stop == RT_STOP_STOPCALL  ? "SWI Stop" : "erro";
     printf("RT_STOP %s pc=%08X lr=%08X sp=%08X calls=%llu\n", why, cpu.pc, cpu.r[14], cpu.r[13],
            (unsigned long long)rt_ncalls);
+    { extern uint64_t rt_interp_entries, rt_interp_steps;
+      printf("INTERPRETADOR: %llu entradas, %llu instrucoes\n", (unsigned long long)rt_interp_entries,
+             (unsigned long long)rt_interp_steps); }
     { extern uint64_t rt_sram_alias_hits; printf("SRAM na pilha (alias p/ ROM): %llu usos\n", (unsigned long long)rt_sram_alias_hits); }
     printf("IRQ entregues=%llu (BIOS_IF pelo handler=%llu, pelo runtime=%llu; IF limpo pelo "
            "runtime=%llu) frames_hw=%llu nao_resolvidos=%llu\n",

@@ -70,6 +70,8 @@ void hw_reset(void);
 /* avanca o hardware `cycles` ciclos de CPU (PPU/timers/DMA); o runtime chama por
  * funcao/bloco com uma estimativa, ou 1 frame por vez no inicio. */
 void hw_step(uint32_t cycles);
+/* avanca ate `cycles`, mas PARA quando um IRQ habilitado fica pendente; devolve os ciclos usados */
+uint32_t hw_step_irq(uint32_t cycles);
 /* bits de IE&IF pendentes com IME ligado; 0 = nada */
 uint16_t hw_irq_pending(void);
 /* teclas: bit=1 solto/0 pressionado como KEYINPUT (ativo em baixo) */

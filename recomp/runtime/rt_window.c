@@ -206,7 +206,8 @@ void rt_report_speed(void) {
 /* --- diagnostico: acesso a regiao inexistente (uma vez so, com contexto) --- */
 void gba_bus_unmapped(uint32_t addr, int size, int is_write) {
     static int n;
-    if (n++) return;
+    extern int rt_quiet;
+    if (rt_quiet || n++) return;
     fprintf(stderr, "[bus] PRIMEIRO acesso sem regiao: %s%d em 0x%08X\n", is_write ? "write" : "read",
             size * 8, addr);
     if (!rt_cpu) return;

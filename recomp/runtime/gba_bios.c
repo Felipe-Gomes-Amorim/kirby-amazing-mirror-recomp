@@ -192,6 +192,8 @@ uint64_t rt_frames_done, rt_frames_limit;
 static uint64_t rt_frames_counted;
 const uint32_t *rt_last_frame(void) { return last_frame; }
 
+static int in_irq;   /* >0 enquanto o handler de IRQ executa: o relogio do hw fica congelado */
+
 static void irq_deliver(Cpu *c, uint16_t pend) {
     uint32_t sr[13], sflags[4] = {c->n, c->z, c->c, c->v};
     uint32_t smode = c->mode, sthumb = c->thumb, spsr_if = c->psr_if, spc = c->pc;
@@ -204,8 +206,11 @@ static void irq_deliver(Cpu *c, uint16_t pend) {
     c->thumb = vec & 1;
     c->pc = vec & ~1u;
     rt_irq_delivered++;
+    in_irq++;
     { extern int rt_trace_psr; if (rt_trace_psr) fprintf(stderr, "[irq] entrega pend=%04X vec=%08X de modo %02X pc=%08X\n", pend, vec, smode, spc); }
-    if (!rt_run_until(c, RT_IRQ_RET)) rt_abort(c, "handler de IRQ voltou a um frame externo");
+    int ok_ret = rt_run_until(c, RT_IRQ_RET);
+    in_irq--;
+    if (!ok_ret) rt_abort(c, "handler de IRQ voltou a um frame externo");
     { extern int rt_trace_psr; if (rt_trace_psr) fprintf(stderr, "[irq] handler voltou pc=%08X modo=%02X\n", c->pc, c->mode); }
     if (c->stop) return;
     /* a BIOS nao reconhece IF; o handler do jogo normalmente faz. Se nao fez, o
@@ -248,35 +253,60 @@ extern double rt_hwstep_us, rt_now_us(void);
 extern uint64_t rt_hwstep_calls, rt_hwstep_cycles;
 extern int rt_measure;
 
-static void timed_step(uint32_t cycles) {
+static uint32_t timed_step_irq(uint32_t cycles) {
+    uint32_t used;
     if (rt_measure) {   /* so mede com --bench/--window: QueryPerformanceCounter custa */
         double t0 = rt_now_us();
-        hw_step(cycles);
+        used = hw_step_irq(cycles);
         rt_hwstep_us += rt_now_us() - t0;
     } else {
-        hw_step(cycles);
+        used = hw_step_irq(cycles);
     }
     rt_hwstep_calls++;
-    rt_hwstep_cycles += cycles;
+    rt_hwstep_cycles += used;
+    return used;
+}
+
+/* Avanca `n` ciclos, mas PARA assim que um IRQ habilitado fica pendente e o entrega na hora
+ * (latencia de IRQ ~0: m4aSoundVSync roda sempre em VBlank+0, como no hardware). */
+static void run_cycles(Cpu *c, uint32_t n) {
+    uint32_t left = n;
+    while (left) {
+        uint32_t used = timed_step_irq(left);
+        if (used == 0) {   /* IRQ ja pendente e nao entregavel (I=1): segue sem parar */
+            hw_step(left);
+            rt_hwstep_cycles += left;
+            used = left;
+        }
+        left -= used > left ? left : used;
+        grab_frame();
+        rt_irq_service(c);
+        if (c->stop) break;
+    }
 }
 
 void rt_tick(Cpu *c) {
     static uint32_t acc;
+    if (in_irq) return;   /* relogio congelado durante o handler */
     acc += 24; /* estimativa grosseira de ciclos por chamada de funcao */
     if (acc < 1232) return;
-    timed_step(acc);
+    uint32_t n = acc;
     acc = 0;
-    grab_frame();
-    rt_irq_service(c);
+    run_cycles(c, n);
 }
 
 uint32_t rt_loops, rt_loop_site;
 
+int64_t rt_test_budget;   /* >0: testes limitam laços (cada tick = 1024 voltas) */
+
 void rt_tick_loop(Cpu *c, uint32_t site) {
     rt_loop_site = site;
-    timed_step(8192); /* ~1024 voltas de um laco curto */
-    grab_frame();
-    rt_irq_service(c);
+    if (rt_test_budget > 0 && --rt_test_budget == 0) {
+        c->stop = RT_STOP_ERROR;
+        return;
+    }
+    if (in_irq) return;   /* relogio congelado durante o handler */
+    run_cycles(c, 8192); /* ~1024 voltas de um laco curto */
 }
 
 static int vblank_intr_wait(Cpu *c, uint32_t next) {
@@ -290,9 +320,7 @@ static int vblank_intr_wait(Cpu *c, uint32_t next) {
     /* sem IE/DISPSTAT de VBlank o jogo travaria no hw real tambem */
     for (unsigned guard = 0; !(gba_read16(BIOS_IF) & 1); guard++) {
         if (guard > 228 * 3) rt_abort(c, "VBlankIntrWait: nenhum IRQ de VBlank em 3 quadros");
-        timed_step(1232);
-        grab_frame();
-        rt_irq_service(c);
+        run_cycles(c, 1232);
         if (c->stop) return 1;
     }
     c->pc = next;

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <setjmp.h>
 #include "gba_bus.h"
 #include "gba_cpu.h"
 #include "gba_rt.h"
@@ -69,6 +70,8 @@ uint32_t rc_mrs(Cpu *c) {
 #define HIST HISTN
 uint64_t rt_ncalls;
 
+extern int rt_skip_overlays;
+const RcFunc *rt_lookup(uint32_t a, uint32_t thumb);
 static const RcFunc *lookup(uint32_t a, uint32_t thumb) {
     unsigned lo = 0, hi = rc_table_n;
     while (lo < hi) { /* primeiro indice com .lo > a */
@@ -79,6 +82,7 @@ static const RcFunc *lookup(uint32_t a, uint32_t thumb) {
     for (unsigned k = 1; k <= 16 && k <= lo; k++) { /* funcoes podem se intercalar */
         const RcFunc *f = &rc_table[lo - k];
         if (a < f->lo || a >= f->hi || f->thumb != thumb) continue;
+        if (f->lo < 0x08000000u && rt_skip_overlays) continue;
         if (f->sig) { /* overlay em RAM: so vale se o codigo na RAM for o recompilado */
             uint32_t h = 0x811C9DC5u;
             for (uint32_t p = f->lo; p < f->hi; p += 2) {
@@ -113,7 +117,15 @@ void rt_dump(Cpu *c, const char *why) {
 
 const char *rt_dump_path;
 
+jmp_buf *rt_abort_jmp;   /* testes: aborta por longjmp em vez de exit */
+int rt_quiet;
+uint64_t rt_abort_count;
+
 void rt_abort(Cpu *c, const char *why) {
+    if (rt_abort_jmp) {
+        rt_abort_count++;
+        longjmp(*rt_abort_jmp, 1);
+    }
     rt_dump(c, why);
     if (rt_dump_path) {
         FILE *f = fopen(rt_dump_path, "wb");
@@ -131,34 +143,45 @@ const char *rt_unresolved_path;
 uint64_t rt_unresolved_count;
 int rt_stop_on_unresolved;
 
-/* ROM valida sem funcao recompilada: registra uma vez e trata como retorno (`bx lr`).
- * Sem interpretador isso e uma APROXIMACAO: o log diz exatamente onde. */
-static int unresolved_rom(Cpu *c, uint32_t a) {
+const RcFunc *rt_lookup(uint32_t a, uint32_t thumb) { return lookup(a, thumb); }
+
+/* Endereco sem funcao recompilada: registra 1x (com os 32 primeiros bytes do corpo, semente
+ * de analise) em unresolved.log; --stop-on-unresolved aborta (modo de construcao). Fora disso o
+ * chamador cai no interpretador (rt_interp.c). */
+static void body_hex(char *out, uint32_t a, unsigned n) {
+    static const char *hx = "0123456789abcdef";
+    for (unsigned i = 0; i < n; i++) {
+        uint32_t b = gba_read8(a + i);
+        out[2 * i] = hx[b >> 4];
+        out[2 * i + 1] = hx[b & 15];
+    }
+    out[2 * n] = 0;
+}
+
+static uint32_t body_hash(uint32_t a, unsigned n) { /* FNV-1a 32 */
+    uint32_t h = 0x811C9DC5u;
+    for (unsigned i = 0; i < n; i++) h = (h ^ gba_read8(a + i)) * 0x01000193u;
+    return h;
+}
+
+static void log_unresolved(Cpu *c, uint32_t a) {
     static uint32_t seen[4096];
     unsigned h = (a >> 1) & 4095;
-    int dup = 0;
     for (unsigned k = 0; k < 4096 && seen[(h + k) & 4095]; k++)
-        if (seen[(h + k) & 4095] == a) { dup = 1; break; }
-    if (!dup) {
-        for (unsigned k = 0; k < 4096; k++)
-            if (!seen[(h + k) & 4095]) { seen[(h + k) & 4095] = a; break; }
-        if (rt_unresolved_path) {
-            FILE *f = fopen(rt_unresolved_path, "a");
-            if (f) {
-                fprintf(f, "%08X,%s,lr=%08X,sp=%08X\n", a, c->thumb ? "thumb" : "arm", c->r[14],
-                        c->r[13]);
-                fclose(f);
-            }
+        if (seen[(h + k) & 4095] == a) { rt_unresolved_count++; return; }
+    for (unsigned k = 0; k < 4096; k++)
+        if (!seen[(h + k) & 4095]) { seen[(h + k) & 4095] = a; break; }
+    rt_unresolved_count++;
+    if (rt_unresolved_path) {
+        FILE *f = fopen(rt_unresolved_path, "a");
+        if (f) {
+            char hex[65];
+            body_hex(hex, a, 32);
+            fprintf(f, "%08X,%s,lr=%08X,sp=%08X,body=%s\n", a, c->thumb ? "thumb" : "arm", c->r[14],
+                    c->r[13], hex);
+            fclose(f);
         }
     }
-    rt_unresolved_count++;
-    if (rt_stop_on_unresolved) rt_abort(c, "ROM sem funcao recompilada (--stop-on-unresolved)");
-    uint32_t t = c->r[14];
-    uint32_t np = t & ((t & 1) ? ~1u : ~3u);
-    if (np == a) return 0;
-    c->thumb = t & 1;
-    c->pc = np;
-    return 1;
 }
 
 /* Rotinas da biblioteca SRAM_V113 que o jogo copia para a PILHA (o SRAM nao pode ser acessado
@@ -170,6 +193,8 @@ static const struct { uint32_t rom, size; } sram_bodies[] = {
     {0x08159220u, 0x30}, /* VerifySram (copiada por VerifySramFast 0x08159250) */
 };
 uint64_t rt_sram_alias_hits;
+int rt_skip_overlays;   /* testes: ignora funcoes em RAM da tabela (forca o interpretador) */
+int rt_no_alias;   /* testes: forca o fallback em vez do alias SRAM */
 
 static uint32_t sram_alias(uint32_t a) {
     for (unsigned k = 0; k < sizeof sram_bodies / sizeof sram_bodies[0]; k++) {
@@ -183,9 +208,9 @@ static uint32_t sram_alias(uint32_t a) {
 
 void rt_call(Cpu *c) {
     uint32_t a = c->pc;
-    if (a == 0x0815917Cu && c->thumb) a = c->pc = 0x08159158u; /* ReadSramFast -> ReadSram */
+    if (a == 0x0815917Cu && c->thumb && !rt_no_alias) a = c->pc = 0x08159158u; /* ReadSramFast -> ReadSram */
     const RcFunc *f = lookup(a, c->thumb);
-    if (!f && c->thumb && a >= 0x02000000u && a < 0x04000000u) {
+    if (!f && c->thumb && !rt_no_alias && a >= 0x02000000u && a < 0x04000000u) {
         uint32_t rom_fn = sram_alias(a);
         if (rom_fn) {
             rt_sram_alias_hits++;
@@ -193,8 +218,28 @@ void rt_call(Cpu *c) {
             f = lookup(a, c->thumb);
         }
     }
-    if (!f && a >= 0x08000000u && a < 0x08000000u + gba_rom_size() && unresolved_rom(c, a)) return;
-    if (!f) rt_abort(c, "endereco sem funcao recompilada (RAM/overlay ou ROM sem saida)");
+    if (!f) {
+        log_unresolved(c, a);
+        int in_ram = a >= 0x02000000u && a < 0x04000000u;
+        int in_rom = a >= 0x08000000u && a < 0x08000000u + gba_rom_size();
+        if (rt_stop_on_unresolved || !(in_ram || in_rom)) {
+            /* o que sobra de abort: 64 bytes no pc + hash p/ a Poppy/Riven decidirem
+             * (overlay novo? alias como o SRAM?) */
+            char hex[129];
+            if (rt_quiet) rt_abort(c, "sem funcao");
+            body_hex(hex, a, 64);
+            fprintf(stderr, "\n[rt] SEM FUNCAO em %08X (%s): 64 bytes=%s\n", a, c->thumb ? "thumb" : "arm", hex);
+            fprintf(stderr, "[rt] hash do corpo (FNV-1a, 64 bytes)=%08X; 32 bytes=%08X\n", body_hash(a, 64),
+                    body_hash(a, 32));
+            rt_abort(c, "endereco sem funcao recompilada (RAM/overlay ou ROM sem saida)");
+        }
+        /* fallback: interpreta ate cair em funcao conhecida / retorno esperado */
+        extern int rt_interp_run(Cpu *, uint32_t, uint32_t, uint64_t);
+        static int warned;
+        if (rt_interp_run(c, 0, 0, 50000000ull) && !warned++ && !rt_quiet)
+            fprintf(stderr, "[rt] interpretador: 50M passos sem sair (pc=%08X); continua\n", c->pc);
+        return;
+    }
     hist[hist_n++ % HIST] = a;
     if (rt_trace_psr && rt_irq_delivered) {
         static int n;

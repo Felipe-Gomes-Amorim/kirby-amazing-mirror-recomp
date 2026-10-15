@@ -138,7 +138,7 @@ def build(rom, funcs, bad=None, jobs=8, nshards=16, verbose=True):
         return obj
 
     rt_srcs = [os.path.join(RUNTIME, n) for n in ('gba_bus.c', 'gba_rt.c', 'gba_bios.c', 'rt_main.c',
-                                                    'rt_script.c', 'rt_window.c')]
+                                                    'rt_script.c', 'rt_window.c', 'rt_interp.c')]
     rt_srcs.append(os.path.join(ROOT, 'hw', 'hw.c'))   # strong: substitui os stubs fracos
     t1 = time.time()
     with ThreadPoolExecutor(jobs) as ex:
@@ -227,8 +227,10 @@ def iterate(rom_path, csv_path, jobs=8, max_iter=40, verbose=True, boot_args=())
     for a, m in extras:
         add_extra(int(a, 16), m == 'thumb')
     for it in range(max_iter):
-        if os.path.exists(unres):
+        try:
             os.remove(unres)
+        except OSError:
+            pass
         ram_rom = RamRom(rom.data, open(dump, 'rb').read() if os.path.exists(dump) and overlays else None)
         exe = build(ram_rom, funcs + list(overlays.values()), bad, jobs, verbose=verbose and it == 0)
         rc, out, err = boot(exe, rom_path, dump, list(boot_args) + ['--stop-on-unresolved'])
@@ -237,6 +239,8 @@ def iterate(rom_path, csv_path, jobs=8, max_iter=40, verbose=True, boot_args=())
             with open(unres) as fh:
                 for line in fh:
                     a, m_ = line.split(',')[:2]
+                    if int(a, 16) < 0x08000000:
+                        continue   # RAM: overlays (snapshot) ou interpretador
                     if add_extra(int(a, 16), m_ == 'thumb'):
                         new.append((a, m_))
         if new:

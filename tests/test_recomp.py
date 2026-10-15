@@ -65,7 +65,7 @@ class BiosTest(unittest.TestCase):
         out = os.path.join(ROOT, 'build', 'recomp', 'bios_test.exe')
         os.makedirs(os.path.dirname(out), exist_ok=True)
         srcs = [os.path.join(ROOT, 'tests', 'bios_test.c')] + [
-            os.path.join(RUNTIME, n) for n in ('gba_bus.c', 'gba_rt.c', 'gba_bios.c')]
+            os.path.join(RUNTIME, n) for n in ('gba_bus.c', 'gba_rt.c', 'gba_bios.c', 'rt_interp.c')]
         r = subprocess.run(zig_cc() + ['-O1', '-w', '-I', RUNTIME, '-o', out] + srcs,
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -84,6 +84,16 @@ class BootTest(unittest.TestCase):
         self.assertIn('RT_STOP frames', out)
         self.assertIn('nao_resolvidos=0', out)
         self.assertRegex(out, r'IRQ entregues=60[01]')
+
+    def test_interpreter_selftest_and_forced_fallback(self):
+        import subprocess as sp
+        exe = os.path.join(ROOT, 'build', 'recomp', 'program', 'rt_boot.exe')
+        self.assertTrue(os.path.exists(exe), 'rode test_boot_to_first_vblank_wait antes')
+        r = sp.run([exe, ROM, '--selftest-interp', '--sav', 'none', '--timeout', '100'],
+                   capture_output=True, text=True, timeout=150)
+        self.assertEqual(r.returncode, 0, r.stderr[-1500:])
+        self.assertIn('0 divergencias', r.stderr)
+        self.assertIn('corpos SRAM em 3 enderecos da pilha: OK', r.stderr)
 
 
 if __name__ == '__main__':

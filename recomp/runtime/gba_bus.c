@@ -148,6 +148,7 @@ static void do_dma(int ch) {
 WEAK void hw_reset(void) { memset(io, 0, sizeof io); vcount = 0; }
 WEAK void hw_step(uint32_t cycles) { vcount = (vcount + cycles / 1232) % 228; }
 WEAK uint16_t hw_irq_pending(void) { return 0; }
+WEAK uint32_t hw_step_irq(uint32_t cycles) { hw_step(cycles); return cycles; }
 WEAK void hw_set_keys(uint16_t k) { (void)k; }
 WEAK const uint32_t *hw_frame_ready(void) { return 0; }
 WEAK const uint32_t *hw_get_framebuffer(void) { return 0; }
