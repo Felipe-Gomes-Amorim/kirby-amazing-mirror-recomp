@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Analise estatica de uma ROM de GBA.
+"""Static analysis of a GBA ROM.
 
-Etapas:
-  1. le o header (titulo, codigo do jogo, checksum, entry point)
-  2. descida recursiva a partir do entry point, seguindo B/BL/BX e rastreando
-     o modo (ARM x Thumb); resolve `ldr rX,=addr ; bx rX` e tabelas de switch
-  3. varre a ROM atras de ponteiros para prologos de funcao (heuristica)
-  4. classifica cada byte: ARM / Thumb / literal pool / tabela de salto / dados
-  5. agrupa instrucoes em funcoes e grava relatorios em build/analysis/
+Steps:
+  1. parse the cartridge header (title, game code, checksum, entry point)
+  2. recursive descent from the entry point following B/BL/BX while tracking the
+     ARM/Thumb mode; resolves `ldr rX,=addr ; bx rX` and switch tables
+  3. scan the ROM for pointers to function prologues (heuristic)
+  4. classify every byte: ARM / Thumb / literal pool / jump table / data
+  5. group instructions into functions and write reports to build/analysis/
 
-Uso: python tools/analyze_rom.py [rom.gba] [-o build/analysis]
+Usage: python tools/analyze_rom.py [rom.gba] [-o build/analysis]
 """
 import argparse
 import hashlib
@@ -865,9 +865,9 @@ def merge_runtime(args, out, prev_map, new_map, funcs, a):
     new_funcs = [f for f in new_map["functions"] if f["addr"] not in prev]
     by_src = Counter(f["source"] for f in new_funcs)
     rt_new = sorted(a for a in rt_addrs if a not in prev)
-    print(f"merge-runtime: {len(rt_addrs)} enderecos ROM do runtime {dict(seen_src)} "
-          f"({len(rt_new)} ainda nao estavam no mapa); {len(a.ram_aliases)} enderecos RAM -> ram-alias "
-          f"(fora do mapa); +{len(new_funcs)} funcoes novas no total {dict(by_src)}")
+    print(f"merge-runtime: {len(rt_addrs)} ROM addresses from the runtime {dict(seen_src)} "
+          f"({len(rt_new)} were not in the map yet); {len(a.ram_aliases)} RAM addresses -> ram-alias "
+          f"(kept out of the map); +{len(new_funcs)} new functions in total {dict(by_src)}")
     for f in new_funcs:
         print(f"    +0x{f['addr']:08X} {f['mode']} {f['source']}")
     # acumulado: tudo que o runtime ja pediu, mesmo que o runtime apague/reescreva os logs depois
@@ -906,43 +906,43 @@ def merge_runtime(args, out, prev_map, new_map, funcs, a):
         old = json.loads(check_map.BASELINE.read_text(encoding="utf-8"))
         errs, _ = check_map.compare(old, new_snap, 1e9)
         if errs:
-            print("merge-runtime: baseline NAO atualizado (regressao):")
+            print("merge-runtime: baseline NOT updated (regression):")
             for e in errs:
                 print("   -", e)
             return
     check_map.BASELINE.parent.mkdir(parents=True, exist_ok=True)
     check_map.BASELINE.write_text(json.dumps(new_snap, separators=(",", ":")), encoding="utf-8")
-    print(f"merge-runtime: baseline atualizado ({len(new_snap['functions'])} funcoes)")
+    print(f"merge-runtime: baseline updated ({len(new_snap['functions'])} functions)")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("rom", nargs="?", help="caminho da ROM (padrao: baserom.gba ou o unico *.gba da pasta)")
+    ap.add_argument("rom", nargs="?", help="path to the ROM (default: baserom.gba or the only *.gba in the folder)")
     ap.add_argument("-o", "--out", default="build/analysis")
     ap.add_argument("--extra-functions", action="append", default=None, metavar="CSV",
-                    help="CSV de funcoes extras (addr,mode,source,tier; ou sem cabecalho: addr,mode); "
-                         "repetivel. Padrao: new_functions.csv, m4a_handlers.csv e o "
-                         "extra_functions.csv que o runtime grava. '' desliga")
+                    help="CSV of extra functions (addr,mode,source,tier; or headerless: addr,mode); "
+                         "repeatable. Default: map_seeds.csv, new_functions.csv, m4a_handlers.csv and the "
+                         "extra_functions.csv written by the runtime. '' disables")
     ap.add_argument("--confidence", default="build/indirect/confidence.csv",
-                    help="CSV addr,confidence (tools/score_functions.py); '' desliga")
-    ap.add_argument("--no-ptr-scan", action="store_true", help="nao usar a heuristica de ponteiros")
-    ap.add_argument("--no-cache", action="store_true", help="nao usar/gravar o cache por SHA-1")
+                    help="CSV addr,confidence (tools/score_functions.py); '' disables")
+    ap.add_argument("--no-ptr-scan", action="store_true", help="skip the pointer heuristic")
+    ap.add_argument("--no-cache", action="store_true", help="do not use/write the SHA-1 cache")
     ap.add_argument("--cache-dir", default=str(REPO / "build" / "cache"),
-                    help="onde guardar saidas ja calculadas (chave: ROM + analisador + entradas)")
+                    help="where to keep finished outputs (key: ROM + analyzer + inputs)")
     ap.add_argument("--export-seeds", action="store_true",
-                    help="grava tools/map_seeds.csv: enderecos que o runtime viu em execucao (so enderecos, "
-                         "nenhum byte do jogo); a construcao do zero os usa como sementes")
+                    help="write tools/map_seeds.csv: addresses the runtime saw executing (addresses only, "
+                         "no game bytes); a from-scratch build uses them as seeds")
     ap.add_argument("--merge-runtime", action="store_true",
-                    help="absorve build/recomp/program/extra_functions.csv (descobertas em execucao), "
-                         "regera o mapa, registra o que entrou em merge_log.csv e atualiza o baseline "
-                         "do check_map.py (se nada regrediu)")
+                    help="absorb build/recomp/program/extra_functions.csv (found while playing), "
+                         "rebuild the map, log what was added to merge_log.csv and update the "
+                         "check_map.py baseline (if nothing regressed)")
     args = ap.parse_args()
 
     rom_path = Path(args.rom) if args.rom else None
     if rom_path is None:
         cands = [Path("baserom.gba")] if Path("baserom.gba").exists() else sorted(Path(".").glob("*.gba"))
         if len(cands) != 1:
-            sys.exit("ROM nao encontrada: passe o caminho como argumento")
+            sys.exit("ROM not found: pass its path as an argument")
         rom_path = cands[0]
     rom = rom_path.read_bytes()
     out = Path(args.out)
@@ -968,16 +968,16 @@ def main():
         for n in OUT_FILES:
             shutil.copyfile(cdir / n, out / n)
         m = json.loads((out / "map.json").read_text(encoding="utf-8"))
-        print(f"cache: {len(m['functions'])} funcoes, {len(m['jump_tables'])} tabelas "
-              f"(chave {key}, {time.time() - t_start:.1f}s)")
+        print(f"cache: {len(m['functions'])} functions, {len(m['jump_tables'])} jump tables "
+              f"(key {key}, {time.time() - t_start:.1f}s)")
         return
     hdr = parse_header(rom)
     print(f"ROM: {rom_path.name}  ({len(rom) / 1048576:.1f} MiB)")
-    print(f"  titulo={hdr['title']!r} codigo={hdr['game_code']} fabricante={hdr['maker_code']} versao={hdr['version']}")
-    print(f"  logo ok={hdr['logo_ok']}  0x96 fixo={hdr['fixed_96']}  checksum do header ok={hdr['header_checksum_ok']}")
+    print(f"  title={hdr['title']!r} game code={hdr['game_code']} maker={hdr['maker_code']} version={hdr['version']}")
+    print(f"  logo ok={hdr['logo_ok']}  fixed 0x96={hdr['fixed_96']}  header checksum ok={hdr['header_checksum_ok']}")
     entry = hdr["entry_branch_target"]
     if entry is None:
-        sys.exit("primeira instrucao nao e um B: entry point desconhecido")
+        sys.exit("first instruction is not a B: unknown entry point")
     print(f"  entry point: 0x{ROM_BASE:08X} -> B 0x{entry:08X} (ARM)")
 
     lap("header")
@@ -988,18 +988,18 @@ def main():
     n1 = len(a.insns)
     lo = min(a.insns)
     hi = max(a.insns)
-    print(f"  passo 1 (sem heuristica): {n1} instrucoes, {len(a.funcs)} funcoes, "
-          f"codigo entre 0x{lo:08X} e 0x{hi:08X}")
+    print(f"  pass 1 (no heuristics): {n1} instructions, {len(a.funcs)} functions, "
+          f"code between 0x{lo:08X} and 0x{hi:08X}")
 
     if not args.no_ptr_scan:
         seeds = a.pointer_seeds(max(ROM_BASE, lo - 0x10000), hi + 0x10000)
         for addr, thumb in seeds:
             if a.add_func(addr, thumb, "ptr-scan"):
                 a.run([(addr, thumb, "ptr-scan")])
-        print(f"  passo 2 (ponteiros p/ prologos): +{len(a.insns) - n1} instrucoes "
-              f"de {len(seeds)} candidatos")
+        print(f"  pass 2 (pointers to prologues): +{len(a.insns) - n1} instructions "
+              f"from {len(seeds)} candidates")
 
-    lap("descoberta")
+    lap("discovery")
     extra_files = extra_files_list
     for path in extra_files:
         if not Path(path).exists():
@@ -1034,8 +1034,8 @@ def main():
                     a.func_tier[addr] = row["tier"]
                 a.run([(addr, thumb, row["source"])])
                 added += 1
-        print(f"  extras ({Path(path).name}): +{added} funcoes novas, {known} ja conhecidas"
-              + (f", {inside} dentro de outra funcao" if inside else ""))
+        print(f"  extras ({Path(path).name}): +{added} new functions, {known} already known"
+              + (f", {inside} inside another function" if inside else ""))
 
     lap("extras")
     # codigo ROM -> RAM: acha as rotinas de copia e segue o codigo armazenado na ROM
@@ -1065,8 +1065,8 @@ def main():
         if (blk["mode"] == "thumb" and thumb) or (blk["mode"] == "arm" and not thumb and w % 4 == 0):
             if a.add_func(rom_addr, thumb, "ram-ptr"):
                 a.run([(rom_addr, thumb, "ram-ptr")])
-    print(f"  codigo RAM: {len(blocks)} copias ROM->RAM; seguindo o codigo guardado: "
-          f"+{len(a.insns) - n0} instrucoes, +{len(a.funcs) - f0} funcoes")
+    print(f"  RAM code: {len(blocks)} ROM->RAM copies; following the stored code: "
+          f"+{len(a.insns) - n0} instructions, +{len(a.funcs) - f0} functions")
 
     conf = {}
     if args.confidence and Path(args.confidence).exists():
@@ -1075,9 +1075,9 @@ def main():
                 conf[row["addr"].upper().replace("0X", "0x")] = row["confidence"]
         # confidence.csv usa 0x08xxxxxx com digitos em maiusculas ou minusculas: normaliza
         conf = {f"0x{int(k, 16):08X}": v for k, v in conf.items()}
-    lap("codigo-RAM")
+    lap("ram-code")
     funcs = a.build_functions()
-    lap("funcoes")
+    lap("functions")
     for r in funcs:
         r["confidence"] = conf.get(f"0x{r['addr']:08X}", "unscored")
     cov = a.coverage()
@@ -1195,33 +1195,33 @@ def main():
         for ad, d in sorted(a.ram_aliases.items()):
             w.writerow([f"0x{ad:08X}", d["mode"], " ".join(sorted(d["files"])), "ram-alias"])
     n_orph = sum(1 for o in orphans if o[5] == "orphan")
-    print(f"  switch: {n_targets} alvos distintos em {len(a.tables)} tabelas; {n_orph} orfaos, "
-          f"{len(orphans) - n_orph} em outra funcao (orphan_switch_targets.csv)")
+    print(f"  switch: {n_targets} distinct targets in {len(a.tables)} tables; {n_orph} orphans, "
+          f"{len(orphans) - n_orph} in another function (orphan_switch_targets.csv)")
 
     if args.merge_runtime:
         merge_runtime(args, out, prev_map, map_json, funcs, a)
 
     mb = lambda c: f"{c / 1024:9.1f} KiB ({100 * c / len(rom):4.1f}%)"
-    print("\nResumo")
-    print(f"  instrucoes: {n_arm} ARM, {n_thumb} Thumb")
+    print("\nSummary")
+    print(f"  instructions: {n_arm} ARM, {n_thumb} Thumb")
     print(f"  bytes ARM          {mb(cnt[1])}")
     print(f"  bytes Thumb        {mb(cnt[2])}")
-    print(f"  bytes lit. pool    {mb(cnt[4])}")
-    print(f"  bytes tab. salto   {mb(cnt[3])}")
-    print(f"  bytes dados/outros {mb(cnt[0])}")
+    print(f"  bytes literal pool {mb(cnt[4])}")
+    print(f"  bytes jump tables  {mb(cnt[3])}")
+    print(f"  bytes data/other   {mb(cnt[0])}")
     by_src = Counter(r["source"] for r in funcs)
     by_mode = Counter(r["mode"] for r in funcs)
-    print(f"  funcoes: {len(funcs)}  ({dict(by_mode)})  por origem: {dict(by_src)}")
-    print(f"  tabelas de salto: {len(a.tables)} ({sum(len(t['targets']) for t in a.tables)} entradas)")
-    print(f"  saltos/chamadas indiretos nao resolvidos: {len(a.unresolved)}")
-    print(f"  chamadas para RAM (codigo copiado p/ IWRAM/EWRAM?): {sum(a.ram_targets.values())} "
-          f"em {len(a.ram_targets)} enderecos")
-    print(f"  falhas de decodificacao: {len(a.bad)}  conflitos ARM/Thumb: {a.mode_conflicts}")
-    print(f"  confianca: {dict(Counter(r['confidence'] for r in funcs))}")
-    print(f"  codigo RAM: {len(blocks)} copias, {sum(1 for r in funcs if r['ram_block'] != '')} funcoes dentro")
-    print(f"  continuacoes (bl como salto longo): {sum(len(d) for d in a.cont.values())}  "
-          f"(ponteiros que caem dentro de funcao, nao viram funcao: {len(a.inner_entries)})")
-    print(f"  funcoes sem retorno alcancavel: {sum(1 for r in funcs if not r['has_return'])}  "
+    print(f"  functions: {len(funcs)}  ({dict(by_mode)})  by source: {dict(by_src)}")
+    print(f"  jump tables: {len(a.tables)} ({sum(len(t['targets']) for t in a.tables)} entries)")
+    print(f"  unresolved indirect jumps/calls: {len(a.unresolved)}")
+    print(f"  calls into RAM (code copied to IWRAM/EWRAM?): {sum(a.ram_targets.values())} "
+          f"at {len(a.ram_targets)} addresses")
+    print(f"  decode failures: {len(a.bad)}  ARM/Thumb conflicts: {a.mode_conflicts}")
+    print(f"  confidence: {dict(Counter(r['confidence'] for r in funcs))}")
+    print(f"  RAM code: {len(blocks)} copies, {sum(1 for r in funcs if r['ram_block'] != '')} functions inside")
+    print(f"  continuations (bl used as a long jump): {sum(len(d) for d in a.cont.values())}  "
+          f"(pointers landing inside a function, not made functions: {len(a.inner_entries)})")
+    print(f"  functions with no reachable return: {sum(1 for r in funcs if not r['has_return'])}  "
           f"{dict(Counter(r['noreturn_kind'] for r in funcs if r['noreturn_kind']))}")
     if use_cache:
         cdir.mkdir(parents=True, exist_ok=True)
@@ -1237,9 +1237,9 @@ def main():
             w.writerow(["addr", "mode", "source", "note"])
             for ad in sorted(seeds):
                 w.writerow([f"0x{ad:08X}", seeds[ad][0], seeds[ad][1], ""])
-        print(f"  sementes exportadas: {len(seeds)} -> {seed_path}")
-    print(f"  tempo total: {time.time() - t_start:.1f}s  ({'; '.join(f'{k} {v:.1f}s' for k, v in timings)})")
-    print(f"\nArquivos em {out}/: header.json functions.csv jumptables.csv regions.csv unresolved.csv "
+        print(f"  seeds exported: {len(seeds)} -> {seed_path}")
+    print(f"  total time: {time.time() - t_start:.1f}s  ({'; '.join(f'{k} {v:.1f}s' for k, v in timings)})")
+    print(f"\nFiles in {out}/: header.json functions.csv jumptables.csv regions.csv unresolved.csv "
           f"ram_code.csv map.json continuations.csv orphan_switch_targets.csv ram_alias.csv")
 
 

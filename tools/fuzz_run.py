@@ -64,8 +64,8 @@ def run(seed, frames, timeout):
         code = -999
     dt = time.time() - t0
     stop = re.search(r'RT_STOP frames pc=(\w+) lr=(\w+)', text)
-    unres = re.search(r'nao_resolvidos=(\d+)', text)
-    ended = bool(stop) and 'PARADA: endereco' not in text and 'PARADA: funcao' not in text
+    unres = re.search(r'unresolved=(\d+)', text)
+    ended = bool(stop) and 'HALT: ' not in text and 'HALT: ' not in text
     ok = ended and code == 0 and unres is not None and unres.group(1) == '0'
     reason = ''
     if not ok:

@@ -83,6 +83,21 @@ def slim_zig(zdir):
     print(f'  slimmed zig: -{removed / 1e6:.0f} MB')
 
 
+def rmtree_retry(path, tries=12):
+    """Windows (Defender/indexer) may hold files of a just-built tree for a few seconds."""
+    import time
+    for i in range(tries):
+        if not os.path.exists(path):
+            return
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError:
+            time.sleep(2 + i)
+    if os.path.exists(path):
+        shutil.rmtree(path)        # let the real error surface
+
+
 def run(cmd, **kw):
     print('  $', ' '.join(str(c) for c in cmd))
     subprocess.run(cmd, check=True, **kw)
@@ -117,8 +132,7 @@ def main():
     a = ap.parse_args()
     dist = os.path.abspath(a.out)
     zig, sdl, cap = find_zig(a.zig), find_sdl2(a.sdl2), find_capstone()
-    if os.path.exists(dist):
-        shutil.rmtree(dist)
+    rmtree_retry(dist)
     os.makedirs(dist)
     print('1/6 python (embeddable) + capstone')
     pz = a.python_zip or os.path.join(ROOT, 'build', 'dist_cache', os.path.basename(PY_URL))
@@ -144,7 +158,9 @@ def main():
     copy_tree(os.path.join(ROOT, 'tools'), os.path.join(app, 'tools'), skip_dirs=('zig',),
               only_ext=('.py', '.csv'))
     os.makedirs(os.path.join(app, 'launcher'))
-    shutil.copy2(os.path.join(ROOT, 'launcher', 'launcher.py'), os.path.join(app, 'launcher', 'launcher.py'))
+    for f in sorted(os.listdir(os.path.join(ROOT, 'launcher'))):
+        if f.endswith('.py'):
+            shutil.copy2(os.path.join(ROOT, 'launcher', f), os.path.join(app, 'launcher', f))
     print('3/6 zig + SDL2')
     copy_tree(zig, os.path.join(app, 'tools', 'zig'))
     if not a.full_zig:
@@ -153,10 +169,17 @@ def main():
     print('4/6 build the progress-window DLL and the launcher stub (with the bundled zig)')
     zexe = os.path.join(app, 'tools', 'zig', 'zig.exe')
     inc, lib = os.path.join(sdl, 'include', 'SDL2'), os.path.join(sdl, 'lib')
-    run([zexe, 'cc', '-target', 'x86_64-windows-gnu', '-O2', '-shared', '-I', inc,
-         os.path.join(ROOT, 'hw', 'window_sdl.c'), os.path.join(ROOT, 'launcher', 'ui_dll.c'),
+    run([zexe, 'cc', '-target', 'x86_64-windows-gnu', '-O2', '-shared', '-DKL_BUILD_DLL', '-I', inc,
+         os.path.join(ROOT, 'hw', 'window_sdl.c'), os.path.join(ROOT, 'hw', 'launcher_ui.c'),
+         os.path.join(ROOT, 'hw', 'config_ini.c'), os.path.join(ROOT, 'launcher', 'ui_dll.c'),
          os.path.join(lib, 'libSDL2.dll.a'), '-o', os.path.join(app, 'launcher', 'kirby_ui.dll')])   # import lib, not the static one
     shutil.copy2(os.path.join(sdl, 'bin', 'SDL2.dll'), os.path.join(app, 'launcher', 'SDL2.dll'))
+    import ctypes
+    os.add_dll_directory(os.path.join(app, 'launcher'))
+    probe = ctypes.CDLL(os.path.join(app, 'launcher', 'kirby_ui.dll'))
+    missing = [n for n in ('kl_run', 'kl_dropped_path', 'kui_open', 'kui_progress', 'kui_close') if not hasattr(probe, n)]
+    if missing:
+        sys.exit('kirby_ui.dll does not export: ' + ', '.join(missing))
     run([zexe, 'cc', '-target', 'x86_64-windows-gnu', '-O2', '-municode', '-Wl,--subsystem,windows',
          os.path.join(ROOT, 'launcher', 'stub.c'), '-o', os.path.join(dist, 'KirbyRecomp.exe')])
     shutil.copy2(os.path.join(ROOT, 'LICENSE'), os.path.join(dist, 'LICENSE'))
