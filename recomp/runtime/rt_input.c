@@ -83,10 +83,40 @@ int rt_cfg_get(int which) {
 }
 
 #ifdef RT_WINDOW
+#include <time.h>
+#include <stdarg.h>
 static SDL_Scancode kb_sc[NBTN];
 static SDL_GameControllerButton pad_btn[NBTN];
-static SDL_GameController *pads[4];
+static SDL_GameController *active;          /* UM controle: o primeiro; se sair, passa ao seguinte */
+static int stick_x, stick_y;                 /* direcao com histerese: -1, 0, +1 */
 static int input_ready, scan_countdown;
+static int only_virtual;   /* teste: ignora controles reais da maquina */
+static char log_path[1100];
+
+void rt_input_set_log(const char *path) {
+    snprintf(log_path, sizeof log_path, "%s", path ? path : "");
+}
+
+/* log do jogo: stderr + arquivo (kirby.exe e app grafico: sem console) */
+static void ilog(const char *fmt, ...) {
+    char msg[300];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "[input] %s\n", msg);
+    if (log_path[0]) {
+        FILE *f = fopen(log_path, "ab");
+        if (f) {
+            time_t t = time(NULL);
+            struct tm *tm = localtime(&t);
+            char ts[32] = "";
+            if (tm) strftime(ts, sizeof ts, "%H:%M:%S", tm);
+            fprintf(f, "%s [input] %s\n", ts, msg);
+            fclose(f);
+        }
+    }
+}
 
 static int reserved(SDL_Scancode sc) {
     return sc == SDL_SCANCODE_ESCAPE || sc == SDL_SCANCODE_F11 || sc == SDL_SCANCODE_F1;
@@ -102,29 +132,62 @@ void rt_input_init(void) {
         pad_btn[i] = SDL_GameControllerGetButtonFromString(rt_cfg.pad[i]);
     }
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0)
-        fprintf(stderr, "input: game controller support unavailable: %s\n", SDL_GetError());
+        ilog("game controller support unavailable: %s", SDL_GetError());
+    ilog("settings loaded: scale=%d scaling=%s fullscreen=%d volume=%d mute=%d | keyboard A=%s B=%s L=%s R=%s "
+         "Start=%s Select=%s | controller A=%s B=%s stick_as_dpad=%d deadzone=%d",
+         rt_cfg.scale, rt_cfg.scaling == 0 ? "integer" : rt_cfg.scaling == 2 ? "stretch" : "fit",
+         rt_cfg.fullscreen, rt_cfg.volume, rt_cfg.mute, rt_cfg.kb[B_A], rt_cfg.kb[B_B], rt_cfg.kb[B_L],
+         rt_cfg.kb[B_R], rt_cfg.kb[B_START], rt_cfg.kb[B_SELECT], rt_cfg.pad[B_A], rt_cfg.pad[B_B],
+         rt_cfg.stick_as_dpad, rt_cfg.deadzone);
     input_ready = 1;
     scan_countdown = 0;
+    active = NULL;
+    stick_x = stick_y = 0;
 }
 
-/* hot-plug: reabre/fecha de tempos em tempos (win_poll consome os eventos do SDL) */
-static void scan_pads(void) {
-    for (int p = 0; p < 4; p++)
-        if (pads[p] && !SDL_GameControllerGetAttached(pads[p])) {
-            SDL_GameControllerClose(pads[p]);
-            pads[p] = NULL;
-        }
+static const char *pad_name(SDL_GameController *c) {
+    const char *n = c ? SDL_GameControllerName(c) : NULL;
+    return n ? n : "controller";
+}
+
+/* Mantem UM controle ativo. Se o ativo saiu, passa ao proximo da lista; novos entram so
+ * quando nao ha ativo (conectar um segundo controle nao rouba a entrada do primeiro). */
+static void manage_pad(int rescan) {
+    if (active && !SDL_GameControllerGetAttached(active)) {
+        ilog("controller disconnected: %s", pad_name(active));
+        SDL_GameControllerClose(active);
+        active = NULL;
+        stick_x = stick_y = 0;
+        rescan = 1;
+    }
+    if (active || !rescan) return;
     int n = SDL_NumJoysticks();
     for (int i = 0; i < n; i++) {
         if (!SDL_IsGameController(i)) continue;
+        if (only_virtual && !SDL_JoystickIsVirtual(i)) continue;
         SDL_GameController *c = SDL_GameControllerOpen(i);
         if (!c) continue;
-        int dup = 0;
-        for (int p = 0; p < 4; p++) if (pads[p] == c) dup = 1;   /* Open devolve o mesmo se ja aberto */
-        if (dup) continue;
-        for (int p = 0; p < 4; p++)
-            if (!pads[p]) { pads[p] = c; break; }
+        active = c;
+        stick_x = stick_y = 0;
+        ilog("controller connected: %s (using it; others are ignored)", pad_name(c));
+        break;
     }
+}
+
+/* zona morta com histerese: entra em 100% da zona morta, sai em 85% (nao oscila na borda) */
+static int hyst(int dir, int v, int dz) {
+    int exit_at = dz * 85 / 100;
+    if (dir > 0) {
+        if (v >= exit_at) return 1;
+        return v <= -dz ? -1 : 0;
+    }
+    if (dir < 0) {
+        if (v <= -exit_at) return -1;
+        return v >= dz ? 1 : 0;
+    }
+    if (v >= dz) return 1;
+    if (v <= -dz) return -1;
+    return 0;
 }
 
 uint16_t rt_input_poll(void) {
@@ -133,21 +196,23 @@ uint16_t rt_input_poll(void) {
     const Uint8 *k = SDL_GetKeyboardState(NULL);
     for (int i = 0; i < NBTN; i++)
         if (kb_sc[i] != SDL_SCANCODE_UNKNOWN && k[kb_sc[i]]) v &= (uint16_t)~(1u << i);
-    if (scan_countdown-- <= 0) { scan_pads(); scan_countdown = 30; }
-    for (int p = 0; p < 4; p++) {
-        SDL_GameController *c = pads[p];
-        if (!c) continue;
+    if (scan_countdown-- <= 0) { manage_pad(1); scan_countdown = 30; }
+    else manage_pad(0);
+    SDL_GameController *c = active;
+    if (c) {
         for (int i = 0; i < NBTN; i++)
             if (pad_btn[i] != SDL_CONTROLLER_BUTTON_INVALID && SDL_GameControllerGetButton(c, pad_btn[i]))
                 v &= (uint16_t)~(1u << i);
-        if (rt_cfg.stick_as_dpad) {
+        if (rt_cfg.stick_as_dpad) {   /* so o analogico ESQUERDO; 8 direcoes por combinacao de eixos */
             int x = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTX);
             int y = SDL_GameControllerGetAxis(c, SDL_CONTROLLER_AXIS_LEFTY);
-            int dz = rt_cfg.deadzone;
-            if (x > dz) v &= (uint16_t)~(1u << B_RIGHT);
-            if (x < -dz) v &= (uint16_t)~(1u << B_LEFT);
-            if (y > dz) v &= (uint16_t)~(1u << B_DOWN);
-            if (y < -dz) v &= (uint16_t)~(1u << B_UP);
+            int dz = rt_cfg.deadzone > 0 ? rt_cfg.deadzone : 1;
+            stick_x = hyst(stick_x, x, dz);
+            stick_y = hyst(stick_y, y, dz);
+            if (stick_x > 0) v &= (uint16_t)~(1u << B_RIGHT);
+            if (stick_x < 0) v &= (uint16_t)~(1u << B_LEFT);
+            if (stick_y > 0) v &= (uint16_t)~(1u << B_DOWN);
+            if (stick_y < 0) v &= (uint16_t)~(1u << B_UP);
         }
     }
     /* direcionais opostos ao mesmo tempo nao existem no GBA: cancela o par */
@@ -169,8 +234,165 @@ int rt_input_hotkeys(void) {
 }
 
 void rt_input_close(void) {
-    for (int p = 0; p < 4; p++)
-        if (pads[p]) { SDL_GameControllerClose(pads[p]); pads[p] = NULL; }
+    if (active) { SDL_GameControllerClose(active); active = NULL; }
+}
+
+/* ---- autoteste com controles VIRTUAIS do SDL (sem hardware): botoes, analogico com histerese,
+ * 8 direcoes, direito ignorado, primeiro controle + failover, hot-plug ---- */
+static SDL_Joystick *vjs[2];
+static int vidx[2];
+
+static int vpad_attach(int slot) {
+    int idx = SDL_JoystickAttachVirtual(SDL_JOYSTICK_TYPE_GAMECONTROLLER, 6, 15, 0);
+    if (idx < 0) return -1;
+    SDL_JoystickGUID g = SDL_JoystickGetDeviceGUID(idx);
+    char gs[64], map[600];
+    SDL_JoystickGetGUIDString(g, gs, sizeof gs);
+    snprintf(map, sizeof map,
+             "%s,Virtual Pad %d,a:b0,b:b1,x:b2,y:b3,back:b4,guide:b5,start:b6,leftstick:b7,rightstick:b8,"
+             "leftshoulder:b9,rightshoulder:b10,dpup:b11,dpdown:b12,dpleft:b13,dpright:b14,"
+             "leftx:a0,lefty:a1,rightx:a2,righty:a3,lefttrigger:a4,righttrigger:a5", gs, slot);
+    SDL_GameControllerAddMapping(map);
+    vjs[slot] = SDL_JoystickOpen(idx);
+    vidx[slot] = idx;
+    return vjs[slot] ? 0 : -1;
+}
+
+static void vpad_detach(int slot) {
+    /* o indice do dispositivo muda quando outro some: resolve pelo instance id */
+    int idx = -1;
+    if (vjs[slot]) {
+        SDL_JoystickID id = SDL_JoystickInstanceID(vjs[slot]);
+        for (int i = 0; i < SDL_NumJoysticks(); i++)
+            if (SDL_JoystickGetDeviceInstanceID(i) == id) idx = i;
+        SDL_JoystickClose(vjs[slot]);
+        vjs[slot] = NULL;
+    }
+    if (idx >= 0) SDL_JoystickDetachVirtual(idx);
+}
+
+static void settle(void) {   /* remocao/insercao de dispositivo e assincrona: deixa o SDL processar */
+    for (int i = 0; i < 4; i++) {
+        SDL_PumpEvents();
+        SDL_GameControllerUpdate();
+        SDL_Delay(5);
+    }
+}
+
+int rt_selftest_input(void) {
+    int bad = 0;
+#define EXPECT(cond, what) do { if (!(cond)) { bad++; fprintf(stderr, "[selftest-input] FAIL: %s\n", what); } } while (0)
+    SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) != 0) {
+        fprintf(stderr, "[selftest-input] SDL_Init: %s\n", SDL_GetError());
+        return 1;
+    }
+    rt_cfg_defaults();
+    rt_cfg.deadzone = 8000;
+    only_virtual = 1;
+    input_ready = 0;
+    rt_input_init();
+    #define BIT(b) (1u << (b))
+    EXPECT(rt_input_poll() == 0x03FF, "idle without controller");
+
+    if (vpad_attach(0) < 0) { fprintf(stderr, "[selftest-input] virtual joystick unavailable\n"); return 1; }
+    settle();
+    scan_countdown = 0;
+    EXPECT(rt_input_poll() == 0x03FF, "idle with controller");
+    EXPECT(active != NULL, "controller 1 became active (hot-plug)");
+
+    /* botoes por posicao: SDL b (leste, indice 1) = GBA A; SDL a (sul, indice 0) = GBA B */
+    SDL_JoystickSetVirtualButton(vjs[0], 1, 1); settle();
+    EXPECT(!(rt_input_poll() & BIT(B_A)), "east button -> GBA A");
+    SDL_JoystickSetVirtualButton(vjs[0], 1, 0);
+    SDL_JoystickSetVirtualButton(vjs[0], 0, 1); settle();
+    EXPECT(!(rt_input_poll() & BIT(B_B)), "south button -> GBA B");
+    SDL_JoystickSetVirtualButton(vjs[0], 0, 0);
+    SDL_JoystickSetVirtualButton(vjs[0], 9, 1); SDL_JoystickSetVirtualButton(vjs[0], 6, 1); settle();
+    {
+        uint16_t r = rt_input_poll();
+        EXPECT(!(r & BIT(B_L)) && !(r & BIT(B_START)), "shoulder L + start");
+    }
+    SDL_JoystickSetVirtualButton(vjs[0], 9, 0); SDL_JoystickSetVirtualButton(vjs[0], 6, 0);
+    SDL_JoystickSetVirtualButton(vjs[0], 11, 1); settle();
+    EXPECT(!(rt_input_poll() & BIT(B_UP)), "physical d-pad up");
+    SDL_JoystickSetVirtualButton(vjs[0], 11, 0); settle();
+    EXPECT(rt_input_poll() == 0x03FF, "released");
+
+    /* analogico esquerdo: zona morta + histerese (entra em 8000, sai abaixo de 6800) */
+    SDL_JoystickSetVirtualAxis(vjs[0], 0, 7900); settle();
+    EXPECT(rt_input_poll() & BIT(B_RIGHT), "below dead zone: nothing");
+    SDL_JoystickSetVirtualAxis(vjs[0], 0, 8100); settle();
+    EXPECT(!(rt_input_poll() & BIT(B_RIGHT)), "above dead zone: right");
+    SDL_JoystickSetVirtualAxis(vjs[0], 0, 7000); settle();
+    EXPECT(!(rt_input_poll() & BIT(B_RIGHT)), "hysteresis: still right at 7000 (> 85%)");
+    SDL_JoystickSetVirtualAxis(vjs[0], 0, 6700); settle();
+    EXPECT(rt_input_poll() & BIT(B_RIGHT), "hysteresis: released below 85%");
+    SDL_JoystickSetVirtualAxis(vjs[0], 0, 7500); settle();
+    EXPECT(rt_input_poll() & BIT(B_RIGHT), "re-entering needs 100% again");
+    SDL_JoystickSetVirtualAxis(vjs[0], 0, 0);
+    /* 8 direcoes: diagonais por combinacao */
+    SDL_JoystickSetVirtualAxis(vjs[0], 0, -20000); SDL_JoystickSetVirtualAxis(vjs[0], 1, -20000); settle();
+    {
+        uint16_t r = rt_input_poll();
+        EXPECT(!(r & BIT(B_LEFT)) && !(r & BIT(B_UP)) && (r & BIT(B_RIGHT)) && (r & BIT(B_DOWN)), "diagonal up-left");
+    }
+    SDL_JoystickSetVirtualAxis(vjs[0], 0, 20000); SDL_JoystickSetVirtualAxis(vjs[0], 1, 20000); settle();
+    {
+        uint16_t r = rt_input_poll();
+        EXPECT(!(r & BIT(B_RIGHT)) && !(r & BIT(B_DOWN)) && (r & BIT(B_LEFT)) && (r & BIT(B_UP)), "diagonal down-right");
+    }
+    SDL_JoystickSetVirtualAxis(vjs[0], 0, 0); SDL_JoystickSetVirtualAxis(vjs[0], 1, 0);
+    /* analogico direito nunca vale */
+    SDL_JoystickSetVirtualAxis(vjs[0], 2, 30000); SDL_JoystickSetVirtualAxis(vjs[0], 3, -30000); settle();
+    EXPECT(rt_input_poll() == 0x03FF, "right stick ignored");
+    SDL_JoystickSetVirtualAxis(vjs[0], 2, 0); SDL_JoystickSetVirtualAxis(vjs[0], 3, 0);
+    /* stick_as_dpad=0 */
+    rt_cfg.stick_as_dpad = 0;
+    SDL_JoystickSetVirtualAxis(vjs[0], 0, 30000); settle();
+    EXPECT(rt_input_poll() == 0x03FF, "stick_as_dpad=0: stick ignored");
+    rt_cfg.stick_as_dpad = 1;
+    SDL_JoystickSetVirtualAxis(vjs[0], 0, 0);
+
+    /* segundo controle: ignorado enquanto o primeiro existe */
+    if (vpad_attach(1) == 0) {
+        settle();
+        scan_countdown = 0;
+        SDL_JoystickSetVirtualButton(vjs[1], 1, 1); settle();
+        EXPECT(rt_input_poll() & BIT(B_A), "2nd controller ignored while the 1st is active");
+        /* desconecta o primeiro: o segundo assume (failover) */
+        SDL_JoystickSetVirtualButton(vjs[0], 1, 0);
+        vpad_detach(0); settle();
+        scan_countdown = 0;
+        uint16_t r = rt_input_poll();
+        EXPECT(!(r & BIT(B_A)), "failover: 2nd controller takes over (A held)");
+        SDL_JoystickSetVirtualButton(vjs[1], 1, 0);
+        vpad_detach(1); settle();
+        scan_countdown = 0;
+        {
+            uint16_t r2 = rt_input_poll();
+            if (r2 != 0x03FF || active != NULL)
+                fprintf(stderr, "[selftest-input] debug: poll=%04X active=%p attached=%d njoy=%d\n", r2,
+                        (void *)active, active ? SDL_GameControllerGetAttached(active) : -1, SDL_NumJoysticks());
+            EXPECT(r2 == 0x03FF && active == NULL, "all controllers gone: idle, no crash");
+        }
+    } else {
+        bad++;
+        fprintf(stderr, "[selftest-input] FAIL: could not attach the 2nd virtual controller\n");
+    }
+    /* reconectar durante o jogo (hot-plug) */
+    if (vpad_attach(0) == 0) {
+        settle();
+        scan_countdown = 0;
+        rt_input_poll();
+        EXPECT(active != NULL, "hot-plug reconnect");
+        vpad_detach(0);
+        settle();
+    }
+    rt_input_close();
+    fprintf(stderr, "[selftest-input] %s\n", bad ? "FAILED" : "OK");
+    return bad;
 }
 #endif
 

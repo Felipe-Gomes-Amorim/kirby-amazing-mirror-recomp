@@ -181,6 +181,10 @@ int main(int argc, char **argv) {
             const char *v = argv[++i];
             rt_scaling_override = !strcmp(v, "integer") ? 0 : !strcmp(v, "stretch") ? 2 : 1;
         }
+        else if (!strcmp(argv[i], "--selftest-input")) {
+            extern int rt_selftest_input_entry(void);
+            return rt_selftest_input_entry() ? 1 : 0;
+        }
         else if (!strcmp(argv[i], "--selftest-video")) {
             extern int rt_selftest_video(void);
             return rt_selftest_video() ? 1 : 0;
@@ -234,6 +238,16 @@ int main(int argc, char **argv) {
             else strcpy(ini, "kirby.ini");
         }
         rt_cfg_load(ini);
+        {   /* log do jogo ao lado do ini (hot-plug de controles etc.) */
+            extern void rt_input_set_log_entry(const char *path);
+            char lg[1100];
+            snprintf(lg, sizeof lg, "%s", ini);
+            char *e = strrchr(lg, '/');
+            char *b2 = strrchr(lg, '\\');
+            if (b2 && (!e || b2 > e)) e = b2;
+            if (e) strcpy(e + 1, "kirby.log"); else strcpy(lg, "kirby.log");
+            rt_input_set_log_entry(lg);
+        }
         if (!scale_explicit) scale = rt_cfg_get(0);
         if (rt_cfg_get(5)) { extern int rt_mute; rt_mute = 1; }
     }

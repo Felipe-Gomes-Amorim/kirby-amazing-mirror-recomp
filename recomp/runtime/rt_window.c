@@ -341,3 +341,16 @@ void gba_bus_unmapped(uint32_t addr, int size, int is_write) {
         rt_dump_label = "HALT";
     }
 }
+
+#ifdef RT_WINDOW
+int rt_selftest_input(void);
+void rt_input_set_log(const char *path);
+int rt_selftest_input_entry(void) { return rt_selftest_input(); }
+void rt_input_set_log_entry(const char *path) { rt_input_set_log(path); }
+#else
+int rt_selftest_input_entry(void) {
+    fprintf(stderr, "this executable was built without a window (RT_WINDOW)\n");
+    return 1;
+}
+void rt_input_set_log_entry(const char *path) { (void)path; }
+#endif
