@@ -72,7 +72,10 @@ uint64_t rt_ncalls;
 
 extern int rt_skip_overlays;
 const RcFunc *rt_lookup(uint32_t a, uint32_t thumb);
+int rt_force_interp;   /* --interp-all: nenhuma funcao e "conhecida"; tudo vai ao interpretador */
+
 static const RcFunc *lookup(uint32_t a, uint32_t thumb) {
+    if (rt_force_interp) return 0;
     unsigned lo = 0, hi = rc_table_n;
     while (lo < hi) { /* primeiro indice com .lo > a */
         unsigned mid = (lo + hi) / 2;

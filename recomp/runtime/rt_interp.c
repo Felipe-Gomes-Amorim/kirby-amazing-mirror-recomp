@@ -61,10 +61,21 @@ static int jumped(Cpu *c, uint32_t from) {
     return !c->stop && !should_exit(c);
 }
 
+/* o compilado soma 24 ciclos por `bl` direto (nao por veneer `bx rN`): o interpretado idem,
+ * para a temporizacao (IRQ/audio) ser a mesma */
+static void tick_call(Cpu *c, uint32_t target, int thumb) {
+    if (thumb) {
+        uint32_t h = gba_read16(target);
+        if ((h & 0xFF87u) == 0x4700u) return;   /* veneer: bx rN */
+    }
+    uint32_t keep = c->pc;
+    rt_tick(c);
+    c->pc = keep;
+}
+
 /* chamada de funcao recompilada a partir do codigo interpretado; 1 = continua em `ret` */
 static int call_compiled(Cpu *c, uint32_t target, uint32_t ret_pc) {
     c->pc = target;
-    rt_tick(c);
     if (c->stop) return 0;
     rt_rets[rt_depth++ & 4095u] = ret_pc;
     rt_call(c);
@@ -283,6 +294,7 @@ static void step_arm(Cpu *c) {
         uint32_t target = pc + 8 + (uint32_t)off;
         if (w >> 24 & 1) {
             r[14] = next;
+            tick_call(c, target, 0);
             const RcFunc *f = rt_lookup(target, 0);
             if (f && !(target >= sk_lo && target < sk_hi)) {
                 if (!call_compiled(c, target, next)) return;
@@ -420,6 +432,7 @@ static void step_thumb(Cpu *c) {
         uint32_t ret = pc + 4;
         r[14] = ret | 1;
         c->pc = ret;
+        tick_call(c, target, 1);
         const RcFunc *f = rt_lookup(target, 1);
         if (f && !(target >= sk_lo && target < sk_hi)) {
             if (!call_compiled(c, target, ret)) return;

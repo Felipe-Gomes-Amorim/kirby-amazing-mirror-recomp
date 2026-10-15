@@ -50,13 +50,103 @@ static void *watchdog_thread(void *p) {
 }
 #endif
 
-int main(int argc, char **argv) {
-    if (argc < 2) {
-        fprintf(stderr, "uso: %s rom.gba [--no-stop]\n", argv[0]);
-        return 1;
+/* ---- localizar a ROM quando o exe e aberto sem argumentos (duplo clique) ---- */
+static void exe_dir(char *out, size_t n) {
+    out[0] = 0;
+#ifdef _WIN32
+    DWORD k = GetModuleFileNameA(NULL, out, (DWORD)n);
+    if (k == 0 || k >= n) { out[0] = 0; return; }
+    for (char *p = out + k; p > out; p--)
+        if (*p == '\\' || *p == '/') { *p = 0; break; }
+#else
+    snprintf(out, n, ".");
+#endif
+}
+
+static int file_exists(const char *p) {
+    FILE *f = fopen(p, "rb");
+    if (f) fclose(f);
+    return f != NULL;
+}
+
+/* ordem: baserom.gba ao lado do exe, qualquer *.gba ao lado, baserom.gba no cwd, ultima ROM usada */
+static int find_rom(char *out, size_t n) {
+    char dir[900];
+    exe_dir(dir, sizeof dir);
+    snprintf(out, n, "%s/baserom.gba", dir);
+    if (file_exists(out)) return 1;
+#ifdef _WIN32
+    {
+        char pat[1000];
+        WIN32_FIND_DATAA fd;
+        snprintf(pat, sizeof pat, "%s/*.gba", dir);
+        HANDLE h = FindFirstFileA(pat, &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            snprintf(out, n, "%s/%s", dir, fd.cFileName);
+            FindClose(h);
+            return 1;
+        }
     }
-    FILE *f = fopen(argv[1], "rb");
-    if (!f) { perror(argv[1]); return 1; }
+#endif
+    snprintf(out, n, "baserom.gba");
+    if (file_exists(out)) return 1;
+    {
+        char lp[1000];
+        snprintf(lp, sizeof lp, "%s/kirby_lastrom.txt", dir);
+        FILE *f = fopen(lp, "rb");
+        if (f) {
+            size_t k = fread(out, 1, n - 1, f);
+            fclose(f);
+            out[k] = 0;
+            while (k && (out[k - 1] == '\n' || out[k - 1] == '\r' || out[k - 1] == ' ')) out[--k] = 0;
+            if (k && file_exists(out)) return 1;
+        }
+    }
+    return 0;
+}
+
+static void remember_rom(const char *path) {
+    char dir[900], lp[1000], full[1100];
+    exe_dir(dir, sizeof dir);
+    snprintf(lp, sizeof lp, "%s/kirby_lastrom.txt", dir);
+    snprintf(full, sizeof full, "%s", path);
+#ifdef _WIN32
+    GetFullPathNameA(path, sizeof full, full, NULL);
+#endif
+    FILE *f = fopen(lp, "wb");
+    if (f) {
+        fputs(full, f);
+        fclose(f);
+    }
+}
+
+static void fatal_msg(const char *msg) {
+    fprintf(stderr, "%s\n", msg);
+#ifdef _WIN32
+    MessageBoxA(NULL, msg, "Kirby & The Amazing Mirror", MB_OK | MB_ICONINFORMATION);
+#endif
+}
+
+int main(int argc, char **argv) {
+    static char found[1024];
+    const char *rom_path = NULL;
+    int first = 1;
+    if (argc >= 2 && argv[1][0] != '-') {
+        rom_path = argv[1];   /* ROM arrastada sobre o exe, ou primeiro argumento */
+        first = 2;
+    }
+    int gui_defaults = argc <= 2;   /* so a ROM (ou nada): modo jogo, janela escala 3 */
+    if (!rom_path) {
+        if (!find_rom(found, sizeof found)) {
+            fatal_msg("ROM nao encontrada.\nArraste o arquivo .gba sobre kirby.exe, ou coloque "
+                      "baserom.gba na mesma pasta.");
+            return 1;
+        }
+        rom_path = found;
+    }
+    argv[1 - 1] = argv[0];
+    FILE *f = fopen(rom_path, "rb");
+    if (!f) { perror(rom_path); return 1; }
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -68,8 +158,13 @@ int main(int argc, char **argv) {
     const char *ppm = NULL, *sav = NULL;
     int window = 0, scale = 3, bench = 0, selftest = 0;
     rt_opt_stop_at_vblank_wait = 1;
+    if (gui_defaults) {
+        window = 1;
+        rt_opt_stop_at_vblank_wait = 0;
+        remember_rom(rom_path);
+    }
     hw_set_keys(0x03FF);
-    for (int i = 2; i < argc; i++) {
+    for (int i = first; i < argc; i++) {
         if (!strcmp(argv[i], "--no-stop")) rt_opt_stop_at_vblank_wait = 0;
         else if (!strcmp(argv[i], "--window")) {
             window = 1;
@@ -79,6 +174,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--selftest-sram")) selftest = 1;
         else if (!strcmp(argv[i], "--selftest-interp")) selftest = 2;
         else if (!strcmp(argv[i], "--no-sram-alias")) { extern int rt_no_alias; rt_no_alias = 1; }
+        else if (!strcmp(argv[i], "--interp-all")) { extern int rt_force_interp; rt_force_interp = 1; }
         else if (!strcmp(argv[i], "--no-overlays")) { extern int rt_skip_overlays; rt_skip_overlays = 1; }
         else if (!strcmp(argv[i], "--mute")) { extern int rt_mute; rt_mute = 1; }
         else if (!strcmp(argv[i], "--audio-raw") && i + 1 < argc) { extern const char *rt_audio_raw; rt_audio_raw = argv[++i]; }
@@ -102,7 +198,7 @@ int main(int argc, char **argv) {
     {   /* save: --sav FILE | <rom>.sav | "none" */
         static char def[1024];
         if (!sav) {
-            snprintf(def, sizeof def, "%s", argv[1]);
+            snprintf(def, sizeof def, "%s", rom_path);
             char *dot = strrchr(def, '.');
             if (dot) strcpy(dot, ".sav");
             else strcat(def, ".sav");

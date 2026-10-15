@@ -17,9 +17,20 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .decode import Unsupported
 from .emit import discover, emit_program
+from . import toolchain
 from .harness import ROOT, RUNTIME, Rom, zig_cc
 
-OUT = os.path.join(ROOT, 'build', 'recomp', 'program')
+OUT = toolchain.default_out()   # --out/$KIRBY_OUT/repo/cache (ver toolchain.py)
+OPT = '-Os'                     # -Os: ~1,4x mais rapido de compilar que -O1 e objetos 4,5x menores
+NSHARDS = 48
+
+
+def set_out(path):
+    """Troca a pasta de saida/cache (todos os caminhos derivam de OUT em tempo de chamada)."""
+    global OUT
+    OUT = os.path.abspath(path)
+    os.makedirs(OUT, exist_ok=True)
+    return OUT
 
 
 def load_continuations(csv_path):
@@ -98,7 +109,9 @@ class RamRom(Rom):
         return self.ram[o] | (self.ram[o + 1] << 8)
 
 
-def build(rom, funcs, bad=None, jobs=8, nshards=16, verbose=True):
+def build(rom, funcs, bad=None, jobs=8, nshards=None, verbose=True, opt=None):
+    nshards = nshards or NSHARDS
+    opt = opt or OPT
     t0 = time.time()
     protos, shards, table = emit_program(funcs, rom.read16, nshards)
     os.makedirs(OUT, exist_ok=True)
@@ -126,11 +139,11 @@ def build(rom, funcs, bad=None, jobs=8, nshards=16, verbose=True):
     def compile_one(src, flags=(), key=''):
         with open(src, 'rb') as fh:
             base = hdr_all if os.path.dirname(src) != OUT else hdr
-            h = hashlib.sha1(base.digest() + key.encode() + fh.read()).hexdigest()[:10]
+            h = hashlib.sha1(base.digest() + key.encode() + opt.encode() + fh.read()).hexdigest()[:10]
         os.makedirs(os.path.join(OUT, 'obj'), exist_ok=True)
         obj = os.path.join(OUT, 'obj', os.path.basename(src)[:-2] + ('_w' if flags else '') + '_%s.o' % h)
         if not os.path.exists(obj):
-            r = subprocess.run(zig_cc() + ['-c', '-O1', '-w', '-I', RUNTIME, '-I', OUT,
+            r = subprocess.run(zig_cc() + ['-c', opt, '-w', '-I', RUNTIME, '-I', OUT,
                                            '-I', os.path.join(ROOT, 'hw')] + list(flags) +
                                [src, '-o', obj], capture_output=True, text=True)
             if r.returncode:
@@ -153,15 +166,15 @@ def build(rom, funcs, bad=None, jobs=8, nshards=16, verbose=True):
     return exe
 
 
-SDL_DIR = os.environ.get('SDL2_DIR', 'C:/libs/SDL2-2.32.2/x86_64-w64-mingw32')
 
 
 def build_window(objs, compile_one):
     """kirby.exe = o mesmo programa + janela SDL2 (hw/window_sdl.c). Precisa do SDL2 devel
     MinGW (SDL2_DIR). Sem SDL2 so ignora; rt_boot.exe continua valido."""
-    inc = os.path.join(SDL_DIR, 'include', 'SDL2')
-    if not os.path.isdir(inc):
+    SDL_DIR = toolchain.find_sdl()
+    if not SDL_DIR:
         return None
+    inc = os.path.join(SDL_DIR, 'include', 'SDL2')
     flags = ['-DRT_WINDOW', '-I', inc]
     w = [compile_one(os.path.join(RUNTIME, 'rt_window.c'), flags, 'win'),
          compile_one(os.path.join(ROOT, 'hw', 'window_sdl.c'), flags, 'win'),
@@ -207,7 +220,7 @@ def iterate(rom_path, csv_path, jobs=8, max_iter=40, verbose=True, boot_args=())
     if os.path.exists(extra_csv):
         with open(extra_csv) as fh:
             extras = [l.strip().split(',') for l in fh if l.strip()]
-    m4a = os.path.join(ROOT, 'build', 'indirect', 'm4a_handlers.csv')   # Riven: handlers do M4A
+    m4a = os.path.join(os.path.dirname(os.path.dirname(csv_path)), 'indirect', 'm4a_handlers.csv')
     if os.path.exists(m4a):
         with open(m4a) as fh:
             for row in csv.DictReader(fh):
@@ -282,10 +295,25 @@ def iterate(rom_path, csv_path, jobs=8, max_iter=40, verbose=True, boot_args=())
     return rc, out, err, overlays
 
 
+def _sha1(path):
+    try:
+        with open(path, 'rb') as f:
+            return hashlib.sha1(f.read()).hexdigest()
+    except OSError:
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--rom', default=os.path.join(ROOT, 'baserom.gba'))
-    ap.add_argument('--functions', default=os.path.join(ROOT, 'build', 'analysis', 'functions.csv'))
+    ap.add_argument('--rom', default=None, help='ROM (padrao: baserom.gba no cwd/launcher/raiz)')
+    ap.add_argument('--functions', default=None,
+                    help='functions.csv (padrao: <out>/analysis, depois <raiz>/build/analysis)')
+    ap.add_argument('--out', default=None, help='pasta de saida/cache (padrao: ver toolchain.py)')
+    ap.add_argument('--opt', default=None, help='otimizacao do C gerado (-Os padrao; -O1, -O0)')
+    ap.add_argument('--shards', type=int, default=None, help='numero de shards (padrao 48)')
+    ap.add_argument('--print-paths', action='store_true', help='mostra zig/SDL2/saida e sai')
+    ap.add_argument('--interp-only', action='store_true',
+                    help='so runtime + interpretador (sem recompilar o jogo): compila em segundos')
     ap.add_argument('--jobs', type=int, default=8)
     ap.add_argument('--timeout', type=int, default=120, help='watchdog do runtime (s)')
     ap.add_argument('--frames', type=int, default=0, help='roda N quadros (0 = para na 1a espera)')
@@ -299,7 +327,51 @@ def main():
     ap.add_argument('--window', nargs='?', const=3, type=int, metavar='ESCALA',
                     help='abre kirby.exe com janela SDL2 (escala 1-6)')
     a = ap.parse_args()
-    frames_dir = os.path.join(ROOT, 'build', 'recomp', 'frames')
+    global OPT, NSHARDS
+    if a.opt:
+        OPT = a.opt
+    if a.shards:
+        NSHARDS = a.shards
+    a.rom = toolchain.find_rom(a.rom)
+    if a.out:
+        set_out(a.out)
+    else:
+        set_out(toolchain.default_out(_sha1(a.rom)) if not os.environ.get('KIRBY_OUT') else OUT)
+    if not a.functions:
+        for cand in (os.path.join(OUT, 'analysis', 'functions.csv'),
+                     os.path.join(ROOT, 'build', 'analysis', 'functions.csv')):
+            if os.path.exists(cand):
+                a.functions = cand
+                break
+        else:
+            a.functions = os.path.join(OUT, 'analysis', 'functions.csv')
+    if a.print_paths:
+        print('zig :', toolchain.find_zig_cmd())
+        print('sdl2:', toolchain.find_sdl())
+        print('out :', OUT)
+        print('rom :', a.rom)
+        print('map :', a.functions)
+        return 0
+    if a.interp_only:
+        # executavel que roda TODO o jogo no interpretador (tabela vazia); nada do jogo compilado
+        import time as _t
+        set_out(os.path.join(OUT, 'interp'))
+        t0 = _t.time()
+        exe = build(RamRom(open(a.rom, 'rb').read()), [], None, a.jobs, nshards=1, verbose=False)
+        print('interp-only compilado em %.1fs: %s' % (_t.time() - t0, exe))
+        kexe = os.path.join(OUT, 'kirby.exe' if os.name == 'nt' else 'kirby')
+        if a.window and os.path.exists(kexe):
+            cmd = [kexe, a.rom, '--window', str(a.window)]
+            if a.sav:
+                cmd += ['--sav', a.sav]
+            return subprocess.run(cmd).returncode
+        if a.frames:
+            cmd = [exe, a.rom, '--frames', str(a.frames), '--bench', '--sav', a.sav or 'none']
+            if a.keys:
+                cmd += ['--keys', a.keys]
+            return subprocess.run(cmd).returncode
+        return 0
+    frames_dir = os.path.join(OUT, 'frames')
     os.makedirs(frames_dir, exist_ok=True)
     args = ['--frames-dir', frames_dir, '--timeout', str(a.timeout), '--unresolved', os.path.join(OUT, 'unresolved.log'),
             '--ppm', os.path.join(OUT, 'last_frame.ppm')]
@@ -328,7 +400,7 @@ def main():
     if a.window and rc == 0:
         exe = os.path.join(OUT, 'kirby.exe' if os.name == 'nt' else 'kirby')
         if not os.path.exists(exe):
-            print('kirby.exe nao foi gerado (SDL2 em %s?)' % SDL_DIR)
+            print('kirby.exe nao foi gerado (SDL2 em %s?)' % toolchain.find_sdl())
             return 1
         cmd = [exe, a.rom, '--window', str(a.window), '--unresolved', os.path.join(OUT, 'unresolved.log')]
         if a.mute:

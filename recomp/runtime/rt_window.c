@@ -15,6 +15,7 @@
 #include "gba_cpu.h"
 #include "gba_rt.h"
 #ifdef RT_WINDOW
+#include <SDL.h>
 #include "window_sdl.h"
 #include "audio_sdl.h"
 #endif
@@ -79,6 +80,20 @@ static void win_hook(uint64_t frame) {
         if (!win_poll()) {
             rt_cpu->stop = RT_STOP_FRAMES; /* usuario fechou: o save e gravado no atexit */
             return;
+        }
+        {   /* F11: alterna tela cheia (borda de subida) */
+            static int f11_prev;
+            const Uint8 *ks = SDL_GetKeyboardState(NULL);
+            int f11 = ks && ks[SDL_SCANCODE_F11];
+            if (f11 && !f11_prev) {
+                SDL_Window *wnd = SDL_GetWindowFromID(1);
+                if (wnd) {
+                    Uint32 fl = SDL_GetWindowFlags(wnd);
+                    SDL_SetWindowFullscreen(wnd, (fl & SDL_WINDOW_FULLSCREEN_DESKTOP) ? 0
+                                                    : SDL_WINDOW_FULLSCREEN_DESKTOP);
+                }
+            }
+            f11_prev = f11;
         }
         hw_set_keys(win_keys());
         const uint32_t *fb = hw_get_framebuffer();

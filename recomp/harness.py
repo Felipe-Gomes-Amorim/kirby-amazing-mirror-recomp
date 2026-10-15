@@ -54,7 +54,8 @@ class Rom:
 
 # ------------------------------------------------------------ build do C
 def zig_cc():
-    return [sys.executable, '-m', 'ziglang', 'cc']
+    from .toolchain import find_zig_cmd
+    return find_zig_cmd()
 
 
 def build_lib(c_source, outdir):
