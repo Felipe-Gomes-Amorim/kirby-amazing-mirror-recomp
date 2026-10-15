@@ -1853,3 +1853,12 @@ Feedback com capturas (tela cheia 1903x1079 mostrava o jogo em 1440x960 = 6x int
   legenda "1X PREVIEW (UI AT 2X)" (decisao do usuario); fullscreen aplica ao launcher.
 - **Select ROM** so aparece quando nao ha ROM carregada; com ROM mostra apenas "ROM: <nome> OK".
 - Donos: Gwen (UI + `config_ini`), Nasus (`kirby.exe` usa o MESMO parser e o modo de escala), Poppy (QA).
+
+### Fases 2 e 3 (editar entradas): decisoes do usuario (Riven)
+- **Um unico controle** (o primeiro disponivel; se desconectar, passa ao seguinte). Sem multiplayer.
+- **Analogico utilizavel**: o analogico esquerdo age como direcional (`stick_as_dpad=1`, padrao ligado), com
+  **zona morta ajustavel** (`deadzone`, 0-32767, padrao 8000). Na aba Controller: checkbox "Left stick as D-pad",
+  slider "Deadzone" e um **indicador ao vivo** da posicao do analogico (ponto dentro de um circulo com a zona morta
+  desenhada) para o usuario calibrar. 8 direcoes (diagonais pelas combinacoes), histerese para nao oscilar na borda.
+- Teclas reservadas (Esc, F11, F1) nao sao remapeaveis; troca ao detectar conflito; Reset por aba.
+- Desenho do controle: vetorial proprio (corpo, L/R, cruzeta, A/B, Select/Start), sem assets da Nintendo.
