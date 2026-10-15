@@ -26,8 +26,8 @@ BASE = os.path.join(os.environ.get('LOCALAPPDATA') or os.path.expanduser('~'), '
 WORK = os.path.join(BASE, 'work')
 LOG = os.path.join(BASE, 'launcher.log')
 # (tag printed by tools/build_all.py, label, weight in percent)
-STEPS = [('1/5', 'Analisando a ROM', 5), ('2/5', 'Ramos indiretos', 2), ('3/5', 'Confianca das funcoes', 2),
-         ('4/5', 'Analisando (2a passada)', 5), ('5/5', 'Compilando o jogo', 86)]
+STEPS = [('1/5', 'Analyzing the ROM', 5), ('2/5', 'Indirect branches', 2), ('3/5', 'Function confidence', 2),
+         ('4/5', 'Analyzing (second pass)', 5), ('5/5', 'Compiling the game', 86)]
 CONSOLE = False
 
 
@@ -40,7 +40,7 @@ def log(msg):
 
 
 def message(title, text, error=False):
-    log(('ERRO: ' if error else '') + title + ': ' + text.replace('\n', ' | '))
+    log(('ERROR: ' if error else '') + title + ': ' + text.replace('\n', ' | '))
     if CONSOLE:
         return
     try:
@@ -69,10 +69,10 @@ def pick_rom():
     buf = ctypes.create_unicode_buffer(1024)
     o = OFN()
     o.lStructSize = ctypes.sizeof(OFN)
-    o.lpstrFilter = 'GBA ROM (*.gba)\0*.gba\0Todos os arquivos\0*.*\0\0'
+    o.lpstrFilter = 'GBA ROM (*.gba)\0*.gba\0All files\0*.*\0\0'
     o.lpstrFile = ctypes.cast(buf, wintypes.LPWSTR)
     o.nMaxFile = 1024
-    o.lpstrTitle = 'Escolha a ROM de Kirby & The Amazing Mirror (USA)'
+    o.lpstrTitle = 'Choose your Kirby & The Amazing Mirror (USA) ROM'
     o.Flags = 0x00001000 | 0x00000800 | 0x00080000      # FILEMUSTEXIST | PATHMUSTEXIST | EXPLORER
     return buf.value if ctypes.windll.comdlg32.GetOpenFileNameW(ctypes.byref(o)) else None
 
@@ -119,7 +119,7 @@ def stage_sources(stamp):
     mark = os.path.join(WORK, '.stamp')
     if os.path.exists(mark) and open(mark).read() == stamp:
         return
-    log('preparando area de trabalho em ' + WORK)
+    log('preparing work area at ' + WORK)
     for sub in ('recomp', 'hw', 'tools'):
         dst = os.path.join(WORK, sub)
         if os.path.exists(dst):
@@ -145,7 +145,7 @@ class UI:
                 if self.dll.kui_open(b'Kirby Recomp') != 0:
                     self.dll = None
             except OSError as e:
-                log('janela de progresso indisponivel: %s' % e)
+                log('progress window unavailable: %s' % e)
                 self.dll = None
 
     def update(self, pct, text):
@@ -170,7 +170,7 @@ def cancel_confirmed():
     try:
         # MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_TOPMOST ; IDYES == 6
         return ctypes.windll.user32.MessageBoxW(
-            None, 'Cancelar a construcao do jogo?\n\nSe voce nao fechou a janela de progresso, escolha Nao.',
+            None, 'Cancel building the game?\n\nIf you did not close the progress window, choose No.',
             'Kirby Recomp', 0x00000004 | 0x00000020 | 0x00000100 | 0x00040000) == 6
     except Exception:
         return False
@@ -227,7 +227,7 @@ def build(rom, out_dir, stamp, ui):
         mm, ss = divmod(int(time.time() - t0), 60)
         if not ui.update(pct, '%s %s  (%d:%02d)' % (STEPS[cur][0], name, mm, ss)):
             # the window reported "closed": never cancel silently, ask first (and keep going on "No")
-            log('janela de progresso reportou fechamento (%d:%02d); pedindo confirmacao' % (mm, ss))
+            log('progress window reported a close event (%d:%02d); asking for confirmation' % (mm, ss))
             if cancel_confirmed():
                 p.kill()
                 return False, ['cancelado']
@@ -283,10 +283,10 @@ def build_interp(rom, out_dir, ui=None):
         el = time.time() - t0
         pct = 5 + 90 * (1 - 1 / (1 + el / 25.0))            # smooth, never reaches 100%
         if ui is not None:
-            ui.update(pct, 'Preparando o modo rapido (%d s)' % el)
+            ui.update(pct, 'Preparing fast mode (%d s)' % el)
         time.sleep(0.2)
     time.sleep(0.2)
-    log('modo rapido: %.0fs rc=%d' % (time.time() - t0, p.returncode))
+    log('fast mode build: %.0fs rc=%d' % (time.time() - t0, p.returncode))
     if p.returncode or not os.path.exists(exe):
         log(''.join(out)[-800:].replace(chr(10), ' | '))
         return None
@@ -305,7 +305,7 @@ def background_build_main(rom, stamp):
         f.write(str(os.getpid()))
     jobs = max(2, (os.cpu_count() or 4) - 2)             # leave cores for the game
     cmd = [sys.executable, os.path.join(WORK, 'tools', 'build_all.py'), rom, '--jobs', str(jobs)]
-    log('construcao completa em segundo plano (%d jobs)' % jobs)
+    log('full build in the background (%d jobs)' % jobs)
     with open(os.path.join(BASE, 'build.log'), 'w', encoding='utf-8') as logf:
         rc = subprocess.run(cmd, cwd=WORK, env=tool_env(), stdout=logf, stderr=subprocess.STDOUT,
                             creationflags=0x08000000).returncode
@@ -316,9 +316,9 @@ def background_build_main(rom, stamp):
     if rc == 0 and os.path.exists(os.path.join(out_dir, 'kirby.exe')):
         with open(os.path.join(out_dir, 'build.ok'), 'w') as f:
             f.write(stamp)
-        log('construcao completa pronta; a proxima abertura usa o jogo compilado')
+        log('full build ready; the next start uses the compiled game')
     else:
-        log('construcao completa falhou (rc=%s); veja build.log' % rc)
+        log('full build failed (rc=%s); see build.log' % rc)
     return rc
 
 
@@ -329,7 +329,7 @@ def start_background_build(rom, out_dir, stamp):
         try:
             pid = open(lock).read().strip()
             if pid_alive(pid):
-                log('ja existe uma construcao em andamento (pid %s)' % pid)
+                log('a build is already running (pid %s)' % pid)
                 return False
         except OSError:
             pass
@@ -344,14 +344,14 @@ def play_while_building(rom, out_dir, stamp, flags):
     """First run: open the game NOW through the interpreter, finish the compiled build in the background.
     Returns an exit code, or None to fall back to the blocking build."""
     ui = UI()
-    ui.update(5, 'Preparando o modo rapido...')
+    ui.update(5, 'Preparing fast mode...')
     exe_i = build_interp(rom, out_dir, ui)
-    ui.update(100, 'Abrindo o jogo...')
+    ui.update(100, 'Starting the game...')
     ui.close()
     if not exe_i:
         return None
     start_background_build(rom, out_dir, stamp)
-    log('iniciando (interpretador) ' + exe_i)
+    log('starting (interpreter) ' + exe_i)
     return subprocess.run([exe_i, rom], cwd=os.path.dirname(exe_i)).returncode
 
 
@@ -370,11 +370,11 @@ def main(argv):
         return 1
     rom = os.path.abspath(rom)
     if not os.path.isfile(rom):
-        message('Kirby Recomp', 'Arquivo nao encontrado:\n' + rom, True)
+        message('Kirby Recomp', 'File not found:\n' + rom, True)
         return 1
     sha = sha1_of(rom)
     if sha not in SUPPORTED:
-        message('Kirby Recomp', 'Esta ROM nao e suportada.\n\nSHA-1: %s\n\nSuportada: %s (SHA-1 %s).'
+        message('Kirby Recomp', 'This ROM is not supported.\n\nSHA-1: %s\n\nSupported: %s (SHA-1 %s).'
                 % (sha, ', '.join(SUPPORTED.values()), next(iter(SUPPORTED))), True)
         return 1
     os.makedirs(BASE, exist_ok=True)
@@ -398,21 +398,21 @@ def main(argv):
             code = play_while_building(rom, out_dir, stamp, flags)
             if code is not None:
                 return code
-            log('modo rapido indisponivel; construindo antes de abrir')
+            log('fast mode unavailable; building before starting')
         ui = UI()
-        ui.update(0, 'Preparando... (so na primeira vez; leva alguns minutos)')
+        ui.update(0, 'Preparing... (first run only; takes a few minutes)')
         good, tail = build(rom, out_dir, stamp, ui)
         ui.close()
         if not good or not os.path.exists(exe):
             if tail != ['cancelado']:
-                message('Kirby Recomp - falha na construcao',
-                        'A construcao falhou.\n\nUltimas linhas:\n' + '\n'.join(tail[-8:]) +
-                        '\n\nLog completo: ' + os.path.join(BASE, 'build.log'), True)
+                message('Kirby Recomp - build failed',
+                        'The build failed.\n\nLast lines:\n' + '\n'.join(tail[-8:]) +
+                        '\n\nFull log: ' + os.path.join(BASE, 'build.log'), True)
             return 2
     if '--build-only' in flags:
-        log('pronto: ' + exe)
+        log('ready: ' + exe)
         return 0
-    log('iniciando ' + exe)
+    log('starting ' + exe)
     return subprocess.run([exe, rom], cwd=out_dir).returncode
 
 
@@ -423,5 +423,5 @@ if __name__ == '__main__':
         raise
     except Exception:
         import traceback
-        message('Kirby Recomp - erro inesperado', traceback.format_exc()[-1500:], True)
+        message('Kirby Recomp - unexpected error', traceback.format_exc()[-1500:], True)
         sys.exit(3)

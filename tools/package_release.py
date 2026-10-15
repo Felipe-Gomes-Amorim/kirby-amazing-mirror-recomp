@@ -211,19 +211,14 @@ This package contains no ROM, BIOS, or any code or data derived from the game.
 README = """Kirby & The Amazing Mirror - Recomp (unofficial)
 =================================================
 
-PT-BR
-  1. Tenha a SUA ROM (USA, game code B8KE): Kirby & The Amazing Mirror (USA).gba
-  2. Arraste a ROM sobre KirbyRecomp.exe (ou de duplo clique e escolha o arquivo).
-  3. Na primeira vez ele constroi o jogo no seu computador (alguns minutos). Depois abre direto.
-  O jogo gerado fica em %LOCALAPPDATA%\\KirbyRecomp. Nada do jogo e distribuido neste pacote.
-  Controles: Z=A  X=B  Enter=Start  Backspace=Select  setas  A/S=L/R  F11=tela cheia  Esc=sair.
-  Problemas: veja %LOCALAPPDATA%\\KirbyRecomp\\launcher.log e build.log.
-
-EN
-  1. Get YOUR OWN ROM (USA, game code B8KE).
+  1. Get YOUR OWN ROM (USA release, game code B8KE).
   2. Drag the ROM onto KirbyRecomp.exe (or double-click it and pick the file).
-  3. The first run builds the game on your machine (a few minutes); later runs start immediately.
-  The generated game lives in %LOCALAPPDATA%\\KirbyRecomp. No game data is shipped in this package.
+  3. The game starts within seconds. In the background it builds the fully recompiled version
+     (a few minutes); the next start uses it and opens instantly.
+
+The generated game lives in %LOCALAPPDATA%\KirbyRecomp. No game data is shipped in this package.
+Default controls: X = A, Z = B, Enter = Start, Backspace = Select, arrow keys, A / S = L / R,
+F11 = fullscreen, Esc = quit. If something goes wrong see %LOCALAPPDATA%\KirbyRecomp\launcher.log and build.log.
 
 Unofficial, non-commercial; not affiliated with Nintendo or HAL Laboratory.
 Windows may warn about an unsigned program: the launcher runs a compiler and the program it produces.

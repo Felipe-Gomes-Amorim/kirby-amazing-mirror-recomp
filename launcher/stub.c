@@ -21,7 +21,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE p, LPWSTR cmd, int show) {
     ZeroMemory(&si, sizeof si);
     si.cb = sizeof si;
     if (!CreateProcessW(NULL, line, NULL, NULL, FALSE, console ? 0 : CREATE_NO_WINDOW, NULL, dir, &si, &pi)) {
-        MessageBoxW(NULL, L"Nao foi possivel iniciar o Python embutido (pasta 'python' ausente?).",
+        MessageBoxW(NULL, L"Could not start the bundled Python (is the 'python' folder missing, or still being scanned by your antivirus?).",
                     L"Kirby Recomp", MB_ICONERROR);
         return 1;
     }

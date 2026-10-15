@@ -1533,3 +1533,79 @@ abaixo do normal, `cpu-2` jobs, `build.lock` com o PID). Ela sobrevive ao fechar
 Bug achado pelo usuario: a janela de progresso aparecia como "Nao esta respondendo" porque a construcao do
 interpretador era chamada bloqueante (sem bombear eventos). Corrigido (`build_interp` com Popen + `ui.update`
 a cada 0,2 s). **Nao feito:** trocar do interpretado para o compilado na mesma sessao (DLL no mesmo processo).
+
+## Launcher completo: tela de configuracao e botao Play (Riven) - plano e contrato (fase 0)
+Decisoes do usuario: (1) a tela do launcher aparece **sempre** (com opcao "abrir direto"; Shift forca);
+(2) botoes do controle mapeados por **posicao fisica**, nao por letra; (3) **toda a interface em ingles**,
+incluindo os textos de progresso da construcao; (4) sem gerenciar o save por enquanto; (5) **F1** volta ao
+launcher durante o jogo; Esc sai; F11 alterna tela cheia. A tela de controles deve lembrar a do yuzu:
+**contorno do controle com os botoes** (desenho proprio, vetorial, em SDL; nenhum asset da Nintendo).
+
+### Layout da tela (estilo retro, SDL, na DLL do launcher)
+```
+ KIRBY RECOMP                                         [ROM: ...(USA) ok]
+ Status: Compiled version ready | Building 63% (you can play now) | Preparing...
+ [Video]  Window size [1x 2x 3x 4x 5x 6x]  Fullscreen [ ]  Integer scaling [x]
+ [Audio]  Volume [=====-----]  Mute [ ]
+ [Input]  Keyboard... | Controller... | Reset to defaults
+                          [ PLAY ]          [ Quit ]
+```
+Tela de controles (mesma area, abas Keyboard / Controller):
+```
+        [L]_______________________________[R]          <- ombros
+   +--------------------------------------------+
+   |   (D-pad)      +----------------+   (B) (A)|    <- GBA: B a esquerda e abaixo de A
+   |    + cross     |   240x160      |           |
+   |                +----------------+           |
+   |           (Select) (Start)                  |
+   +--------------------------------------------+
+ clique/Enter num botao -> "Press a key/button for A..." (Esc cancela, conflito pede troca)
+```
+Desenho: corpo arredondado (retangulo com cantos), cruzeta, dois circulos A/B, pilulas Select/Start, dois
+ombros L/R. Se o vetor ficar feio, plano B: os mesmos botoes na MESMA posicao, sem corpo.
+
+### `kirby.ini` v2 (uma unica fonte; launcher e `kirby.exe` leem o mesmo)
+```
+[video]       scale=3   fullscreen=0   integer_scale=1   vsync=0
+[audio]       volume=100   mute=0
+[keyboard]    a=X  b=Z  l=A  r=S  start=Return  select=Backspace  up=Up  down=Down  left=Left  right=Right
+[controller]  a=b  b=a  l=leftshoulder  r=rightshoulder  start=start  select=back
+              up=dpup  down=dpdown  left=dpleft  right=dpright  stick_as_dpad=1  deadzone=8000
+[launcher]    show=1   language=en
+```
+- Nomes de tecla = nomes do SDL (`SDL_GetKeyName`/`SDL_GetScancodeFromName`); botoes do controle = nomes de
+  `SDL_GameControllerGetStringForButton` (`a,b,x,y,leftshoulder,start,back,dpup...`).
+- **Por posicao** (SDL_GameController usa a posicao Xbox): GBA A -> botao leste (`b` do SDL); GBA B -> sul (`a`).
+  No Switch Pro isso cai nos botoes rotulados A e B; no teclado a posicao vira X = A, Z = B (como o mGBA);
+  hoje o projeto usa Z = A, X = B, entao muda.
+- **Reservadas** (nao remapeaveis): Esc (sair), F11 (tela cheia), F1 (voltar ao launcher).
+
+### Contrato launcher <-> DLL de UI (`kirby_ui.dll`, escrita em C por Gwen)
+```
+typedef struct { int state; int percent; char text[96]; char rom[260]; int rom_ok; } KlStatus;
+/* state: 0 none, 1 preparing fast mode (Play disabled), 2 fast mode ready + full build running,
+          3 compiled ready, 4 error */
+typedef void (*KlPoll)(KlStatus *out);        /* called by the UI loop ~10x/s, from the UI thread   */
+int kl_run(const char *ini_path, KlPoll poll);/* modal loop; returns KL_PLAY=1 | KL_QUIT=0 | KL_PICK_ROM=2 */
+```
+O launcher (Python, ctypes) chama `kl_run`; em `KL_PLAY` inicia o melhor `kirby.exe` (compilado se pronto,
+senao interpretador) e **volta a `kl_run` se o jogo sair com codigo 77** (F1). A janela de progresso atual
+deixa de existir: o progresso vira o campo `percent/text` da propria tela.
+
+### Entrada unificada (`hw_input`, Gwen/Nasus)
+Teclado + controle -> bits de `KEYINPUT`; hot-plug (`SDL_CONTROLLERDEVICEADDED/REMOVED`), zona morta, analogico
+como direcional opcional, captura de tecla/botao para o remapeamento; mesma configuracao no launcher e no
+`kirby.exe`. `kirby.exe` sai com **codigo 77** ao apertar F1.
+
+### Fases, donos e criterio de pronto
+| Fase | Entrega | Dono | Pronto quando |
+|---|---|---|---|
+| 0 | este contrato + `kirby.ini` v2 (leitura/escrita/validacao) | Gwen + Riven | teste de round-trip do ini |
+| 1 | tela com status, video, audio, **Play/Quit**; ingles; progresso embutido | Gwen (UI) + Riven (fluxo) | build limpo abre a tela, Play inicia o jogo, F1 volta |
+| 2 | remapeamento de teclado com desenho do controle | Gwen | remapear e persistir; conflito tratado |
+| 3 | **controle**: leitura, mapeamento por posicao, navegacao da tela pelo controle, `kirby.exe` o usa | Gwen + Nasus | jogar e navegar so com o controle |
+| 4 | acabamento: acentos desnecessarios (so ingles), "show launcher", aviso de teclas reservadas, Reset | todos | checklist de QA |
+| QA | testes automatizados (SDL `dummy`, eventos simulados), roteiro manual | Poppy | suite em `tests/` |
+**Riscos:** fonte 5x7 sem acentos (nao e problema em ingles); controles que o SDL nao reconhece (captura
+manual); DPI/escala do Windows; foco da janela; fronteira Python<->C (a UI roda o laco, Python so responde ao
+`poll`); `kirby.exe` como app grafico nao imprime no console (logs vao para arquivo).
