@@ -24,6 +24,7 @@ void rt_input_init(void);
 void rt_input_close(void);
 #endif
 int rt_cfg_get(int which);
+int rt_scaling_override = -1;   /* --scaling integer|fit|stretch (0/1/2); -1 = kirby.ini */
 int rt_exit_code;   /* 0 normal; 77 = F1 (voltar ao launcher) */
 
 int hw_audio_read(int16_t *lr, int frames);
@@ -62,6 +63,77 @@ static void sleep_ms(unsigned ms) {
     usleep(ms * 1000);
 #endif
 }
+
+#ifdef RT_WINDOW
+/* Modos de escala ([video] scaling): 0 integer = multiplos inteiros (bordas nos dois eixos se nao
+ * couber exato); 1 fit = escala fracionaria preservando 3:2 (bordas so nas laterais num 16:9);
+ * 2 stretch = preenche a janela inteira (distorce). window_sdl.c usa SetLogicalSize(240,160), que
+ * ja da o "fit"; integer liga SetIntegerScale; stretch remove o tamanho logico. */
+void rt_apply_scaling(SDL_Renderer *r, int mode) {
+    if (mode == 2) {
+        SDL_RenderSetIntegerScale(r, SDL_FALSE);
+        SDL_RenderSetLogicalSize(r, 0, 0);
+    } else {
+        SDL_RenderSetLogicalSize(r, 240, 160);
+        SDL_RenderSetIntegerScale(r, mode == 0 ? SDL_TRUE : SDL_FALSE);
+    }
+}
+
+/* destino do quadro na janela W x H para cada modo (para a tabela de teste) */
+static void dest_rect(SDL_Renderer *r, int *x, int *y, int *w, int *h) {
+    int ow, oh;
+    SDL_GetRendererOutputSize(r, &ow, &oh);
+    int lw, lh;
+    SDL_RenderGetLogicalSize(r, &lw, &lh);
+    if (lw == 0 || lh == 0) { *x = 0; *y = 0; *w = ow; *h = oh; return; }
+    int x1, y1, x2, y2;
+    SDL_RenderLogicalToWindow(r, 0, 0, &x1, &y1);
+    SDL_RenderLogicalToWindow(r, (float)lw, (float)lh, &x2, &y2);
+    *x = x1; *y = y1; *w = x2 - x1; *h = y2 - y1;
+}
+
+int rt_selftest_video(void) {
+    static const int sizes[2][2] = {{1920, 1080}, {1366, 768}};
+    static const char *names[3] = {"integer", "fit", "stretch"};
+    SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);
+    if (win_open_ex("selftest", 1, 0) < 0) {
+        fprintf(stderr, "[selftest-video] could not open a dummy window\n");
+        return 1;
+    }
+    SDL_Window *wnd = SDL_GetWindowFromID(1);
+    SDL_Renderer *r = wnd ? SDL_GetRenderer(wnd) : NULL;
+    if (!r) { fprintf(stderr, "[selftest-video] no renderer\n"); return 1; }
+    int bad = 0;
+    for (int si = 0; si < 2; si++) {
+        SDL_SetWindowSize(wnd, sizes[si][0], sizes[si][1]);
+        for (int m = 0; m < 3; m++) {
+            rt_apply_scaling(r, m);
+            int x, y, w, h;
+            dest_rect(r, &x, &y, &w, &h);
+            /* esperado */
+            int W = sizes[si][0], H = sizes[si][1], ex, ey, ew, eh;
+            if (m == 2) { ex = 0; ey = 0; ew = W; eh = H; }
+            else {
+                double s = (double)W / 240 < (double)H / 160 ? (double)W / 240 : (double)H / 160;
+                if (m == 0) s = (int)s;
+                ew = (int)(240 * s + 0.5); eh = (int)(160 * s + 0.5);
+                ex = (W - ew) / 2; ey = (H - eh) / 2;
+            }
+            int ok = abs(x - ex) <= 1 && abs(y - ey) <= 1 && abs(w - ew) <= 1 && abs(h - eh) <= 1;
+            printf("[video] %dx%d %-7s -> dest x=%d y=%d w=%d h=%d  (expected %d,%d %dx%d) %s\n", W, H,
+                   names[m], x, y, w, h, ex, ey, ew, eh, ok ? "OK" : "MISMATCH");
+            bad += !ok;
+        }
+    }
+    win_close();
+    return bad;
+}
+#else
+int rt_selftest_video(void) {
+    fprintf(stderr, "this executable was built without a window (RT_WINDOW)\n");
+    return 1;
+}
+#endif
 
 static int paced, use_window;
 static double next_us;
@@ -187,7 +259,7 @@ void rt_window_install(int window, int scale, int pace) {
     if (window) {   /* kirby.ini: tela cheia inicial e escala inteira */
         SDL_Window *wnd = SDL_GetWindowFromID(1);
         SDL_Renderer *rr = wnd ? SDL_GetRenderer(wnd) : NULL;
-        if (rr) SDL_RenderSetIntegerScale(rr, rt_cfg_get(2) ? SDL_TRUE : SDL_FALSE);
+        if (rr) rt_apply_scaling(rr, rt_scaling_override >= 0 ? rt_scaling_override : rt_cfg_get(6));
         if (wnd && rt_cfg_get(1)) SDL_SetWindowFullscreen(wnd, SDL_WINDOW_FULLSCREEN_DESKTOP);
         rt_input_init();
     }

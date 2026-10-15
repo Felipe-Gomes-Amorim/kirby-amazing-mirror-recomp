@@ -176,6 +176,15 @@ int main(int argc, char **argv) {
             if (i + 1 < argc && argv[i + 1][0] >= '1' && argv[i + 1][0] <= '9') { scale = atoi(argv[++i]); scale_explicit = 1; }
         }
         else if (!strcmp(argv[i], "--bench")) bench = 1;
+        else if (!strcmp(argv[i], "--scaling") && i + 1 < argc) {   /* integer | fit | stretch */
+            extern int rt_scaling_override;
+            const char *v = argv[++i];
+            rt_scaling_override = !strcmp(v, "integer") ? 0 : !strcmp(v, "stretch") ? 2 : 1;
+        }
+        else if (!strcmp(argv[i], "--selftest-video")) {
+            extern int rt_selftest_video(void);
+            return rt_selftest_video() ? 1 : 0;
+        }
         else if (!strcmp(argv[i], "--ini") && i + 1 < argc) ini_arg = argv[++i];
         else if (!strcmp(argv[i], "--selftest-sram")) selftest = 1;
         else if (!strcmp(argv[i], "--selftest-interp")) selftest = 2;

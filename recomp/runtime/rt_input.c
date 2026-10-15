@@ -19,92 +19,56 @@
 #include <SDL.h>
 #endif
 
+/* parser compartilhado com a UI do launcher (hw/config_ini.c, sem SDL): uma TU so, para que o
+ * harness de testes que compila apenas este arquivo continue funcionando */
+#include "../../hw/config_ini.c"
+
 enum { B_A, B_B, B_SELECT, B_START, B_RIGHT, B_LEFT, B_UP, B_DOWN, B_R, B_L, NBTN };
-static const char *BTN_KEY[NBTN] = {"a", "b", "select", "start", "right", "left", "up", "down", "r", "l"};
+enum { SCALING_INTEGER, SCALING_FIT, SCALING_STRETCH };
+/* ordem GBA deste arquivo (KEYINPUT) -> indice CFG_BTN_* do config_ini.h */
+static const int CFG_IDX[NBTN] = {CFG_BTN_A, CFG_BTN_B, CFG_BTN_SELECT, CFG_BTN_START, CFG_BTN_RIGHT,
+                                  CFG_BTN_LEFT, CFG_BTN_UP, CFG_BTN_DOWN, CFG_BTN_R, CFG_BTN_L};
 
 typedef struct {
     int scale, fullscreen, integer_scale, vsync, volume, mute, stick_as_dpad, deadzone;
     char kb[NBTN][32];     /* nomes SDL de teclas */
     char pad[NBTN][32];    /* nomes SDL de botoes de controle */
+    int scaling;           /* SCALING_*: [video] scaling=integer|fit|stretch (padrao fit) */
 } RtCfg;
 
 RtCfg rt_cfg;
 
 void rt_cfg_defaults(void) {
+    KirbyConfig c;
+    cfg_defaults(&c);
     memset(&rt_cfg, 0, sizeof rt_cfg);
-    rt_cfg.scale = 3;
-    rt_cfg.integer_scale = 1;
-    rt_cfg.volume = 100;
-    rt_cfg.stick_as_dpad = 1;
-    rt_cfg.deadzone = 8000;
-    static const char *kb[NBTN] = {"X", "Z", "Backspace", "Return", "Right", "Left", "Up", "Down", "S", "A"};
-    static const char *pad[NBTN] = {"b", "a", "back", "start", "dpright", "dpleft", "dpup", "dpdown",
-                                    "rightshoulder", "leftshoulder"};
+    rt_cfg.scale = c.scale; rt_cfg.fullscreen = c.fullscreen; rt_cfg.integer_scale = c.scaling == CFG_SCALING_INTEGER;
+    rt_cfg.vsync = c.vsync; rt_cfg.volume = c.volume; rt_cfg.mute = c.mute;
+    rt_cfg.stick_as_dpad = c.stick_as_dpad; rt_cfg.deadzone = c.deadzone;
     for (int i = 0; i < NBTN; i++) {
-        snprintf(rt_cfg.kb[i], sizeof rt_cfg.kb[i], "%s", kb[i]);
-        snprintf(rt_cfg.pad[i], sizeof rt_cfg.pad[i], "%s", pad[i]);
+        snprintf(rt_cfg.kb[i], sizeof rt_cfg.kb[i], "%s", c.key[CFG_IDX[i]]);
+        snprintf(rt_cfg.pad[i], sizeof rt_cfg.pad[i], "%s", c.pad[CFG_IDX[i]]);
     }
+    rt_cfg.scaling = c.scaling;   /* CFG_SCALING_*: 0 integer, 1 fit, 2 stretch */
 }
 
-static char *trim(char *s) {
-    while (isspace((unsigned char)*s)) s++;
-    char *e = s + strlen(s);
-    while (e > s && isspace((unsigned char)e[-1])) *--e = 0;
-    return s;
-}
-
-static int to_int(const char *v, int lo, int hi, int def) {
-    char *end;
-    long n = strtol(v, &end, 10);
-    if (end == v || n < lo || n > hi) return def;   /* invalido -> padrao */
-    return (int)n;
-}
-
-/* 0 = lido; 1 = arquivo inexistente (padroes); */
+/* 0 = lido; 1 = arquivo inexistente (padroes); <0 = erro. Sempre validado (cfg_validate). */
 int rt_cfg_load(const char *path) {
+    KirbyConfig c;
+    int rc = cfg_load(path, &c);
     rt_cfg_defaults();
-    FILE *f = path ? fopen(path, "rb") : NULL;
-    if (!f) return 1;
-    char line[256], sect[32] = "";
-    while (fgets(line, sizeof line, f)) {
-        char *c = strpbrk(line, ";#");
-        if (c) *c = 0;
-        char *s = trim(line);
-        if (!*s) continue;
-        if (*s == '[') {
-            char *e = strchr(s, ']');
-            if (e) { *e = 0; snprintf(sect, sizeof sect, "%s", s + 1); }
-            for (char *p = sect; *p; p++) *p = (char)tolower((unsigned char)*p);
-            continue;
-        }
-        char *eq = strchr(s, '=');
-        if (!eq) continue;
-        *eq = 0;
-        char *k = trim(s), *v = trim(eq + 1);
-        for (char *p = k; *p; p++) *p = (char)tolower((unsigned char)*p);
-        int video = !*sect || !strcmp(sect, "video") || !strcmp(sect, "kirby");
-        int audio = !*sect || !strcmp(sect, "audio") || !strcmp(sect, "kirby");
-        if (video && !strcmp(k, "scale")) rt_cfg.scale = to_int(v, 1, 6, 3);
-        else if (video && !strcmp(k, "fullscreen")) rt_cfg.fullscreen = to_int(v, 0, 1, 0);
-        else if (video && !strcmp(k, "integer_scale")) rt_cfg.integer_scale = to_int(v, 0, 1, 1);
-        else if (video && !strcmp(k, "vsync")) rt_cfg.vsync = to_int(v, 0, 1, 0);
-        else if (audio && !strcmp(k, "mute")) rt_cfg.mute = to_int(v, 0, 1, 0);
-        else if (audio && !strcmp(k, "volume")) rt_cfg.volume = to_int(v, 0, 100, 100);
-        else if (!strcmp(sect, "controller") && !strcmp(k, "stick_as_dpad")) rt_cfg.stick_as_dpad = to_int(v, 0, 1, 1);
-        else if (!strcmp(sect, "controller") && !strcmp(k, "deadzone")) rt_cfg.deadzone = to_int(v, 0, 32000, 8000);
-        else if (!strcmp(sect, "keyboard") || !strcmp(sect, "controller")) {
-            for (int i = 0; i < NBTN; i++)
-                if (!strcmp(k, BTN_KEY[i])) {
-                    char *dst = !strcmp(sect, "keyboard") ? rt_cfg.kb[i] : rt_cfg.pad[i];
-                    if (*v) snprintf(dst, 32, "%s", v);
-                }
-        }
+    rt_cfg.scale = c.scale; rt_cfg.fullscreen = c.fullscreen; rt_cfg.integer_scale = c.scaling == CFG_SCALING_INTEGER;
+    rt_cfg.vsync = c.vsync; rt_cfg.volume = c.volume; rt_cfg.mute = c.mute;
+    rt_cfg.stick_as_dpad = c.stick_as_dpad; rt_cfg.deadzone = c.deadzone;
+    for (int i = 0; i < NBTN; i++) {
+        snprintf(rt_cfg.kb[i], sizeof rt_cfg.kb[i], "%s", c.key[CFG_IDX[i]]);
+        snprintf(rt_cfg.pad[i], sizeof rt_cfg.pad[i], "%s", c.pad[CFG_IDX[i]]);
     }
-    fclose(f);
-    return 0;
+    rt_cfg.scaling = c.scaling;
+    return rc;
 }
 
-/* which: 0 scale, 1 fullscreen, 2 integer_scale, 3 vsync, 4 volume, 5 mute */
+/* which: 0 scale, 1 fullscreen, 2 integer_scale, 3 vsync, 4 volume, 5 mute, 6 scaling */
 int rt_cfg_get(int which) {
     switch (which) {
     case 0: return rt_cfg.scale;
@@ -112,6 +76,8 @@ int rt_cfg_get(int which) {
     case 2: return rt_cfg.integer_scale;
     case 3: return rt_cfg.vsync;
     case 4: return rt_cfg.volume;
+    case 6: return rt_cfg.scaling;
+    case 7: rt_cfg.scaling = SCALING_FIT; return 0;   /* nao usado */
     default: return rt_cfg.mute;
     }
 }
@@ -234,10 +200,13 @@ int rt_selftest_ini(void) {
                     "[keyboard]\na=Q # inline\n[controller]\ndeadzone=5000\nstick_as_dpad=0\n",
                     5, 1, 0, 40, 1, "Q", 5000, 0);
     bad += ini_case("valores invalidos -> padrao", "[video]\nscale=9\nfullscreen=x\n[audio]\nvolume=abc\n",
-                    3, 0, 1, 100, 0, "X", 8000, 1);
-    bad += ini_case("v1 solto", "scale=2\nmute=1\nfullscreen=1\n", 2, 1, 1, 100, 1, "X", 8000, 1);
-    bad += ini_case("v1 [kirby]", "[kirby]\nscale=4\nvsync=1\n", 4, 0, 1, 100, 0, "X", 8000, 1);
-    bad += ini_case("vazio / inexistente", "", 3, 0, 1, 100, 0, "X", 8000, 1);
+                    3, 0, 0, 100, 0, "X", 8000, 1);
+    bad += ini_case("v1 solto", "scale=2\nmute=1\nfullscreen=1\n", 2, 1, 0, 100, 1, "X", 8000, 1);
+    bad += ini_case("v1 [kirby]", "[kirby]\nscale=4\nvsync=1\n", 4, 0, 0, 100, 0, "X", 8000, 1);
+    bad += ini_case("vazio / inexistente", "", 3, 0, 0, 100, 0, "X", 8000, 1);
+    bad += ini_case("integer_scale=1 antigo", "[video]\ninteger_scale=1\n", 3, 0, 1, 100, 0, "X", 8000, 1);
+    bad += ini_case("scaling=stretch", "[video]\nscaling=stretch\n", 3, 0, 0, 100, 0, "X", 8000, 1);
+    bad += rt_cfg.scaling != CFG_SCALING_STRETCH;
     rt_cfg_load("nao_existe_kirby.ini");
     bad += rt_cfg.scale != 3;
     fprintf(stderr, "[selftest-ini] %s\n", bad ? "FAILED" : "OK");
