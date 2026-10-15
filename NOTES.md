@@ -46,6 +46,10 @@ janela, teclado, audio PCM+PSG e save. O que resta e precisao e acabamento, nao 
 - [ ] Conferir o som contra uma referencia (mGBA) - so o usuario ouviu, sem comparacao
 - [x] Leitura em 0x100F0D55: origem achada (indice 0xFFFF, comportamento do original; ver secao propria)
 - [x] Interpretador de fallback para codigo em RAM (`recomp/runtime/rt_interp.c`): 0 divergencias vs compilado
+- [x] Construcao do zero: `tools/build_all.py` (ROM -> jogo); caminhos relativos e cache em `%LOCALAPPDATA%\KirbyRecomp\<sha1>`
+- [x] `kirby.exe` sem argumentos: arrastar ROM, duplo clique, F11; interpretador puro a ~6x tempo real
+- [ ] Launcher `KirbyRecomp.exe` (arrastar ROM -> progresso -> jogo) e pacote zip com zig+SDL2
+- [ ] Iniciar interpretando enquanto compila (troca de DLL no mesmo processo; proposta do Nasus)
 - [ ] Oraculo de programa inteiro (testes diferenciais de `bl`/pilha/IRQ)
 - [ ] Precisao de timing por ciclo; multiplayer por cabo fora do escopo
 - [ ] Licenca do repositorio e revisao dos trechos desmontados deste arquivo
@@ -277,11 +281,11 @@ Thumb (`add;ldr;mov pc`, tamanho pelo `cmp #n`) -> varre a ROM por ponteiros par
 `push {..,lr}` perto do codigo conhecido (heuristica, origem `ptr-scan`) -> classifica bytes.
 
 Resultado atual (B8KE v0): header ok (logo, 0x96, checksum), ~607k instrucoes (294 ARM,
-resto Thumb), **5671 funcoes**: 2140 `bl`, 3110 `ptr-scan`, 386 `addr-taken-leaf` (extras do
-Riven, tier A/B), 16 `m4a-jump-table`, 1 `runtime`, 1 `runtime-log`, 6 `bx-const`, 3 `ram-code`, 5 `ram-ptr`, 1 `adr`, 2 `entry`. 146 tabelas de
+resto Thumb), **5675 funcoes**: 2140 `bl`, 3110 `ptr-scan`, 385 `addr-taken-leaf` (extras do
+Riven, tier A/B), 5 `ptr-table`, 16 `m4a-jump-table`, 1 `runtime`, 1 `runtime-log`, 6 `bx-const`, 3 `ram-code`, 5 `ram-ptr`, 1 `adr`, 2 `entry`. 146 tabelas de
 salto (1749 entradas), ~7.4% da ROM e Thumb. Indiretos nao resolvidos: 12 (stubs
 `_call_via_rN` e `bx` soltos; `pop {rN}; bx rN` e retorno). 0 pontos nao decodificam; 4
-conflitos ARM/Thumb (bloco RAM 2, ver abaixo). Confianca: 5252 high, 389 medium, 30 low.
+conflitos ARM/Thumb (bloco RAM 2, ver abaixo). Confianca: 5252 high, 393 medium, 30 low.
 Opcoes: `--extra-functions CSV` (padrao build/indirect/new_functions.csv; `''` desliga),
 `--confidence CSV` (padrao build/indirect/confidence.csv; coluna `confidence`).
 
@@ -381,6 +385,48 @@ funcao do switch (por construcao: sao empilhados com o dono da funcao) e `lo/hi`
 inclusive em funcoes grandes (0x08070164: 276 insns, 0x08070164..0x08070402). Colunas: site,
 table, target, site_function, target_function, kind (`orphan` | `other-function`).
 
+### Construcao do zero, estabilidade, cache e tempo (distribuicao)
+**So a ROM, qualquer pasta, sem `build/` previo:** funciona. Medido numa pasta temporaria com
+apenas `tools/*.py` + `baserom.gba` (analise -> indiretos -> confianca -> analise): 5675 funcoes.
+Os caminhos do analisador sao relativos ao proprio `tools/` (REPO) e a ROM e argumento; extras
+ausentes sao ignorados.
+**Duas passadas sao necessarias e bastam (ponto fixo):** `resolve_indirect.py` e
+`score_functions.py` precisam do mapa da passada 1 e a passada 2 consome o resultado deles
+(`new_functions.csv` + coluna de confianca). Passada 3 e 4 com `--no-cache` geram `map.json`
+byte a byte igual ao da passada 2 (SHA-1 identico). Nao da para ser passada unica sem fundir os
+tres programas; a 2a passada NAO pode reaproveitar a 1a (entradas diferentes), so o cache abaixo.
+**Sementes (`tools/map_seeds.csv`, versionado, so ENDERECOS, nenhum byte do jogo):** o que so a
+execucao revela e a analise estatica nao deriva (hoje: 0x0801870C e 0x0802FC14). Lido primeiro.
+`python tools/analyze_rom.py --export-seeds` regrava o arquivo a partir do que o runtime viu
+(`source=runtime*`). Sem ele a construcao do zero tem 1 funcao a menos que o mapa jogado.
+**`python tools/check_map.py --clean [rom]`:** constroi do zero numa pasta temporaria (copia
+`tools/*.py` + sementes + ROM; sem logs do runtime) e exige igualdade com o baseline: MESMO
+conjunto de funcoes, continuacoes e blocos RAM, mais as invariantes. E o que o launcher roda
+antes de abrir o jogo. `--keep` mantem a pasta; `--update` (sem `--clean`) congela o baseline.
+Se falhar com "faltando = descoberta so em execucao" -> `--export-seeds`.
+`inner_entries` (ponteiros que caem dentro de funcao) saiu de `continuations`: dependia do
+`new_functions.csv` (o Riven filtra na origem os sobrepostos), o que quebrava a igualdade
+mapa-do-zero x mapa-incremental sem mudar nenhuma funcao.
+**Cache por SHA-1:** chave = SHA-1(ROM) + SHA-1(analyze_rom.py) + SHA-1 de cada CSV de entrada
+(extras, confianca, logs) + flags. Em `build/cache/<chave>/` (`--cache-dir`, `--no-cache`);
+acerto copia os 11 arquivos de saida em ~0,1 s. Nao usado com `--merge-runtime`/`--export-seeds`.
+Mudar o analisador ou qualquer entrada invalida a chave sozinho.
+**Tempo (esta maquina, analise de 5675 funcoes / 609k instrucoes):**
+| etapa | antes | agora |
+|---|---|---|
+| analise (descoberta recursiva + ponteiros) | ~17 s | ~10-11 s |
+| extras + codigo-RAM + funcoes | ~2 s | ~1,7 s |
+| saidas (CSV/JSON, regioes) | ~4 s | ~1 s |
+| **analise total** | **~20,5 s** | **~12,6 s** (cache: 0,1 s) |
+| `resolve_indirect.py` / `score_functions.py` (Riven) | 5 s / 6 s | igual |
+| **pipeline do zero (4 etapas)** | **~53 s** | **~37 s** |
+Ganhos: `disasm_lite` em vez de objetos do capstone, `runs()` por regex em C (era laco de 16 M
+bytes, 2x), contagem de bytes com `bytearray.count` (era `Counter` sobre 16 MiB), `split_ops`
+com caminho rapido. Resultado verificado identico ao anterior. `--jobs` NAO foi adicionado: a
+descoberta compartilha estado (grafo) e e inerentemente sequencial; o que paraleliza e o
+`resolve_indirect.py` e o `score_functions.py` entre si (so se o score nao ler o que o outro
+escreve; e do Riven) e a compilacao (`--jobs` do build_all, ja usado).
+
 ### Funcoes sem retorno alcancavel (`noreturn.csv`, coluna `noreturn_kind`)
 24 funcoes, todas explicadas (0 `suspect`):
 | kind | qtd | exemplos / motivo |
@@ -403,7 +449,7 @@ Enderecos sao inteiros (decimal). Mudancas incompativeis incrementam o numero do
 { schema, rom, rom_base,
   header: {title, game_code, maker_code, version, header_checksum_ok, entry_branch_target, ...},
   functions: [ { addr, mode("arm"|"thumb"), lo, hi, insns, bytes,
-                 source("entry|bl|ptr-scan|addr-taken-leaf|m4a-jump-table|m4a-runtime|runtime|runtime-log|bx-const|adr|ram-code|ram-ptr"),
+                 source("entry|bl|ptr-scan|addr-taken-leaf|ptr-table|m4a-jump-table|m4a-runtime|runtime|runtime-log|bx-const|adr|ram-code|ram-ptr"),
                  tier("A"|"B"|null), confidence("high|medium|low|unscored"),
                  jumptable(bool), has_return(bool), continuations(int),
                  noreturn_kind(str|null), store_addr(int|null), exec_addr(int|null),
@@ -411,7 +457,8 @@ Enderecos sao inteiros (decimal). Mudancas incompativeis incrementam o numero do
   regions: [ {start, end, size, kind("arm|thumb|literal_pool|jumptable|data")} ],  # [start,end)
   ram_code: [ {block, site, method, store, exec, size, compressed, mode} ],
   ram_aliases: [ {addr, mode, seen_in[]} ],        # PCs em RAM/pilha vistos pelo runtime (NAO sao funcoes)
-  continuations: [ {child, parent, why} ],          # filho e parte da funcao `parent`
+  continuations: [ {child, parent, why} ],          # filho e parte da funcao `parent` (so `bl` longo)
+  inner_entries: [ {addr, parent} ],                # ponteiro em dados que cai DENTRO de `parent` (info)
   jump_tables: [ {site, table, mode, bounded(bool), targets[]} ],  # bounded = limite veio de um cmp
   unresolved_indirect: [ {addr, insn} ] }
 ```
@@ -746,6 +793,39 @@ PCM. Nos dois canais acontece; so e audivel no B porque o que vem depois do buff
   3586 quadros (59,76 q/s; esperado 59,73), 1627 quadros com a janela minimizada, present maximo 10,8 ms
   (0,01 ms minimizada), espera pelo audio max 62 ms, **underruns apos o aquecimento = 0, descartados = 0**.
   Nao testei a janela do jogo real (so a de teste); com o runtime, o ritmo continua sendo o do audio.
+
+### 11. Launcher/UX: soltar ROM, progresso, icone, titulo, kirby.ini (Gwen)
+Plano: NOTES 'Distribuicao: arrastar a ROM (Riven)'. Tudo em `hw/window_sdl.[ch]` e `hw/config_ini.[ch]`
+(sem dependencia de recomp/). Assinaturas antigas intactas.
+- **Soltar arquivo:** `win_poll` captura `SDL_DROPFILE`; `const char *win_dropped_path(void)` devolve o
+  caminho **uma vez** (depois NULL ate o proximo drop; o ponteiro vale ate o proximo drop). Tambem captura
+  durante `win_progress`. Uso: `if ((p = win_dropped_path())) trocar_de_rom(p);`.
+- **Tela de progresso** (janela propria 480x140, renderer por software, sem vsync, sem console):
+  `win_open_progress(titulo)`, `int win_progress(percent, texto)` (0..100, limita fora da faixa; devolve
+  **0 se o usuario fechou a janela**, para o launcher poder abortar), `win_close_progress()`. Barra simples,
+  fonte bitmap 5x7 embutida (A-Z, 0-9 e `. , : - _ / % ( ) ! ? & ' + = < >`; minusculas usam maiusculas;
+  desconhecido vira `?`; sem acentos). Bombeia eventos a cada chamada (o SO nao marca "nao responde").
+  Ex.: `win_progress(30, "Compilando 4/16...");`
+- **Icone e titulo:** icone 32x32 ARGB gerado em codigo (Kirby rosa; `win_icon_pixels` para teste) aplicado
+  com `SDL_SetWindowIcon` na janela do jogo e na de progresso. `WIN_TITLE` =
+  "Kirby & The Amazing Mirror - Recomp" e e o padrao quando `win_open(NULL, escala)`. **Nasus:** passe
+  `NULL` (hoje `rt_window.c` passa "Kirby & The Amazing Mirror").
+- **Tela cheia:** `win_set_fullscreen(on)` (desktop, sem trocar resolucao), `win_is_fullscreen()`, F11 alterna
+  dentro de `win_poll`. Escala logica 240x160 'nearest' mantida (barras pretas ao esticar).
+- **kirby.ini** (`hw/config_ini.h`, sem SDL): `KirbyConfig {scale 1..6 (3), mute, fullscreen, vsync}`;
+  `cfg_defaults`, `cfg_load` (0 ok, 1 inexistente=padroes, <0 erro), `cfg_save` (CRLF, normaliza),
+  `cfg_path_beside(arquivo, out, cap)` = `kirby.ini` no diretorio do save/ROM. Formato `chave=valor`,
+  comentarios `;`/`#`, `[kirby]` opcional, chaves desconhecidas ignoradas, valor invalido => padrao
+  (`scale=2x`, `scale=9`). Aplicacao: `win_open(NULL, c.scale)`, `if (c.fullscreen) win_set_fullscreen(1)`,
+  `c.mute` -> nao chamar `audio_open`, `c.vsync` -> `win_open_ex(..., 1)`.
+- **Teste** `hw/tests/test_launcher_ui.c` (`run_demo.ps1 -Demo ui`, headless com driver dummy, OK): ini (padroes,
+  ida/volta, comentarios, invalidos, normalizacao, caminho ao lado do save), icone (transparencia, cores,
+  624 px opacos), titulo, drop (uma vez / substitui), tela cheia, progresso (0% = 0 px, 50% = 4360 px, 100% =
+  8720 px de 8720; >100 e <0 limitados; texto 844 px; SDL_QUIT => 0). Saidas para olhar:
+  `build/hw/ui_progress.ppm|png`, `build/hw/ui_icon.ppm|png`.
+- **Nao feito/limites:** drop testado com evento sintetico (`SDL_PushEvent`), nao arrastando de verdade no
+  Explorer; tela cheia verificada so no driver dummy; sem selecao de ROM por dialogo (so soltar/CLI);
+  gravar o ini quando o usuario muda algo em tempo de execucao e do runtime (chamar `cfg_save`).
 
 - Cuidado para o runtime: `hw_irq_pending` ja aplica IME e IE&IF; o runtime so decide o despacho.
   O registro BIOS_IF (0x03007FF8) e IWRAM, fica a cargo do runtime ao tratar VBlankIntrWait.
@@ -1090,6 +1170,63 @@ hardware de blend. Nenhuma mudanca foi feita para "passar".
   interpretadas sem derrubar o processo (os 334 abortos contados sao saltos aleatorios para
   regiao invalida, esperado com registradores lixo).
 
+### Distribuicao: caminhos, kirby.exe sem argumentos, interpretador puro, tempo de compilacao (Nasus)
+**1. Caminhos (nenhum depende de `.venv`/`C:\libs`/cwd do repo)** - `recomp/toolchain.py`:
+| item | ordem de busca |
+|---|---|
+| zig | `$KIRBY_ZIG` -> `<raiz>/tools/zig/zig(.exe)` -> `<pasta do launcher>/tools/zig` -> `zig` no PATH -> `python -m ziglang` (so dev) |
+| SDL2 | `$SDL2_DIR` -> `<raiz>/sdl2` -> `<raiz>/tools/sdl2` -> `C:/libs/SDL2-2.32.2` (aceita a subpasta `x86_64-w64-mingw32`) |
+| saida/cache (`OUT`) | `--out DIR` -> `$KIRBY_OUT` -> `<raiz>/build/recomp/program` (se ha `.git`) -> `%LOCALAPPDATA%/KirbyRecomp/<sha1 da ROM>` |
+| ROM | `--rom` -> `baserom.gba` no cwd -> launcher -> raiz |
+| mapa | `--functions` -> `<out>/analysis/functions.csv` -> `<raiz>/build/analysis/` (csv irmaos pela pasta do mapa) |
+`python -m recomp.program --print-paths` mostra o que foi achado. `harness.zig_cc()` usa o mesmo
+localizador (sem `sys.executable -m ziglang` quando ha zig). Frames/log/save ficam em `<out>`.
+**2. `kirby.exe` sem argumentos** (`rt_main.c`): ROM = `argv[1]` (arrastar sobre o exe) ou, sem
+argumentos, `baserom.gba` ao lado do exe -> primeiro `*.gba` ao lado -> `baserom.gba` no cwd ->
+ultima ROM (`kirby_lastrom.txt` ao lado do exe, gravado ao abrir). So a ROM/nada = modo jogo:
+janela escala 3, som, save em `<rom>.sav`. Nao achou: MessageBox com instrucao. **F11** alterna
+tela cheia (`rt_window.c`, `SDL_WINDOW_FULLSCREEN_DESKTOP`, borda de subida). Testado: arrastar
+(caminho com espacos), duplo clique com ROM ao lado, a partir de outro cwd, e sem ROM (mensagem).
+Escala > 3 e mudo continuam por `--window N`/`--mute`. *Soltar a ROM na janela (SDL_DROPFILE)
+precisa de `hw/window_sdl.c`: nao e meu (pedido a Gwen).*
+**3. Interpretador puro** (`--interp-all`: nenhuma funcao "conhecida"; `--interp-only` gera um
+exe SEM o jogo compilado, so runtime + `rt_interp`): 3000 quadros com o roteiro de teclas (menu ate
+a 1a fase), mesma maquina (6 nucleos):
+| modo | q/s | x tempo real | instrucoes interpretadas |
+|---|---|---|---|
+| compilado | 565 | 9,5x | 0 |
+| `--interp-all` | 361 | 6,0x | 257 M |
+| `--interp-only` (exe separado) | 311 | 5,2x | 252 M |
+O custo e metade `hw_step` (52-56%) e metade interpretacao (~4,6 s de 9,7 s). **>= 60 q/s com folga
+de 5x -> viavel "iniciar ja interpretando enquanto compila".** `--interp-only` compila em
+**1,8 s** (runtime+hw+SDL; com cache do zig). Video igual byte a byte ao compilado; audio igual em
+99,4% dos quadros estereo (15 185 de 2,42 M diferem, desalinhamento de 1-2 amostras: o
+interpretado soma ticks de hw por `bl` mas nao e identico ao compilado em casos de veneer/stub;
+inaudivel nos testes, nao investigado a fundo).
+*Proposta de fluxo (nao implementada):* o launcher (1) abre o jogo com `kirby.exe --interp-only` em
+~2 s; (2) compila o jogo em segundo plano (3 min com `-Os`; o interpretador usa ~1/5 de um nucleo a 60
+q/s, sobra CPU); (3) **troca sem perder o estado carregando o compilado como DLL no MESMO processo**:
+estado = `Cpu` + EWRAM/IWRAM/SRAM (runtime) + `hw/` (tudo no processo), logo basta trocar
+`rc_table` num ponto seguro (fim de `VBlankIntrWait`, sem frame C ativo) por `LoadLibrary` da DLL
+gerada. Requer: shards compilados como DLL; o runtime exportado por uma tabela de ponteiros
+(`RtApi`: `rc_ldr32`, `rt_call`, `rt_tick`, `rt_rets`...) passada a `rc_init(const RtApi*)` em vez de
+simbolos externos (macros no `gba_cpu.h` do modo DLL); lookup passa a consultar a tabela da DLL
+primeiro. Alternativa sem DLL: reiniciar o exe no proximo "soft reset"/menu (perde estado) ou
+`hw_save/hw_load` (Gwen) + save-state do runtime.
+**4. Tempo de compilacao a frio** (6 nucleos, 608 mil instrucoes, 164 MB de C, 1 construcao
+do zero com `--out` novo; "total" inclui emissao, rodadas do `iterate` e link):
+| config | compilado | total | objetos |
+|---|---|---|---|
+| `-O1`, 16 shards, 8 jobs (antes) | 228-292 s | ~5 min | ~400 MB (-O0: 376 MB so em 4 shards!) |
+| `-O1`, 48 shards, 6 jobs | 191 s | 3m49 | ~200 MB |
+| **`-Os`, 48 shards, 6 jobs (novo padrao)** | **146 s** | **3m01** | **~45 MB** |
+Micro-benchmark de 4 shards: `-O0` 87,5 s (objetos enormes: 376 MB), `-O1` 65,7 s, `-Os` 45,6 s. `-O0`
+nao ajuda. Velocidade do jogo com `-Os`: 569 q/s (700 q) contra 642 q/s com `-O1` (hw_step domina; 13%
+a menos, sobra de 9x). Runtime nao recompila (objetos em cache por hash); so 7 .c pequenos. Opcoes:
+`--opt=-Os|-O1`, `--shards N`, `--jobs N`. O "~10 min" do plano do Riven nao reproduziu aqui; em PC
+com 2-4 nucleos espere ~2-3x do tempo. Nao medido: zig frio (1o uso compila compiler-rt/libc no
+cache global do zig, +alguns s).
+
 ### O que falta / riscos
 - Interpretador de fallback: endereco de RAM sem overlay ainda **aborta**; ROM sem funcao
   vira "retorna" (logado). Codigo em RAM que mude depois nao e achado sozinho fora do
@@ -1293,3 +1430,59 @@ com codigo 0 e tem `nao_resolvidos=0`. Falhas guardam o log completo em `build/f
   posteriores, chefes, outros poderes e ajudantes nao foram exercitados.
 - Para ir alem (pedido ao Nasus): `--fuzz SEMENTE` dentro do runtime (sem limite de roteiro) e/ou
   `--keys-file`; e uma forma de partir de um save com progresso (o `baserom.sav` do jogador).
+
+## Distribuicao: "abrir um exe e arrastar a ROM" (Riven) - plano
+**Hoje:** `python -m recomp.program --window 3` gera `build/recomp/program/kirby.exe` (+ `SDL2.dll`),
+~26 MB. Ele **contem o jogo recompilado** e le a ROM em tempo de execucao (dados de graficos e
+audio): precisa do `baserom.gba` ao lado, e depende de Python+zig+SDL2 so para ser *gerado*.
+**Regra legal que decide a arquitetura:** o `kirby.exe` e codigo do jogo traduzido. **Nao pode ser
+distribuido**; tem que ser gerado na maquina de cada usuario, a partir da ROM dele. O que se
+distribui e so o *lancador + compilador + runtime* (sem nenhum byte do jogo).
+
+### Fluxo desejado
+1. Usuario baixa `KirbyRecomp.zip` (nosso codigo, zig portatil, SDL2; sem ROM nem codigo gerado).
+2. Arrasta a ROM sobre `KirbyRecomp.exe` (ou abre e escolhe/solta o arquivo).
+3. 1a vez: verifica SHA-1 (so a versao USA/B8KE), roda analise -> recompila -> compila -> abre o
+   jogo. **Minutos** (ver medida abaixo). Cache em `%LOCALAPPDATA%\KirbyRecomp\<sha1>\`.
+4. Proximas vezes: abre direto (cache valido enquanto a versao do lancador/runtime nao mudar).
+5. Save em `<nome da rom>.sav` ao lado da ROM.
+
+### Pecas e donos sugeridos
+| Peca | O que | Dono |
+|---|---|---|
+| `tools/build_all.py` | ROM -> build completo em um comando (pronto; ver medida) | Riven |
+| Launcher + empacotamento | `launcher.py` (arrastar/escolher ROM, hash, cache, progresso), PyInstaller, zip de release, guarda "nada do jogo no zip" | Riven |
+| Caminhos relativos | `program.py`/`harness.py`: sem `C:/libs`, sem `.venv`, `OUT` configuravel (cache), `--rom` sem exigir cwd do repo; SDL2/zig localizados ao lado do exe | Nasus |
+| `kirby.exe` sem argumentos | duplo clique = procurar `baserom.gba`/ultima ROM, escala padrao, F11 tela cheia, soltar ROM na janela (SDL_DROPFILE) | Nasus + Gwen |
+| Icone, titulo, configuracoes | escala, mudo, tela cheia, persistencia em arquivo ini | Gwen |
+| Teste de instalacao limpa | maquina/pasta sem Python, sem `.venv`, sem repo | Riven |
+
+### Riscos
+1. **Tamanho:** zig portatil (~80 MB) + Python embutido + SDL2: release de ~120-150 MB.
+2. **Tempo da 1a execucao** em PCs mais lentos; precisa de barra de progresso e de nunca parecer travado.
+   Alternativa futura: iniciar ja com o interpretador (rt_interp) enquanto compila em segundo plano.
+3. **Antivirus** (exe do PyInstaller nao assinado; compilador gerando e executando exe).
+4. **Caminhos**: usuario com espacos/acentos em `Documents`; AppData; permissoes.
+5. **Versoes da ROM**: so a USA (SHA-1 acima). Outras regioes precisam de mapa proprio.
+6. **Legal**: o zip e a pasta de cache nunca devem conter codigo gerado em release; CI deve falhar
+   se `build/` ou `*.gba` entrarem no pacote.
+
+### Medida: construcao do zero (Riven) - `tools/build_all.py` em copia limpa
+Copia de `git archive HEAD` + so a ROM, sem `build/`, 8 jobs, mesma maquina de desenvolvimento:
+| Etapa | Tempo |
+|---|---|
+| analise (pass 1) + indiretos + confianca + analise (pass 2) | 20 s + 5 s + 6 s + 20 s = **~51 s** |
+| recompilar + compilar + convergir (`recomp.program --frames 700`) | **973 s (16 min)** |
+| **Total** | **17 min** |
+- O ultimo `compilado em 182s` e so a ultima rodada; ha varias (cada rodada do `iterate` que acha
+  funcao nova recompila shards). A causa de rodadas extras: **13 handlers do M4A** e outras
+  funcoes so eram descobertos executando (`[unresolved] +0814F958 ...`), porque na minha arvore
+  eu os tinha injetado a mao em `build/indirect/m4a_handlers.csv` (nao versionado).
+- **Correcao (`resolve_indirect.py`, passo 4b "completar tabelas de ponteiros")**: uma sequencia de
+  >= 5 ponteiros Thumb consecutivos para a area de codigo, com metade ja conhecida, e uma tabela de
+  despacho; as demais entradas entram se decodificam ate um retorno. Sem lista manual: 37 funcoes,
+  **16 das 17 do M4A** (a 17a, 0x0814FFC0, e `bl` de 0x0814FF64 e o analisador a acha sozinho) e
+  outras 20, entre elas **0x0802FC14**, que o runtime so tinha achado quando o jogo passou do titulo.
+- Pendente: medir de novo a construcao do zero com isso (esperado: menos rodadas do `iterate`).
+- Onde esta o tempo: cada rodada recompila shards; 16 shards x ~600 mil instrucoes em C. Opcoes:
+  `-O1`/`-Os`, menos C por instrucao, so o fecho alcancavel, e iniciar interpretando.
