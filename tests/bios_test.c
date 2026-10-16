@@ -12,6 +12,14 @@ double rt_hwstep_us;
 uint64_t rt_hwstep_calls, rt_hwstep_cycles;
 int rt_measure;
 void rt_save_tick(void) {}
+#include "rt_sio.h"
+Sio *rt_sio_cur;
+uint16_t rt_sio_irq_pending(void) { return 0; }
+void rt_sio_poll(Sio *s) { (void)s; }
+uint32_t rt_sio_cycles_to_event(Sio *s) { (void)s; return 0; }
+void rt_sio_advance(Sio *s, uint32_t c) { (void)s; (void)c; }
+int rt_sio_read(Sio *s, uint32_t a, int z, uint32_t *o) { (void)s; (void)a; (void)z; (void)o; return 0; }
+int rt_sio_write(Sio *s, uint32_t a, int z, uint32_t v) { (void)s; (void)a; (void)z; (void)v; return 0; }
 double rt_now_us(void) { return 0; }
 
 static int fails;

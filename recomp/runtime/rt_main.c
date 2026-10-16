@@ -7,6 +7,7 @@
 #include "gba_bus.h"
 #include "gba_cpu.h"
 #include "gba_rt.h"
+#include "rt_sio.h"
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -162,6 +163,8 @@ int main(int argc, char **argv) {
     const char *ppm = NULL, *sav = NULL;
     int window = 0, scale = 3, bench = 0, selftest = 0, scale_explicit = 0;
     const char *ini_arg = NULL;
+    char link_mode[16] = "off", link_host[64] = "127.0.0.1";
+    int link_players = 2, link_port = 47900, link_cli = 0;
     rt_opt_stop_at_vblank_wait = 1;
     if (gui_defaults) {
         window = 1;
@@ -180,6 +183,14 @@ int main(int argc, char **argv) {
             extern int rt_scaling_override;
             const char *v = argv[++i];
             rt_scaling_override = !strcmp(v, "integer") ? 0 : !strcmp(v, "stretch") ? 2 : 1;
+        }
+        else if (!strcmp(argv[i], "--link") && i + 1 < argc) { snprintf(link_mode, sizeof link_mode, "%s", argv[++i]); link_cli = 1; }
+        else if (!strcmp(argv[i], "--link-players") && i + 1 < argc) link_players = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--link-port") && i + 1 < argc) link_port = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--link-host") && i + 1 < argc) snprintf(link_host, sizeof link_host, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--selftest-link")) {
+            extern int rt_selftest_link(void);
+            return rt_selftest_link() ? 1 : 0;
         }
         else if (!strcmp(argv[i], "--selftest-save") && i + 1 < argc) {
             extern int rt_selftest_save(const char *dir);
@@ -246,6 +257,7 @@ int main(int argc, char **argv) {
             else strcpy(ini, "kirby.ini");
         }
         rt_cfg_load(ini);
+        if (!link_cli) rt_sio_read_ini(ini, link_mode, &link_players, &link_port, link_host);   /* [link] do kirby.ini */
         {   /* log do jogo ao lado do ini (hot-plug de controles etc.) */
             extern void rt_input_set_log_entry(const char *path);
             char lg[1100];
@@ -261,6 +273,7 @@ int main(int argc, char **argv) {
         if (rt_cfg_get(5)) { extern int rt_mute; rt_mute = 1; }
     }
     rt_cpu = &cpu;
+    rt_sio_setup(link_mode, link_players, link_port, link_host);   /* mode=off: nada muda */
     if (selftest) {
         extern int rt_selftest_sram(Cpu *);
         extern int rt_selftest_interp(Cpu *);
@@ -286,6 +299,7 @@ int main(int argc, char **argv) {
     while (!cpu.stop) rt_call(&cpu);
 
     rt_window_close();
+    rt_sio_report();
     if (window || bench) { extern void rt_save_report(void); rt_report_speed(); rt_save_report(); }
     const char *why = cpu.stop == RT_STOP_FRAMES ? "frames"
                       : cpu.stop == RT_STOP_VBLANK_WAIT ? "first VBlankIntrWait"

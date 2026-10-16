@@ -27,6 +27,16 @@ typedef struct { uint16_t cnt; uint32_t acc; } Timer;
 static Timer tm[4];
 typedef struct { uint32_t src, dst, cnt; } Dma;
 static Dma dma[4];
+
+/* SIO multi-play unit (see hw.h) */
+typedef struct {
+    int slot, busy, err, id, sd;
+    uint16_t multi[4];
+    int64_t countdown;                /* no cable: cycles left until hw completes the master transfer itself */
+    void *ctx;
+    void (*start)(void *ctx, uint16_t master_send);
+} Sio;
+static Sio sio;
 #define AUDIO_RATE 48000
 #define ARING 16384
 typedef struct { int8_t buf[32]; int rd, cnt; int8_t cur; } Fifo;
@@ -49,6 +59,8 @@ static inline uint16_t P16(uint32_t o) { return (uint16_t)(pal[o] | pal[o + 1] <
 static void mark(int lo, int hi) { for (int o = lo; o <= hi; o += 2) rd_ok[o >> 1] = 1; }
 
 void hw_reset(void) {
+    { void *c = sio.ctx; void (*st)(void *, uint16_t) = sio.start; memset(&sio, 0, sizeof sio); sio.ctx = c; sio.start = st;
+      for (int i = 0; i < 4; i++) sio.multi[i] = 0xFFFF; }
     memset(io, 0, sizeof io); memset(pal, 0, sizeof pal); memset(vram, 0, sizeof vram);
     memset(oam, 0, sizeof oam); memset(fb, 0, sizeof fb); memset(tm, 0, sizeof tm);
     memset(dma, 0, sizeof dma); memset(rd_ok, 0, sizeof rd_ok);
@@ -336,6 +348,67 @@ static void timers_advance(uint32_t c) {
     }
 }
 
+/* ---------------- SIO multi-play ---------------- */
+#define SIOCNT 0x128
+static int sio_multi(void) { return ((R16(SIOCNT) >> 12) & 3) == 2 && !(R16(0x134) & 0x8000); }
+
+uint32_t hw_sio_slot_cycles(void) {
+    static const uint32_t baud[4] = { 9600, 38400, 57600, 115200 };
+    return (16777216u / baud[R16(SIOCNT) & 3]) * 18;          /* start bit + 16 data bits + stop bit */
+}
+void hw_sio_set_link(void *ctx, void (*start)(void *, uint16_t)) { sio.ctx = ctx; sio.start = start; }
+void hw_sio_set_slot(int slot) { sio.slot = slot & 3; }
+int hw_sio_slot(void) { return sio.slot; }
+void hw_sio_set_sd(int sd) { sio.sd = sd ? 1 : 0; }
+int hw_sio_multi_mode(void) { return sio_multi(); }
+uint16_t hw_sio_send_value(void) { return R16(0x12A); }
+int hw_sio_busy(void) { return sio.busy; }
+void hw_sio_begin(void) {
+    sio.busy = 1; sio.err = 0;
+    for (int i = 0; i < 4; i++) sio.multi[i] = 0xFFFF;
+}
+void hw_sio_deliver(const uint16_t multi[4], int error) {
+    for (int i = 0; i < 4; i++) sio.multi[i] = multi[i];
+    sio.err = error ? 1 : 0;
+    sio.id = sio.slot;                                   /* the ID bits are valid after the first transfer */
+    sio.busy = 0;
+    sio.countdown = 0;
+    if (R16(SIOCNT) & 0x4000) raise_if(0x80);            /* serial IRQ */
+}
+static void sio_start(void) {
+    hw_sio_begin();
+    uint16_t send = R16(0x12A);
+    if (sio.start) sio.start(sio.ctx, send);
+    else sio.countdown = hw_sio_slot_cycles();           /* no cable: finishes alone */
+}
+static void sio_advance(uint32_t c) {
+    if (!sio.busy || sio.start || sio.countdown <= 0) return;
+    sio.countdown -= c;
+    if (sio.countdown <= 0) {
+        uint16_t m[4] = { R16(0x12A), 0xFFFF, 0xFFFF, 0xFFFF };
+        hw_sio_deliver(m, 1);                            /* nobody answered: error flag */
+    }
+}
+static uint16_t sio_cnt_read(void) {
+    uint16_t v = R16(SIOCNT) & 0x7003;
+    if (sio.slot != 0) v |= 0x04;                        /* SI terminal: 1 = child */
+    if (sio.sd) v |= 0x08;                               /* SD terminal: all units ready */
+    v |= (uint16_t)(sio.id << 4);
+    if (sio.err) v |= 0x40;
+    if (sio.busy) v |= 0x80;
+    return v;
+}
+static void sio_cnt_write(uint16_t v) {
+    int was_multi = sio_multi();
+    if (((v >> 12) & 3) != 2 || (R16(0x134) & 0x8000)) {  /* not multi-play: plain storage, as before */
+        W16(SIOCNT, v);
+        return;
+    }
+    W16(SIOCNT, (uint16_t)(v & 0x7003));                 /* bits 2-6 are read-only status, bit 7 is the start request */
+    if (!was_multi) { sio.err = 0; sio.id = 0; sio.busy = 0; for (int i = 0; i < 4; i++) sio.multi[i] = 0xFFFF; }
+    if ((v & 0x80) && sio.slot == 0 && !sio.busy) sio_start();     /* only the master starts; a busy unit ignores it */
+}
+
 /* ---------------- PPU ---------------- */
 static inline uint32_t rgb(uint16_t c) {
     uint32_t r = c & 31, g = c >> 5 & 31, b = c >> 10 & 31;
@@ -573,7 +646,7 @@ static uint32_t step_core(uint32_t cycles, int stop_on_irq) {
             if (c > to_s) c = to_s;
         }
 #endif
-        timers_advance(c); audio_gen(c); line_cyc += c; cycles -= c; done += c;
+        timers_advance(c); audio_gen(c); sio_advance(c); line_cyc += c; cycles -= c; done += c;
         if (line_cyc == CYC_HBL) enter_hblank();
         else if (line_cyc == CYC_LINE) end_line();
         if (stop_on_irq && (hw_irq_pending() & ~p0)) break;   /* IRQ recem-levantado: devolve o controle */
@@ -602,6 +675,8 @@ static uint16_t io_rd16(uint32_t o) {
     case VCOUNT: return (uint16_t)vcount;
     case 0x130:  return keyinput;
     case IF:     return if_reg;
+    case 0x120: case 0x122: case 0x124: case 0x126: if (sio_multi()) return sio.multi[(o - 0x120) >> 1]; break;
+    case SIOCNT: if (sio_multi()) return sio_cnt_read(); break;
     case 0x100: case 0x104: case 0x108: case 0x10C: return tm[(o - 0x100) >> 2].cnt;
     case IME:    return R16(IME) & 1;
     case 0x84:   return (uint16_t)((R16(0x84) & 0x80) | ps[0].on | ps[1].on << 1 | ps[2].on << 2 | ps[3].on << 3);
@@ -616,6 +691,8 @@ static void io_wr16(uint32_t o, uint16_t v) {
     case DISPSTAT: W16(o, (uint16_t)((R16(o) & 7) | (v & 0xFFF8))); return;
     case VCOUNT: case 0x130: return;
     case IF: if_reg &= (uint16_t)~v; return;
+    case 0x120: case 0x122: case 0x124: case 0x126: if (sio_multi()) return; break;     /* read-only in multi-play */
+    case SIOCNT: sio_cnt_write(v); return;
     case IE: W16(o, v & 0x3FFF); return;
     case IME: W16(o, v & 1); return;
     case 0x82:

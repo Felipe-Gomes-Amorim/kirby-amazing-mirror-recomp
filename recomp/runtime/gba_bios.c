@@ -8,6 +8,7 @@
 #include "gba_bus.h"
 #include "gba_cpu.h"
 #include "gba_rt.h"
+#include "rt_sio.h"
 
 int rt_opt_stop_at_vblank_wait;
 void (*rt_frame_hook)(uint64_t);
@@ -237,7 +238,7 @@ static void irq_deliver(Cpu *c, uint16_t pend) {
 /* chamado em pontos seguros (limites de chamada) e dentro das esperas da BIOS */
 void rt_irq_service(Cpu *c) {
     if (c->psr_if & 0x80) return;
-    uint16_t pend = hw_irq_pending();
+    uint16_t pend = hw_irq_pending() | rt_sio_irq_pending();
     if (pend) irq_deliver(c, pend);
 }
 
@@ -272,13 +273,20 @@ static uint32_t timed_step_irq(uint32_t cycles) {
 static void run_cycles(Cpu *c, uint32_t n) {
     uint32_t left = n;
     while (left) {
-        uint32_t used = timed_step_irq(left);
+        uint32_t chunk = left;
+        if (rt_sio_cur) {   /* cabo link: atende a rede e para no fim da troca em curso */
+            rt_sio_poll(rt_sio_cur);
+            uint32_t se = rt_sio_cycles_to_event(rt_sio_cur);
+            if (se && se < chunk) chunk = se;
+        }
+        uint32_t used = timed_step_irq(chunk);
         if (used == 0) {   /* IRQ ja pendente e nao entregavel (I=1): segue sem parar */
             hw_step(left);
             rt_hwstep_cycles += left;
             used = left;
         }
         left -= used > left ? left : used;
+        if (rt_sio_cur) rt_sio_advance(rt_sio_cur, used > chunk ? chunk : used);
         grab_frame();
         rt_irq_service(c);
         if (c->stop) break;

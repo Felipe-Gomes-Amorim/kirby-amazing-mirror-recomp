@@ -264,6 +264,7 @@ static int selftest_differential(Cpu *c, unsigned nfuncs, unsigned nstates) {
                 jmp_buf jb;
                 rt_abort_jmp = &jb;
                 rt_quiet = 1;
+                uint64_t ent0 = rt_interp_entries;
                 if (setjmp(jb) == 0) {
                     if (mode == 0) {
                         rt_call(c);
@@ -281,6 +282,9 @@ static int selftest_differential(Cpu *c, unsigned nfuncs, unsigned nstates) {
                 out[mode].n = c->n; out[mode].z = c->z; out[mode].cc = c->c; out[mode].v = c->v;
                 out[mode].thumb = c->thumb; out[mode].pc = c->pc;
                 out[mode].r[15] = c->stop ? 0xDEAD : 0;   /* limite de laco */
+                /* o compilado saltou para codigo desconhecido (registrador lixo): cai no interpretador e
+                 * executa dados aleatorios, cujo resultado depende do tempo; nao e comparavel */
+                if (mode == 0 && rt_interp_entries != ent0) out[mode].r[15] = 0xDEAD;
                 static uint8_t keep[2][0x48000];
                 memcpy(keep[mode], gba_ewram(), 0x40000);
                 memcpy(keep[mode] + 0x40000, gba_iwram(), 0x8000);

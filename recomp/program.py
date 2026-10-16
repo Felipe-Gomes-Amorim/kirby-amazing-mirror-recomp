@@ -151,7 +151,7 @@ def build(rom, funcs, bad=None, jobs=8, nshards=None, verbose=True, opt=None):
         return obj
 
     rt_srcs = [os.path.join(RUNTIME, n) for n in ('gba_bus.c', 'gba_rt.c', 'gba_bios.c', 'rt_main.c',
-                                                    'rt_script.c', 'rt_window.c', 'rt_interp.c', 'rt_input.c', 'rt_save.c')]
+                                                    'rt_script.c', 'rt_window.c', 'rt_interp.c', 'rt_input.c', 'rt_save.c', 'rt_sio.c', 'rt_sio_test.c')]
     rt_srcs.append(os.path.join(ROOT, 'hw', 'hw.c'))   # strong: substitui os stubs fracos
     t1 = time.time()
     with ThreadPoolExecutor(jobs) as ex:
@@ -159,7 +159,7 @@ def build(rom, funcs, bad=None, jobs=8, nshards=None, verbose=True, opt=None):
     if verbose:
         print('compilado em %.0fs' % (time.time() - t1))
     exe = os.path.join(OUT, 'rt_boot.exe' if os.name == 'nt' else 'rt_boot')
-    r = toolchain.run(zig_cc() + ['-o', exe] + objs, capture_output=True, text=True)
+    r = toolchain.run(zig_cc() + ['-o', exe] + objs + (['-lws2_32'] if os.name == 'nt' else []), capture_output=True, text=True)
     if r.returncode:
         raise RuntimeError('link:\n' + r.stderr[-3000:])
     build_window(objs, compile_one)
@@ -186,7 +186,7 @@ def build_window(objs, compile_one):
     imp = os.path.join(SDL_DIR, 'lib', 'libSDL2.dll.a')   # import lib (nao a estatica)
     # -mwindows: subsistema GUI (sem janela de console atras do jogo)
     r = toolchain.run(zig_cc() + ['-Wl,--subsystem,windows', '-o', exe] + base + w +
-                       [imp], capture_output=True, text=True)
+                       [imp] + (['-lws2_32'] if os.name == 'nt' else []), capture_output=True, text=True)
     if r.returncode:
         print('[janela] link falhou:\n' + r.stderr[-1500:])
         return None
