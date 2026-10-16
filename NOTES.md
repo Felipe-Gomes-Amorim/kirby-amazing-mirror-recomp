@@ -2142,3 +2142,28 @@ desconhecido = sair. `LauncherEnv.run_game` faz o backup antes de cada Play. Dia
 de tipos passou a ser um buffer proprio: antes o NUL embutido cortava a string no 1o separador).
 Nota de teste: `tests.test_save` procura `build/recomp/program/rt_boot.exe`; um build de desenvolvimento antigo faz esses 2 testes
 falharem (nao e defeito do gravador). Defina `KIRBY_RT_BOOT` com um `rt_boot.exe` recente (`recomp.program --interp-only`).
+
+## Online / cabo link: plano (Riven, 2026-10-16)
+
+**Veredito:** viável, mas é a maior funcionalidade do projeto. Só funciona bem em LAN ou internet com latência baixa (< ~60 ms).
+
+**O que o jogo usa:** modo *multi-play* do SIO (SIOCNT 0x04000128, SIOMULTI0-3 0x04000120-126, SIOMLT_SEND 0x0400012A, RCNT 0x04000134).
+O mestre (jogador 1) inicia a troca; cada jogador envia 16 bits na sua vez; todos recebem os 4 valores; IRQ serial no fim.
+Varredura da ROM: 35 funções tocam SIO/RCNT/JOY (SIOCNT/SEND/MULTI em ~0x08030xxx–0x08033xxx e ~0x08157xxx–0x08158xxx;
+RCNT em 0x080001CC, 0x08019FDC, 0x08031D24, 0x0815158C, 0x08157210; JOYCNT em 0x08125B3C, 0x08125D60, 0x0812FA28).
+Literais de SIOCNT que parecem multi-play: 0x2003 (115200 baud) em 0x08157700 e 0x08158194, 0x2002 em 0x081580F4 (a confirmar).
+Os blocos de código copiados para RAM (0x03006C50, 0x030068E0) não têm literais de SIO.
+
+**Abordagem:** *lockstep determinístico* por frame, não rollback (rollback exige save states, que não temos).
+Cada instância emula o SIO localmente; a rede só troca o valor de 16 bits de cada jogador por troca (e, por frame, um hash de estado para detectar dessincronização).
+Todos os pares precisam usar o mesmo build (compilado ou interpretado) porque o timing é aproximado.
+
+**Fases**
+- P0 (estudo, Poppy + Riven): ler as ~35 funções, descobrir quantas trocas por frame, qual IRQ, o que acontece sem cabo/timeouts. Saída: documento do protocolo do jogo.
+- P1 (Nasus + Gwen): emular SIO multi-play em hw/ com N instâncias locais (loopback/pipe), mestre/filho, IRQ serial, SIOMULTIx. Teste: 2 e 4 instâncias na mesma máquina.
+- P2 (Riven): transporte TCP/UDP em LAN, lockstep com buffer de atraso, medição de latência, hash por frame, detecção de dessincronização.
+- P3 (Riven): internet: IP direto + porta; depois relay/código de sala, se valer a pena.
+- P4 (Gwen + Riven): lobby no launcher (host/join, slots 1-4, status, ping).
+- QA (Poppy): testes de desync, desconexão no meio do jogo, 2/3/4 jogadores.
+
+**Riscos:** latência vs 60 fps; o jogo pode ter timeouts de link curtos; timing não é cycle-accurate; NAT; cada jogador precisa da própria ROM e save; multiboot (SWI 0x25) fora do escopo.
