@@ -262,6 +262,153 @@ int main(void) {
     lh_write(1, 0x04000004, 2, 0x0008);
     CHECK(lh_read(0, 0x04000004, 2) != lh_read(1, 0x04000004, 2), "DISPSTAT is per unit");
 
+
+    /* ---------- T16: RCNT resets to 0x8000; multi-play only works after the game writes RCNT = 0 ---------- */
+    lh_init(2);
+    CHECK(rd(0, 0x04000134) == 0x8000 && rd(1, 0x04000134) == 0x8000, "RCNT resets to 0x8000 (general-purpose mode, as left by the BIOS)");
+    lh_write(0, SIOCNT, 2, 0x2003); lh_write(1, SIOCNT, 2, 0x2003);
+    lh_master_start();
+    CHECK(!lh_active() && !busy(1), "with RCNT=0x8000 the SIOCNT multi-play bits do nothing (no transfer)");
+    lh_write(0, 0x04000134, 2, 0x0000); lh_write(1, 0x04000134, 2, 0x0000);
+    lh_write(0, SIOCNT, 2, 0x2003); lh_write(1, SIOCNT, 2, 0x2003);
+    lh_master_start();
+    CHECK(lh_active(), "after RCNT = 0 the same SIOCNT write starts a real transfer");
+    lh_step(2 * T);
+    lh_write(0, 0x04000134, 2, 0x8000);
+    CHECK(rd(0, 0x04000134) == 0x8000, "RCNT is a plain 16-bit register");
+
+    /* ---------- T17: 8 / 16 / 32-bit access to SIOCNT, SIOMLT_SEND and SIOMULTI ---------- */
+    setup(2, 0);
+    lh_set_send(0, 0xBEEF);
+    uint32_t w32 = lh_read(0, SIOCNT, 4);
+    CHECK((w32 & 0xFFFF) == rd(0, SIOCNT) && (w32 >> 16) == 0xBEEF, "ldr [SIOCNT] = SIOCNT | SIOMLT_SEND << 16");
+    CHECK(lh_read(0, SIOCNT, 1) == (rd(0, SIOCNT) & 0xFFu) && lh_read(0, SIOCNT + 1, 1) == (unsigned)(rd(0, SIOCNT) >> 8),
+          "byte reads of SIOCNT and SIOCNT+1");
+    lh_write(0, 0x0400012A, 1, 0x34);
+    lh_write(0, 0x0400012B, 1, 0x12);
+    CHECK(rd(0, 0x0400012A) == 0x1234, "SIOMLT_SEND written as two bytes");
+    lh_write(0, 0x0400012A, 2, 0xCAFE);
+    CHECK(rd(0, 0x0400012A) == 0xCAFE && lh_read(0, 0x0400012A, 1) == 0xFE, "SIOMLT_SEND 16-bit write, byte read");
+    {   /* strb of (old | 0x80) on the low byte starts the transfer, like LinkMain */
+        uint32_t lo = lh_read(0, SIOCNT, 1);
+        lh_write(0, SIOCNT, 1, lo | 0x80);
+        CHECK(lh_active() && busy(0), "byte write of SIOCNT with bit 7 starts the transfer");
+        CHECK((rd(0, SIOCNT) & 0x7000) == 0x2000, "...and the mode bits in the high byte are untouched");
+        lh_step(2 * T);
+        CHECK(!busy(0) && rd(0, MULTI(0)) == 0xCAFE, "byte-started transfer delivered the send value");
+    }
+    {   /* str (send << 16 | SIOCNT | 0x80): the start bit must see the NEW send value */
+        lh_set_send(1, 0x7001);
+        uint32_t cnt = rd(0, SIOCNT) & 0x7003;
+        lh_write(0, SIOCNT, 4, (0x1234u << 16) | cnt | 0x80);
+        lh_step(2 * T);
+        CHECK(rd(0, MULTI(0)) == 0x1234 && rd(0, MULTI(1)) == 0x7001, "32-bit write of SIOCNT|SEND<<16 starts with the new send value");
+    }
+    CHECK(lh_read(1, 0x04000120, 4) == (0x1234u | (0x7001u << 16)), "SIOMULTI0|SIOMULTI1<<16 read as one 32-bit word (ldm pairs)");
+    CHECK(lh_read(1, 0x04000124, 4) == 0xFFFFFFFFu, "SIOMULTI2|SIOMULTI3<<16 = 0xFFFFFFFF with 2 units");
+    CHECK(lh_read(1, 0x04000121, 1) == 0x12 && lh_read(1, 0x04000122, 1) == 0x01 && lh_read(1, 0x04000123, 1) == 0x70, "byte reads of SIOMULTI");
+    lh_write(1, 0x04000120, 4, 0xAAAAAAAAu);
+    CHECK(lh_read(1, 0x04000120, 4) == (0x1234u | (0x7001u << 16)), "32-bit write to SIOMULTI is ignored in multi-play");
+    {   /* str 0x2000: SIOCNT rewritten as one 32-bit word (mode multi, baud 0) and SIOMLT_SEND cleared */
+        lh_write(0, SIOCNT, 4, 0x00002000u);
+        CHECK((rd(0, SIOCNT) & 0x7003) == 0x2000 && rd(0, 0x0400012A) == 0, "str 0x2000 sets mode multi / baud 0 and clears SIOMLT_SEND");
+    }
+    setup(2, 1);                                              /* high byte write: clear the IRQ-enable bit only */
+    {
+        lh_write(0, SIOCNT + 1, 1, 0x20);                    /* bit 13 stays, bit 14 (IRQ) cleared on the master */
+        CHECK((rd(0, SIOCNT) & 0x7000) == 0x2000, "byte write of SIOCNT+1 clears the IRQ-enable bit");
+        lh_master_start();
+        lh_step(2 * T);
+        CHECK(!serial_irq(0) && serial_irq(1), "master without its IRQ bit gets none; the child still does");
+    }
+
+    /* ---------- T18: Timer3 as the game's master loop uses it ---------- */
+    {
+        lh_init(2);
+        lh_write(0, 0x04000200, 2, 0x0040);                  /* IE: timer 3 */
+        lh_write(0, 0x04000208, 2, 1);
+        lh_write(0, 0x0400010C, 4, 0x00C0BBBCu);             /* TM3CNT_L = 0xBBBC (reload), TM3CNT_H = enable + IRQ, F/1 */
+        CHECK(lh_read(0, 0x0400010E, 2) == 0x00C0, "TM3CNT_H = 0x00C0 stored (prescaler F/1, IRQ, enable)");
+        CHECK(lh_read(0, 0x0400010C, 2) == 0xBBBC, "the counter loads the reload value when enabled");
+        lh_step(100);
+        CHECK(lh_read(0, 0x0400010C, 2) == 0xBBBC + 100, "counts 1 per CPU cycle (F/1)");
+        lh_step(17476 - 100 - 1);
+        CHECK((lh_irq_pending(0) & 0x40) == 0 && (lh_read(0, IFREG, 2) & 0x40) == 0, "no overflow 1 cycle early");
+        lh_step(1);
+        CHECK((lh_read(0, IFREG, 2) & 0x40) != 0 && (lh_irq_pending(0) & 0x40) != 0, "overflow after exactly 17476 cycles raises IF bit 6");
+        CHECK(lh_read(0, 0x0400010C, 2) == 0xBBBC, "the counter reloads 0xBBBC on overflow");
+        lh_write(0, IFREG, 2, 0x40);
+        lh_step(17475);
+        CHECK((lh_irq_pending(0) & 0x40) == 0, "period is 17476 cycles (second overflow not yet)");
+        lh_step(1);
+        CHECK((lh_irq_pending(0) & 0x40) != 0, "second overflow exactly one period later");
+        lh_write(0, IFREG, 2, 0x40);
+        /* rewriting TM3CNT_H while running does not restart (hardware: only a 0 -> 1 edge reloads) */
+        lh_step(5000);
+        lh_write(0, 0x0400010E, 2, 0x00C0);
+        lh_step(17476 - 5000 - 1);
+        CHECK((lh_irq_pending(0) & 0x40) == 0, "rewriting the same TM3CNT_H does not restart the timer");
+        lh_step(1);
+        CHECK((lh_irq_pending(0) & 0x40) != 0, "...it overflows on the original schedule");
+        lh_write(0, IFREG, 2, 0x40);
+        /* stopping and writing the 32-bit word again DOES restart (what the game does when re-arming) */
+        lh_step(3000);
+        lh_write(0, 0x0400010C, 4, 0x00000000u);             /* stop (L = 0, H = 0) */
+        lh_step(20000);
+        CHECK((lh_irq_pending(0) & 0x40) == 0, "a stopped timer never overflows");
+        lh_write(0, 0x0400010C, 4, 0x00C0BBBCu);
+        lh_step(17475);
+        CHECK((lh_irq_pending(0) & 0x40) == 0, "after stop + 32-bit rewrite the period starts again");
+        lh_step(1);
+        CHECK((lh_irq_pending(0) & 0x40) != 0, "...and ends exactly 17476 cycles after the rewrite");
+        lh_write(0, 0x04000200, 2, 0x0000);
+        CHECK(lh_irq_pending(0) == 0, "IE bit 6 gates the CPU interrupt (IF stays set)");
+    }
+
+    /* ---------- T19: 4 units x 18 bits fit inside one Timer3 period; the handler reads the RIGHT exchange ---------- */
+    {
+        lh_init(4);
+        for (int k = 0; k < 4; k++) lh_enter_multi(k, 1);
+        const uint32_t four = 4 * lh_slot_cycles();
+        CHECK(four == 4 * 2610u && four < 17476u, "4 slots x 18 bits at 115200 baud = 10440 cycles < 17476 (Timer3 period)");
+        lh_write(0, 0x04000200, 2, 0x00C0);                  /* IE: timer 3 + serial */
+        lh_write(0, 0x0400010C, 4, 0x00C0BBBCu);             /* the master's Timer3 drives the exchanges */
+        for (int r = 0; r < 6; r++) {
+            lh_set_send(0, (uint16_t)(0x1000 + r)); lh_set_send(1, (uint16_t)(0x2000 + r));
+            lh_set_send(2, (uint16_t)(0x3000 + r)); lh_set_send(3, (uint16_t)(0x4000 + r));
+            lh_master_start();                               /* the handler starts exchange r right after the IRQ */
+            lh_step(four - 1);
+            CHECK(busy(0) && lh_transfers() == r, "exchange still running 1 cycle before its end");
+            lh_step(1);
+            CHECK(!busy(0) && lh_transfers() == r + 1, "exchange r is complete after 4 slots");
+            CHECK((lh_read(0, IFREG, 2) & 0x40) == 0, "...well before the Timer3 overflow");
+            lh_step(17476 - four);                           /* now the Timer3 overflow */
+            CHECK((lh_read(0, IFREG, 2) & 0x40) != 0, "Timer3 IRQ (IF bit 6) at the end of the period");
+            uint32_t m01 = lh_read(0, 0x04000120, 4), m23 = lh_read(0, 0x04000124, 4);   /* the handler's ldm */
+            CHECK(m01 == (uint32_t)((0x1000 + r) | ((0x2000 + r) << 16)) && m23 == (uint32_t)((0x3000 + r) | ((0x4000 + r) << 16)),
+                  "the Timer3 handler reads the values of the exchange that just finished, not the previous one");
+            if (r > 0) CHECK(m01 != (uint32_t)((0x1000 + r - 1) | ((0x2000 + r - 1) << 16)), "...and they differ from the previous exchange");
+            lh_write(0, IFREG, 2, 0xC0);                     /* ack timer + serial */
+            for (int k = 1; k < 4; k++) lh_write(k, IFREG, 2, 0x80);
+        }
+        CHECK(lh_transfers() == 6, "six exchanges, one per Timer3 period");
+    }
+    {   /* too slow: at 9600 or 57600 baud the exchange has NOT finished when Timer3 overflows */
+        static const struct { uint16_t cnt; const char *name; } slow[] = { { 0x2000, "9600 baud: 4 slots take longer than the Timer3 period" },
+                                                                          { 0x2002, "57600 baud: 4 slots take longer than the Timer3 period" } };
+        for (unsigned q = 0; q < 2; q++) {
+            lh_init(4);
+            for (int k = 0; k < 4; k++) { lh_enter_multi(k, 1); lh_write(k, SIOCNT, 2, slow[q].cnt | 0x4000); }
+            const uint32_t t4 = 4 * lh_slot_cycles();
+            lh_write(0, 0x0400010C, 4, 0x00C0BBBCu);
+            lh_set_send(0, 0x1111);
+            lh_master_start();
+            lh_step(17476);
+            CHECK(t4 > 17476u && busy(0) && lh_transfers() == 0, slow[q].name);
+            CHECK(rd(0, MULTI(0)) == 0xFFFF, "...the handler would still read 0xFFFF / the previous exchange (why 115200 is required)");
+        }
+    }
+
     printf(fails ? "RESULT: %d failure(s)\n" : "RESULT: OK\n", fails);
     return fails != 0;
 }

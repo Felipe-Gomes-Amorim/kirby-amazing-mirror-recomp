@@ -37,6 +37,14 @@ struct Sio {
     uint16_t pending[4];
     int id_latched;          /* bits 4-5 do SIOCNT (so valem apos a 1a troca) */
     int irq_flag;            /* IF bit 7 */
+    int ack_pending;         /* filho: avisar o mestre (depois do IRQ servido) que a troca acabou */
+    /* validacao do protocolo do jogo (so estatistica): FEFE = sincronismo, depois 12 halfwords cuja soma
+     * (16 bits) tem que ser 0xFFF1 (= -15) */
+    int pk_idx[4];
+    uint16_t pk_buf[4][12];
+    uint32_t pk_sum[4];
+    uint32_t pk_last0[4];
+    uint64_t pk_valid[4], pk_invalid[4], pk_sync[4];
 };
 
 static const uint32_t BAUD[4] = {9600, 38400, 57600, 115200};
@@ -44,6 +52,7 @@ static const uint32_t BAUD[4] = {9600, 38400, 57600, 115200};
 Sio *rt_sio_new(LinkTransport *t) {
     Sio *s = (Sio *)calloc(1, sizeof *s);
     s->tp = t;
+    s->rcnt = 0x8000;   /* reset da BIOS apos o boot por cartucho (MainInit testa (RCNT & 0xC000) != 0x8000) */
     for (int i = 0; i < 4; i++) s->multi[i] = LINK_ABSENT;
     return s;
 }
@@ -67,13 +76,48 @@ static void begin(Sio *s, const uint16_t vals[4]) {
     s->remain = exchange_cycles(s);
 }
 
+static void packet_stats(Sio *s) {
+    static int ex_log = -1;
+    if (ex_log < 0) { const char *e = getenv("KIRBY_SIO_EX"); ex_log = e ? atoi(e) : 0; }
+    if (ex_log > 0 && rt_sio_exchanges >= (uint64_t)(getenv("KIRBY_SIO_EX_FROM") ? atoi(getenv("KIRBY_SIO_EX_FROM")) : 0)) {
+        ex_log--;
+        rt_log("[ex #%llu] %04X %04X %04X %04X", (unsigned long long)rt_sio_exchanges, s->pending[0], s->pending[1],
+               s->pending[2], s->pending[3]);
+    }
+    for (int p = 0; p < 4; p++) {
+        uint16_t v = s->pending[p];
+        if (v == 0xFEFE) { s->pk_idx[p] = 0; s->pk_sum[p] = 0; s->pk_sync[p]++; continue; }
+        if (v == LINK_ABSENT) { if (s->pk_idx[p] >= 0 && s->pk_idx[p] > 0) { s->pk_invalid[p]++; } s->pk_idx[p] = -1; continue; }
+        if (s->pk_idx[p] < 0 || s->pk_idx[p] >= 12) continue;
+        s->pk_sum[p] += v;
+        s->pk_buf[p][s->pk_idx[p]] = v;
+        if (++s->pk_idx[p] == 12) {
+            int ok = (s->pk_sum[p] & 0xFFFF) == 0xFFF1;
+            if (ok) s->pk_valid[p]++; else s->pk_invalid[p]++;
+            static int pkt_log = -1;
+            if (pkt_log < 0) { const char *e = getenv("KIRBY_SIO_PKT"); pkt_log = e ? atoi(e) : 0; }
+            if (pkt_log > 0 && (!ok || (s->pk_buf[p][0] & 0xFF) != s->pk_last0[p])) {   /* so mudancas de tipo e invalidos */
+                pkt_log--;
+                s->pk_last0[p] = s->pk_buf[p][0] & 0xFF;
+                rt_log("[pkt] from P%d %s:%s", p + 1, ok ? "valid" : "INVALID", "");
+                char line[200] = "";
+                for (int k = 0; k < 12; k++) snprintf(line + strlen(line), sizeof line - strlen(line), " %04X", s->pk_buf[p][k]);
+                rt_log("[pkt]   %s  (exchange #%llu)", line, (unsigned long long)rt_sio_exchanges);
+            }
+            s->pk_idx[p] = -1;
+        }
+    }
+}
+
 static void complete(Sio *s) {
     memcpy(s->multi, s->pending, sizeof s->multi);
+    packet_stats(s);
     s->busy = 0;
     s->remain = 0;
     s->id_latched = s->tp ? s->tp->player_id & 3 : 0;
     rt_sio_exchanges++;
     if (s->siocnt & 0x4000) s->irq_flag = 1;
+    if (s->tp && s->tp->ack && s->tp->player_id != 0) s->ack_pending = 1;
 }
 
 void rt_sio_advance(Sio *s, uint32_t cycles) {
@@ -89,6 +133,12 @@ void rt_sio_poll(Sio *s) {
     LinkEvent ev;
     while (s->tp->poll(s->tp, &ev)) {
         if (ev.type == 1 && !s->busy && multiplay(s)) begin(s, ev.values);   /* filho: o mestre iniciou */
+    }
+    /* poll roda no inicio da iteracao seguinte a conclusao: o IRQ serial ja foi entregue e o handler
+     * (que escreve o proximo SIOMLT_SEND) ja terminou. So agora o mestre pode iniciar a proxima troca. */
+    if (s->ack_pending && !s->busy) {
+        s->ack_pending = 0;
+        s->tp->ack(s->tp);
     }
 }
 
@@ -138,6 +188,23 @@ static void reg_write16(Sio *s, uint32_t off, uint16_t v) {
 
 static int sio_addr(uint32_t a) { return (a >= 0x04000120u && a < 0x0400012Cu) || (a >= 0x04000134u && a < 0x04000136u); }
 
+/* KIRBY_SIO_TRACE=N: registra os N primeiros acessos do jogo a SIO/IF/IE/TM3 (diagnostico) */
+static int trace_left = -1;
+static void trace_acc(const char *rw, uint32_t a, int size, uint32_t v) {
+    if (trace_left < 0) {
+        const char *e = getenv("KIRBY_SIO_TRACE");
+        trace_left = e ? atoi(e) : 0;
+    }
+    if (trace_left == 0) return;
+    int hit = (a >= 0x04000120u && a < 0x0400012Cu) || a == 0x04000134u || ((a >= 0x04000200u && a < 0x04000204u) || a == 0x04000208u) ||
+              (a >= 0x0400010Cu && a < 0x04000110u);
+    if (!hit) return;
+    trace_left--;
+    extern uint32_t rt_rets[4096], rt_depth;
+    rt_log("[sio] %s %08X/%d %s%08X  (caller returns to %08X)", rw, a, size, rw[0] == 'R' ? "-> " : "<- ", v,
+           rt_depth ? rt_rets[(rt_depth - 1) & 4095u] : 0);
+}
+
 int rt_sio_read(Sio *s, uint32_t a, int size, uint32_t *out) {
     uint32_t end = a + (uint32_t)size;
     int covers_if = a <= 0x04000202u && 0x04000202u < end;
@@ -154,10 +221,12 @@ int rt_sio_read(Sio *s, uint32_t a, int size, uint32_t *out) {
         if (s->irq_flag) v |= 0x80u << (8 * (0x04000202u - a));
     }
     *out = v;
+    trace_acc("R", a, size, v);
     return 1;
 }
 
 int rt_sio_write(Sio *s, uint32_t a, int size, uint32_t v) {
+    trace_acc("W", a, size, v);
     uint32_t end = a + (uint32_t)size;
     int covers_if = a <= 0x04000202u && 0x04000202u < end;
     if (sio_addr(a)) {
@@ -263,8 +332,12 @@ void link_hub_disconnect(LinkTransport *t) {
 }
 
 /* =============================================================== transporte "local": TCP em 127.0.0.1 */
-enum { M_HELLO = 1, M_SEND = 2, M_ROUND = 3 };
-typedef struct { uint8_t type, a; uint16_t v[4]; uint16_t pad; } Msg;   /* 12 bytes */
+/* Cada instancia roda no SEU relogio (processos independentes). Para a troca nao usar um SIOMLT_SEND
+ * velho, o mestre so inicia a rodada N+1 depois que todo filho presente confirmou (ACK) a rodada N: o ACK
+ * sai quando o filho terminou a troca E o handler do IRQ serial (que escreve o proximo SEND) ja rodou.
+ * Espera maxima 50 ms de relogio real por filho (depois segue com o valor que tiver). */
+enum { M_HELLO = 1, M_SEND = 2, M_ROUND = 3, M_ACK = 4 };
+typedef struct { uint8_t type, a; uint16_t v[4]; uint16_t round; } Msg;   /* 12 bytes */
 
 typedef struct Peer { sock_t fd; Msg buf; int have; } Peer;
 typedef struct Local {
@@ -272,11 +345,16 @@ typedef struct Local {
     sock_t listener;
     Peer peers[4];            /* host: indice = id do filho; join: peers[0] = host */
     uint16_t latest[4];       /* host: ultimo SEND de cada filho */
+    uint16_t acked[4];        /* host: ultima rodada confirmada por cada filho */
+    uint16_t round;           /* host: ultima rodada enviada; join: ultima recebida */
     uint32_t mask;            /* host: presentes; join: ultima mascara recebida */
     uint16_t my_send;         /* join: reenvia ao reconectar */
     char addr[64];
     unsigned tries;
+    uint64_t ack_waits, ack_timeouts;
 } Local;
+
+double rt_now_us(void);
 
 static int net_started;
 static void net_init(void) {
@@ -332,11 +410,63 @@ static void local_publish(LinkTransport *t, uint16_t v) {
     }
 }
 
+static void local_ack(LinkTransport *t) {   /* filho: confirma a rodada recebida */
+    Local *l = t->priv;
+    if (!l->host && l->peers[0].fd != SOCK_BAD) {
+        Msg m = {M_ACK, (uint8_t)t->player_id, {0, 0, 0, 0}, l->round};
+        if (send_msg(l->peers[0].fd, &m) != 0) local_drop(l, 0);
+    }
+}
+
+/* host: aceita filhos novos e le SEND/ACK de quem ja esta conectado */
+static void host_pump(Local *l) {
+    for (;;) {
+        sock_t c = accept(l->listener, NULL, NULL);
+        if (c == SOCK_BAD) break;
+        int id = 1;
+        while (id < l->players && l->peers[id].fd != SOCK_BAD) id++;
+        if (id >= l->players) { sock_close(c); continue; }   /* sala cheia */
+        set_nonblock(c);
+        l->peers[id].fd = c; l->peers[id].have = 0;
+        l->mask |= 1u << id;
+        l->latest[id] = LINK_ABSENT;
+        l->acked[id] = l->round;   /* entra sincronizado: nao atrasa a rodada em curso */
+        Msg h = {M_HELLO, (uint8_t)id, {(uint16_t)l->players, (uint16_t)l->mask, 0, 0}, 0};
+        send_msg(c, &h);
+        rt_log("[link] player %d connected", id + 1);
+    }
+    for (int i = 1; i < l->players; i++) {
+        if (l->peers[i].fd == SOCK_BAD) continue;
+        Msg m;
+        int r;
+        while ((r = recv_msg(&l->peers[i], &m)) == 1) {
+            if (m.type == M_SEND) l->latest[i] = m.v[0];
+            else if (m.type == M_ACK) l->acked[i] = m.round;
+        }
+        if (r < 0) local_drop(l, i);
+    }
+}
+
 static int local_exchange(LinkTransport *t, uint16_t my, uint16_t out[4]) {
     Local *l = t->priv;
+    /* espera os filhos terminarem a rodada anterior (e o handler deles escrever o proximo SEND) */
+    double t0 = 0;
+    static int noack = -1;
+    if (noack < 0) noack = getenv("KIRBY_LINK_NOACK") != NULL;   /* diagnostico: sem rendezvous */
+    for (;;) {
+        host_pump(l);
+        if (noack) break;
+        int late = 0;
+        for (int i = 1; i < l->players; i++)
+            if (l->peers[i].fd != SOCK_BAD && l->acked[i] != l->round) late = 1;
+        if (!late) break;
+        if (t0 == 0) { t0 = rt_now_us(); l->ack_waits++; }
+        else if (rt_now_us() - t0 > 50000.0) { l->ack_timeouts++; break; }
+    }
+    l->round++;
     out[0] = my;
     for (int i = 1; i < 4; i++) out[i] = (l->mask >> i) & 1 ? l->latest[i] : LINK_ABSENT;
-    Msg m = {M_ROUND, (uint8_t)l->mask, {out[0], out[1], out[2], out[3]}, 0};
+    Msg m = {M_ROUND, (uint8_t)l->mask, {out[0], out[1], out[2], out[3]}, l->round};
     for (int i = 1; i < l->players; i++)
         if (l->peers[i].fd != SOCK_BAD && send_msg(l->peers[i].fd, &m) != 0) local_drop(l, i);
     return 1;
@@ -344,32 +474,7 @@ static int local_exchange(LinkTransport *t, uint16_t my, uint16_t out[4]) {
 
 static int local_poll(LinkTransport *t, LinkEvent *ev) {
     Local *l = t->priv;
-    if (l->host) {
-        for (;;) {   /* novos filhos */
-            sock_t c = accept(l->listener, NULL, NULL);
-            if (c == SOCK_BAD) break;
-            int id = 1;
-            while (id < l->players && l->peers[id].fd != SOCK_BAD) id++;
-            if (id >= l->players) { sock_close(c); continue; }   /* sala cheia */
-            set_nonblock(c);
-            l->peers[id].fd = c; l->peers[id].have = 0;
-            l->mask |= 1u << id;
-            l->latest[id] = LINK_ABSENT;
-            Msg h = {M_HELLO, (uint8_t)id, {(uint16_t)l->players, (uint16_t)l->mask, 0, 0}, 0};
-            send_msg(c, &h);
-            rt_log("[link] player %d connected", id + 1);
-        }
-        for (int i = 1; i < l->players; i++) {
-            if (l->peers[i].fd == SOCK_BAD) continue;
-            Msg m;
-            int r;
-            while ((r = recv_msg(&l->peers[i], &m)) == 1)
-                if (m.type == M_SEND) l->latest[i] = m.v[0];
-            if (r < 0) local_drop(l, i);
-        }
-        return 0;
-    }
-    /* filho */
+    if (l->host) { host_pump(l); return 0; }
     if (l->peers[0].fd == SOCK_BAD) {
         if ((l->tries++ & 0x3F) != 0) return 0;   /* tenta conectar de vez em quando */
         sock_t c = socket(AF_INET, SOCK_STREAM, 0);
@@ -394,6 +499,7 @@ static int local_poll(LinkTransport *t, LinkEvent *ev) {
     }
     if (m.type == M_ROUND) {
         l->mask = m.a;
+        l->round = m.round;
         ev->type = 1;
         memcpy(ev->values, m.v, sizeof ev->values);
         return 1;
@@ -403,6 +509,9 @@ static int local_poll(LinkTransport *t, LinkEvent *ev) {
 
 static void local_close(LinkTransport *t) {
     Local *l = t->priv;
+    if (l->host && l->ack_timeouts)
+        rt_log("[link] master waited for child acks %llu times, %llu hit the 50 ms limit",
+               (unsigned long long)l->ack_waits, (unsigned long long)l->ack_timeouts);
     for (int i = 0; i < 4; i++) if (l->peers[i].fd != SOCK_BAD) sock_close(l->peers[i].fd);
     if (l->host && l->listener != SOCK_BAD) sock_close(l->listener);
     free(l);
@@ -413,7 +522,7 @@ static LinkTransport *local_new(Local *l, int id) {
     LinkTransport *t = (LinkTransport *)calloc(1, sizeof *t);
     t->name = "local"; t->player_id = id; t->players = l->players; t->priv = l;
     t->connected_mask = local_mask; t->publish = local_publish; t->exchange = local_exchange;
-    t->poll = local_poll; t->close = local_close;
+    t->poll = local_poll; t->close = local_close; t->ack = local_ack;
     return t;
 }
 
@@ -510,6 +619,11 @@ void rt_sio_read_ini(const char *path, char *mode, int *players, int *port, char
 
 void rt_sio_report(void) {
     if (!rt_sio_cur) return;
+    Sio *s = rt_sio_cur;
+    printf("LINK packets (12 halfwords, sum must be 0xFFF1) seen by this player, per sender slot:");
+    for (int p = 0; p < 4; p++)
+        printf(" P%d valid=%llu invalid=%llu sync=%llu%s", p + 1, (unsigned long long)s->pk_valid[p],
+               (unsigned long long)s->pk_invalid[p], (unsigned long long)s->pk_sync[p], p < 3 ? " |" : "\n");
     printf("LINK: %llu exchanges completed (%s)\n", (unsigned long long)rt_sio_exchanges,
            rt_sio_cur->tp ? rt_sio_cur->tp->name : "none");
 }

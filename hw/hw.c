@@ -69,6 +69,7 @@ void hw_reset(void) {
     memset(ps, 0, sizeof ps); memset(wave, 0, sizeof wave); lfsr = 0x7FFF; seq_acc = 0; seq_step = 0;
     frame_flag = 0; keyinput = 0x03FF; if_reg = 0; line_cyc = 0; vcount = 0;
     W16(DISPCNT, 0x0080);   /* forced blank, como a BIOS deixa */
+    W16(0x134, 0x8000);     /* RCNT: general-purpose mode after reset, as left by the BIOS; the game writes 0 to enter serial modes */
     mark(0x00, 0x00); mark(0x04, 0x0E); mark(0x48, 0x4A); mark(0x50, 0x52); mark(0x60, 0x9E);
     for (int n = 0; n < 4; n++) mark(0xBA + 12 * n, 0xBA + 12 * n);
     mark(0x100, 0x10E); mark(0x120, 0x12A); mark(0x130, 0x134); mark(0x140, 0x15A);
@@ -767,7 +768,11 @@ void hw_write(uint32_t addr, int size, uint32_t v) {
             for (int i = 0; i < size; i++) wave[bk][((o & ~(uint32_t)(size - 1)) + i) & 15] = (uint8_t)(v >> (8 * i));
             return;
         }
-        if (size == 4) { io_wr16(o & ~3u, (uint16_t)v); io_wr16((o & ~3u) + 2, (uint16_t)(v >> 16)); }
+        if (size == 4 && (o & ~3u) == SIOCNT) {          /* SIOCNT | SIOMLT_SEND << 16: both halves land together, so a start
+                                                          * bit in the same word transmits the NEW send value */
+            io_wr16(0x12A, (uint16_t)(v >> 16)); io_wr16(SIOCNT, (uint16_t)v);
+        }
+        else if (size == 4) { io_wr16(o & ~3u, (uint16_t)v); io_wr16((o & ~3u) + 2, (uint16_t)(v >> 16)); }
         else if (size == 2) io_wr16(o, (uint16_t)v);
         else if ((o & ~1u) == IF) io_wr16(IF, (uint16_t)((v & 0xFF) << ((o & 1) * 8)));   /* w1c so no byte */
         else if (o >= 0x300) io[o] = (uint8_t)v;                                           /* POSTFLG/HALTCNT */

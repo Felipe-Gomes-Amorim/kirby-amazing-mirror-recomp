@@ -65,7 +65,23 @@ void rt_script_dir(const char *d) {
     strncpy(frames_dir, d, sizeof frames_dir - 1);
 }
 
+static uint32_t peeks[32];
+static int npeeks;
+int rt_script_peek(const char *spec) {   /* --peek ADDR[,ADDR...] (hex): le palavras da RAM em cada --snap */
+    char buf[512];
+    strncpy(buf, spec, sizeof buf - 1);
+    buf[sizeof buf - 1] = 0;
+    for (char *t = strtok(buf, ","); t && npeeks < 32; t = strtok(NULL, ","))
+        peeks[npeeks++] = (uint32_t)strtoul(t, NULL, 16);
+    return 0;
+}
+
 static void snapshot(uint64_t frame) {
+    if (npeeks) {
+        fprintf(stderr, "[peek] frame=%llu", (unsigned long long)frame);
+        for (int i = 0; i < npeeks; i++) fprintf(stderr, " %08X=%08X", peeks[i], gba_read32(peeks[i]));
+        fprintf(stderr, "\n");
+    }
     const uint32_t *fb = hw_get_framebuffer();
     unsigned nonblack = 0;
     char path[512];

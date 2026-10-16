@@ -24,6 +24,7 @@ struct LinkTransport {
     int (*exchange)(LinkTransport *, uint16_t my_value, uint16_t out[4]);   /* so mestre: 4 valores */
     int (*poll)(LinkTransport *, LinkEvent *);            /* atende a rede; 1 = evento devolvido */
     void (*close)(LinkTransport *);
+    void (*ack)(LinkTransport *);      /* filho: terminei a troca E o handler ja rodou (opcional) */
     void *priv;
 };
 

@@ -1226,6 +1226,32 @@ second poll `KlOnlinePoll(KlOnline *out)` with `{ int state; int slots[4] (0 emp
 again, like the SAVE codes. The layout must pass the same geometry checks as the SAVE section (no overlapping
 widgets/texts). Implementation waits for P2 (transport) - nothing in `launcher_ui.c` changes yet.
 
+### 17. Link study section 9 checked against hw/ (Gwen)
+Poppy's 'Minimo que o hw/ precisa emular' items marked [V]. Result of each (tests: `hw/tests/test_link.c` T16-T19,
+`hw/tests/run_link.ps1`; the old hw suite, the UI tests and a 2500-frame kirby.exe run still pass):
+- **RCNT (0x04000134):** was NOT reset to 0x8000 - **fixed** (`hw_reset` writes 0x8000). Multi-play requires RCNT bit 15 = 0,
+  so until the game writes RCNT = 0 a SIOCNT `0x2003` + start bit does nothing (tested), exactly the "not a MultiBoot client"
+  situation. RCNT stays a plain 16-bit register.
+- **SIOCNT / SIOMLT_SEND at 8/16/32 bits:** 16 bits and byte writes already worked; verified now: `ldr [SIOCNT]` =
+  SIOCNT | SIOMLT_SEND << 16, byte read/write of SIOCNT and SIOCNT+1 (a `strb` of `old | 0x80` on the low byte starts the
+  transfer; clearing bit 6 of the HIGH byte clears the IRQ-enable bit), SIOMLT_SEND as two bytes or one halfword.
+  **One fix:** a 32-bit write at SIOCNT now lands SIOMLT_SEND (high half) BEFORE SIOCNT, so a start bit in the same word
+  transmits the NEW send value (before, it would have sent the old one). `str 0x2000` sets mode multi / baud 0 and clears SEND.
+- **SIOMULTI as 32-bit pairs:** `ldm` style reads of 0x04000120 / 0x04000124 return MULTI0|MULTI1<<16 and MULTI2|MULTI3<<16;
+  byte reads work; writes (8/16/32) are ignored in multi-play (read-only), plain storage outside it (unchanged).
+- **Timer3 (0x0400010C/E):** already correct, now proven: a 32-bit write `0x00C0BBBC` = TM3CNT_L 0xBBBC reload + TM3CNT_H
+  enable|IRQ|F/1; the counter loads 0xBBBC on the 0 -> 1 edge and counts 1 per cycle; overflow after **exactly 17476 cycles**
+  raises **IF bit 6**, reloads 0xBBBC, period 17476; IE bit 6 gates the CPU interrupt. **Restart semantics:** rewriting
+  TM3CNT_H while it runs does NOT restart (real hardware: only a 0 -> 1 edge reloads); stop (write 0) then the 32-bit write
+  restarts it. The game's code does the stop-then-start sequence (`str 0` to 0x0400010C then `strh 0xC0` / the 32-bit word),
+  so this is the behaviour it needs; if the runtime ever relies on a restart WITHOUT a stop, say so and it can be changed.
+- **Timing (T19):** 4 slots x 18 bit times at 115200 baud = **10440 cycles** (`hw_sio_slot_cycles` = 2610 per unit) < 17476.
+  Test: six exchanges driven by the master's Timer3: each finishes 7036 cycles before the overflow, the IF-bit-6 handler's
+  `ldm` of SIOMULTI0-3 sees the values of the exchange that JUST finished (not the previous one), the transfer counter
+  matches. Negative control: at 9600 or 57600 baud 4 slots take longer than 17476 cycles, the exchange is still busy at the
+  overflow and the handler would read 0xFFFF / the previous exchange - so the game needs 115200 baud (the 0x2003 literal).
+- **Not changed:** the ONLINE launcher screen draft (item 16E) - nothing in this check affected it. Nothing implemented in the UI.
+
 - Cuidado para o runtime: `hw_irq_pending` ja aplica IME e IE&IF; o runtime so decide o despacho.
   O registro BIOS_IF (0x03007FF8) e IWRAM, fica a cargo do runtime ao tratar VBlankIntrWait.
 
@@ -1806,6 +1832,19 @@ cache global do zig, +alguns s).
 - Compilacao de 600k instrucoes em C: 4-5 min a frio; depois cache por shard.
 - ArcTan2 e RegisterRamReset: ainda sem conferencia com a BIOS real.
 
+### Cabo link P1.5: duas instancias reais (Nasus) - resultado parcial
+- **0x08151DB0 nao era travamento**: e a espera de DISPSTAT do titulo (laco de VBlank por polling). Em modo link o jogo nao chama VBlankIntrWait nessa tela, entao o contador de quadros parava e o `--frames`/hooks nao andavam. Correcao: `grab_frame(Cpu*)` em `gba_bios.c` conta quadros pelo hw quando passam >3 quadros sem VBlankIntrWait. **So com `rt_sio_cur != NULL`**: mode=off conta so por VBlankIntrWait (um teste do boot, IRQs=600/601, pegou a diferenca e foi corrigido).
+- RCNT reseta em 0x8000 no runtime (SIO desligado ate o jogo escrever RCNT=0). Testes de `--selftest-link` escrevem RCNT=0.
+- Condicoes do mestre conferidas no `rt_sio.c` (SD=1, SI=0, ID=0, start so do mestre, Timer3 reload 0xBBBC/17476 ciclos, IRQ serial = IF bit 7 em `rt_irq_service`, acesso byte/16/32 bits).
+- **Duracao da troca**: 72 bits x baud = 10 486 ciclos a 115200 (< 17476 do Timer3: termina antes do estouro). ~16 trocas por quadro (280896/17476); um pacote gLink = 15 trocas, ou seja **1 pacote por quadro cabe** (ate o limite do wall-clock: troca TCP em localhost e ~sub-ms; o encontro mestre/filho espera ate 50 ms por ACK do filho, `KIRBY_LINK_NOACK=1` desliga).
+- Transporte por troca mantido (funciona em localhost). Velocidade sem pacing ~6,5-7,4x tempo real com link ligado.
+- **Acompanhamento no jogo** (script de teclas: `A@700+8,A@800+8,A@1060+8,DOWN@1200+4,A@1260+8,A@1500+8,DOWN@1650+4,A@1700+8`): titulo -> file select -> game select -> SUB-GAMES -> Speed Eaters -> MULTI PLAYER -> tela **TRANSMITTING** ("Please connect the cable", host vira P1 "OK?", join vira P2). Esse caminho e o handshake **multiboot/KMB** (0x6200 do mestre, 0x0000 do filho, SDK MultiBoot), NAO o gLink (0xFEFE): nenhum pacote valido ali.
+- **Pacotes gLink validos foram vistos** (uma execucao, com `A@2500+8` extra no "OK?", KIRBY_SIO_EX ligado): no host, `P1 valid=61 sync=61`, `P2 valid=23 sync=71` (soma 0xFFF1), depois o jogo mostra "Communication Error". Nao reproduzi de forma estavel: o resultado depende de quando cada instancia chega ao "OK?" (execucao nao deterministica: wall-clock no encontro por ACK + velocidade sem pacing). Outras execucoes ficam em "Please connect" no join e so veem a troca inicial (`P1 6200.., P2 0000..`).
+- **NAO atingido**: lobby estavel nas duas instancias, pacotes validos medidos no join, inicio de partida com teclas do outro jogador. Bloqueios: (1) caminho do menu: o gLink (LinkStartTimer 0x081576A0 chamado do lobby 0x0801A688, ver P0b da Poppy) parece vir de outro menu (aventura 4 Kirbys / mirror), nao do SUB-GAMES; (2) corrida de inicializacao entre as duas instancias; (3) o join as vezes nao termina limpo (`timeout` mata o processo depois do ultimo log: fechamento de socket/saida a investigar).
+- Proximo passo: pedir a Poppy o caminho de menu exato ate 0x0801A688 (ou usar `--peek` em 0x03002558) e fixar a partida das duas instancias por um barramento de sincronizacao de quadro (lockstep de partida) em vez de wall-clock.
+- Diagnostico: `KIRBY_SIO_TRACE=N`, `KIRBY_SIO_EX=N` (+`KIRBY_SIO_EX_FROM=troca`), `KIRBY_SIO_PKT=N`, `KIRBY_LINK_NOACK=1`; `--peek ADDR,..` imprime palavras da RAM a cada `--snap`; `rt_sio_report` mostra validos/invalidos por slot.
+- Suite completa (139 testes) verde e quadro final 3000 frames mode=off md5 0455812b... identico.
+
 ## Som (M4A) e save (SRAM) (Riven)
 Fonte: desmontagem a mao dos enderecos abaixo (capstone) + ram_code.csv da Poppy. E o motor
 **M4A / "MusicPlayer2000"** padrao da biblioteca de som da Nintendo, nao BIOS (o jogo nao usa
@@ -2370,11 +2409,11 @@ hw2..hw11 = 20 bytes de payload (5 palavras copiadas de 0x030036B0)
 |---|---|---|
 | filho ausente / cabo solto | SIOMULTIn = 0xFFFF -> pacote invalido (soma != -15); bit do jogador sai de "conectado agora"; vira bit no nibble do cabecalho (visivel a todos no quadro seguinte) | 1 quadro |
 | motor gLink sem sincronia do mestre | contador `gLink[0xA]` +1 por quadro sem a flag de sincronia (bit6); **> 7 (8 quadros)** -> estado 2 e status bit15 | 8 quadros (acumulado, nao zera) |
-| faltam as teclas de um jogador (queda, rede lenta) | `LinkFrameSync` NAO avanca o jogo (espera); contador `0x020382D0+0x2AD` | **ate 16 quadros** (~267 ms); depois erro **7** |
+| faltam as teclas de um jogador (queda, rede lenta) | `LinkFrameSync` NAO avanca o jogo (espera); erro **6** (buraco/0xFFFF) ja no 1o quadro sem pacote valido. **CORRIGIDO (execucao, secao 12)**: o erro 7 (espera > 16 quadros) so existe se a "profundidade alvo" `0x020382D0+0x2A0+p` for >= 2; no estado padrao e 0 e o erro visto numa queda e o **6** | 6: imediato; 7: ~16 quadros (~267 ms) |
 | pacote com tipo != 0x20 / sessao diferente / anel estourou / marcador 0xFFFF | erros **3 / 4 / 5 / 6** | imediato |
 | checksum de estado de jogo diferente entre jogadores | erro **8** = **dessincronia detectada pelo proprio jogo** (2 bits por quadro, so se flag 0x8) | 1 quadro |
 | qualquer erro | `LinkErrorScreen 0x08032E98`: mostra tela de erro com o codigo (`0x02038580`), `LinkDisable`, limpa buffers e volta ao menu | — |
-Conclusao: o jogo ja tolera **latencia/perda de ate ~15 quadros** por jogador sem erro (as teclas sao redundantes em 8 quadros e ele espera), e **detecta dessincronia sozinho**. O mestre nunca muda: se o mestre cai, a sessao acaba (erro 7). [L]
+Conclusao: o jogo ja tolera **latencia/perda de ate ~15 quadros** por jogador sem erro (as teclas sao redundantes em 8 quadros e ele espera), e **detecta dessincronia sozinho**. O mestre nunca muda: se o mestre cai, a sessao acaba (erro 6, ou 7 se a profundidade alvo >= 2). [L, corrigido na secao 12]
 
 ### 7. Quantos jogadores
 - A deteccao e por **pacotes validos**, nao por SIOCNT diretamente: `gLink[3]` (agora) e `gLink[2]` (alguma vez) por slot; o lobby passa `(status >> 8) & 0xF` ao `LinkInit` e ao iniciar a sessao fixa
@@ -2402,11 +2441,34 @@ Estado em 2026-10-16 do `hw/hw.c` + `rt_sio.c` (Nasus/Gwen, P1) marcado entre pa
 ### 10. Implicacoes para o online (inferencia, nao verificado em execucao)
 - O protocolo do jogo ja e **lockstep por teclas com redundancia de 8 quadros e espera ate 16**: nao e preciso rede no nivel de cada troca de 16 bits (impossivel a 1 ms).
   Plano coerente: cada instancia emula o SIO localmente e a rede leva, por jogador, **o fluxo de halfwords do pacote (24 B por quadro)**; o SIO local entrega aos handlers o ultimo pacote conhecido de cada remoto,
-  alinhado pelo marcador 0xFEFE; pacote atrasado = 0xFFFF naquela troca (invalido) e o jogo espera. Tolera ate ~15 quadros de atraso por jogador antes do erro 7.
+  alinhado pelo marcador 0xFEFE; pacote atrasado = 0xFFFF naquela troca (invalido) e o jogo espera. Tolera atraso de pacote enquanto as 8 teclas redundantes cobrirem (a espera de 16 quadros e o erro 7 dependem da profundidade alvo; veja secao 12).
 - Todos precisam do mesmo codigo/estado inicial e do mesmo byte de sessao `0x020382D0+6`; a dessincronizacao e detectada pelo proprio jogo (erro 8) se a flag de verificacao estiver ligada.
 - Risco: o mestre faz ~16 trocas por quadro **dirigidas pelo Timer3**; se o hw emulado entrega as trocas mais rapido/lento que 1,04 ms por troca, o pacote pode nao completar em um quadro (o receptor so completa em idx==11).
 
-### 11. Pendencias deste estudo
-- Fases/bytes exatos dos pacotes de lobby (0x20/0x40/0x41/0x42/0x22) e a flag de bit19 de `0x03002440` ("link permitido") — nao decodificados; nao bloqueiam o P1/P2.
-- Semantica fina das flags de cabecalho bits 4-6 (sincronia mestre->filhos) — descrita pelo codigo, nao testada em execucao.
-- Nada foi executado com dois emuladores: todo o texto acima vem de leitura estatica; o primeiro teste com 2 instancias (Nasus P1) deve confirmar a secao 4 (15 trocas, soma -15).
+### 11. Pendencias deste estudo (atualizado em P0b; ver secao 12)
+- Fases/bytes de lobby 0x20/0x40/0x41/0x42/0x22 e bit19 de `0x03002440`: decodificacao estatica na secao 12; a confirmacao com TRACOS das 2 instancias reais depende do formato pedido no ROLES.md.
+- Semantica fina das flags de cabecalho bits 4-6: ainda so por leitura de codigo.
+- Secao 4 (15 trocas, soma -15) **CONFIRMADA em execucao** (secao 12).
+
+### 12. P0b: execucao do codigo real do link (Poppy, 2026-10-16)
+**Bancada** `tools/link_sim.py` (Unicorn, so no .venv): carrega a ROM, roda o codigo REAL `LinkEnable/LinkInit/LinkMain`, o handler ARM de IWRAM (copiado de 0x08158F54), `BuildInputPacket` e `LinkFrameSync`, ligando N "GBAs" por um cabo multi-play em Python (SIOMULTI, SIOCNT, Timer3, IRQ serial/Timer3 pelo vetor 0, CpuSet por HLE). Cada halfword enviado/recebido fica em `Session.cable.log`. NAO e emulador de GBA (so o que o link toca).
+**Testes de aceite**: `.venv\Scripts\python.exe -m unittest tests.test_link_protocol -v` (18 testes, ~6 s, sem rede; pulam sem unicorn/ROM/exe).
+| verificacao | resultado |
+|---|---|
+| soma dos 12 halfwords (hw0..hw11) | == 0xFFF1 em TODO pacote enviado, 2/3/4 jogadores, mestre e filhos |
+| ordem | 1 troca `0xFEFE`, depois hw0..hw13 (hw0 = contador de quadro | flags<<8, hw1 = `~soma-14`, hw2..hw11 = 20 B de payload, hw12 = hw13 = 0) = **15 trocas por pacote**, mais **1 troca ociosa 0x0000** = **16 trocas por quadro** (mestre: `0xFEFE` a cada 16). Filhos: o `0xFEFE` sai repetido (atraso de 1 troca); vale o ultimo |
+| contador de quadro | sobe 1 por pacote |
+| jogador ausente | slot do cabo = 0xFFFF em toda troca; o bit do jogador sai do status (`0x797 -> 0x793` para o jogador 2); a copia do jogador na area de recepcao (`0x03002490+20*p`) **nao e atualizada** (pacote descartado) |
+| link off | `rt_boot.exe` 400 quadros: sem flag == `--link off` == `--link solo` (md5 do PPM igual) |
+**Achado de bootstrap**: o mestre so encadeia as trocas do Timer3 depois de `LinkStartTimer` (0x081576A0, `gLink[8] |= 0x80` se mestre; o lobby chama em 0x0801A688 logo apos o 1o `LinkMain`). Sem isso so ocorre 1 troca. Isto explica o filho "preso" em pc 0x08151DB0 do Nasus se o mestre nunca chamar esse ponto (a verificar com traco).
+**Cenarios de erro** (`0x02038580`; tamanho de warm-up: os primeiros ~4 quadros dao 3 e depois 6 porque ainda nao ha pacote valido — limpe `0x02038580` e `LS+4 &= 0x7FFF` apos o aquecimento, como o teste faz):
+| erro | como forcar (na bancada) | no jogo real |
+|---|---|---|
+| 3 tipo != 0x20 | gancho `tamper`: `G_SEND[0]=0x21` no filho em 1 quadro; o mestre reporta 3 | enviar pacote de lockstep corrompido / versao de payload diferente |
+| 4 sessao | `LS+6` diferente entre as unidades (0x5A x 0x77); reportado por ambos em <1 quadro | sessoes iniciadas separadamente (byte `0x020382D6` diferente) |
+| 5 anel estourou | **nao reproduzido**: vem de `0x08030D4C` (procura o quadro N-5 no anel de entradas), chamada so de 0x0801AA04/0x08020140/0x08032AD4/0x08032DE4 (lobby/sessao), nao do `LinkFrameSync`; apagar o anel ou saltar o contador nao dispara | so por atraso/avanco de >= 5 quadros nesses caminhos; precisa de traco real |
+| 6 buraco / 0xFFFF | desligar um jogador (`cable.present[i]=False`); mestre reporta 6 no mesmo quadro | cabo solto / jogador sai / rede perde o pacote |
+| 7 parado > 16 quadros | igual a 6 MAS com `LS+0x2A0+p = 2` nas duas unidades (profundidade alvo >= 2) — o jogo para ~16 quadros e da 7 | so se algum codigo escrever a profundidade alvo (nao ha referencia literal a 0x02038570-73; ver pendencia) |
+| 8 checksum de estado | `check=True` (`LS+4` bit3) e inverter bits 10-11 de uma entrada (`G_SEND[3] ^= 0x0C`); o mestre da 8 em 1 quadro; sem a adulteracao nao ha erro | dessincronia real (RNG/estado diferente) com a flag de verificacao ligada |
+**Fases do lobby (decodificacao estatica)**: pacote de lobby = byte0=2, [1]=modo/versao, [2..3]=0x0123, [4..0xB]=perfil de 8 B, [0xC..0xD]=mascara de ack, [0xE]=fase (0x20,0x22,0x40,0x41,0x42), enviado pelos emissores 0x0803169C (hello), 0x08031764/0x08031860/0x080319F0/0x08031AA8. Ordem dinamica e o escritor do bit19 ainda dependem de tracos reais.
+**Pendencias**: (a) quem escreve a profundidade alvo `LS+0x2A0+p`; (b) erro 5; (c) tracos reais do lobby (formato pedido no ROLES.md); (d) meta-teste com Nasus: a bancada e o runtime devem produzir o mesmo fluxo de halfwords.

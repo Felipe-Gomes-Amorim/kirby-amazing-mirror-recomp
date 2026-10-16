@@ -52,6 +52,7 @@ CURATED = {
                  'flags; for each player validates sum(12 halfwords)==-15 (0xFFF1) and flag; valid -> gLink[3] |= 1<<p, copies the 20-byte '
                  'payload to recv_dest[p*20], keeps header bit5 per player; clears the internal buffer. Then gLink[2] |= gLink[3] and derives '
                  'gLink[8] flags (bits 4-6) from player 0 header', 'high'),
+    0x081576a0: ('glink', 'LinkStartTimer', 'if master: gLink[8] |= 0x80 (enables the Timer3 exchange chain; the lobby calls it once at 0x0801A688)', 'high'),
     0x081576bc: ('glink', 'LinkStop', 'IME off; IE&=~0xC0 (serial+timer3 off); SIOCNT=0x2003 (multi-play, no IRQ); TM3CNT_L=0xBBBC; IF=0xC0; gLink[8]&=0x7F', 'high'),
     0x08158f54: ('glink-irq', 'LinkIrqHandler (ARM, IWRAM 0x030068E0)', 'Serial IRQ (IF bit7) AND Timer3 IRQ (IF bit6) share vector slot 0 -> this code. '
                  'Reads SIOMULTI0-3 (one ldm of 2 words), stores SIOCNT.bit6 (error) in gLink[9]. SEND side: idx=gLink[0x14]; -1 => SIOMLT_SEND=0xFEFE and swaps the '

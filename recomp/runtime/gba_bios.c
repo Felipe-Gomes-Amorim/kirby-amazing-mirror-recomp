@@ -194,6 +194,7 @@ static uint64_t rt_frames_counted;
 const uint32_t *rt_last_frame(void) { return last_frame; }
 
 static int in_irq;   /* >0 enquanto o handler de IRQ executa: o relogio do hw fica congelado */
+int rt_bios_in_irq(void) { return in_irq; }
 
 static void irq_deliver(Cpu *c, uint16_t pend) {
     uint32_t sr[13], sflags[4] = {c->n, c->z, c->c, c->v};
@@ -242,11 +243,22 @@ void rt_irq_service(Cpu *c) {
     if (pend) irq_deliver(c, pend);
 }
 
-static void grab_frame(void) {
+static uint64_t last_vbw_hwframe;   /* quadro do hw em que o jogo chamou VBlankIntrWait pela ultima vez */
+
+/* Quadro fechado pelo hw. Jogos normais fecham o ciclo em VBlankIntrWait (rt_frame_hook la). Em modo
+ * link o KatAM espera o fim do VBlank girando em DISPSTAT, sem nenhuma SWI: se faz mais de 3 quadros
+ * do hw sem VBlankIntrWait, o hook/contagem/save passam a ser dirigidos por aqui (teclas, janela,
+ * ritmo e --frames continuam funcionando). Com VBlankIntrWait regular este caminho nunca dispara. */
+static void grab_frame(Cpu *c) {
     const uint32_t *fb = hw_frame_ready();
-    if (fb) {
-        last_frame = fb;
-        rt_frames_done++;
+    if (!fb) return;
+    last_frame = fb;
+    rt_frames_done++;
+    if (rt_sio_cur && rt_frames_done - last_vbw_hwframe > 3) {   /* so em modo link: mode=off conta so por VBlankIntrWait */
+        rt_frames_counted++;
+        { extern void rt_save_tick(void); rt_save_tick(); }
+        if (rt_frame_hook) rt_frame_hook(rt_frames_counted);
+        if (rt_frames_limit && rt_frames_counted >= rt_frames_limit && !c->stop) c->stop = RT_STOP_FRAMES;
     }
 }
 
@@ -287,7 +299,7 @@ static void run_cycles(Cpu *c, uint32_t n) {
         }
         left -= used > left ? left : used;
         if (rt_sio_cur) rt_sio_advance(rt_sio_cur, used > chunk ? chunk : used);
-        grab_frame();
+        grab_frame(c);
         rt_irq_service(c);
         if (c->stop) break;
     }
@@ -321,6 +333,7 @@ static int vblank_intr_wait(Cpu *c, uint32_t next) {
     gba_write16(BIOS_IF, gba_read16(BIOS_IF) & ~1u);
     gba_write16(0x04000208, 1); /* IME = 1 */
     c->pc = next;
+    last_vbw_hwframe = rt_frames_done;
     if (rt_opt_stop_at_vblank_wait) {
         c->stop = RT_STOP_VBLANK_WAIT;
         return 1;
@@ -332,6 +345,7 @@ static int vblank_intr_wait(Cpu *c, uint32_t next) {
         if (c->stop) return 1;
     }
     c->pc = next;
+    last_vbw_hwframe = rt_frames_done;
     rt_frames_counted++;
     { extern void rt_save_tick(void); rt_save_tick(); }
     if (rt_frame_hook) rt_frame_hook(rt_frames_counted);

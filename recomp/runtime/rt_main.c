@@ -16,6 +16,21 @@
 #endif
 
 static Cpu cpu;
+static const char *g_ppm;   /* --ppm: ultimo quadro ao sair (tambem no watchdog) */
+
+static void write_ppm(void) {
+    const uint32_t *fb = g_ppm ? hw_get_framebuffer() : NULL;
+    if (!fb) return;
+    FILE *o = fopen(g_ppm, "wb");
+    if (!o) return;
+    fprintf(o, "P6\n240 160\n255\n");
+    for (int i = 0; i < 240 * 160; i++) {
+        fputc((fb[i] >> 16) & 255, o);
+        fputc((fb[i] >> 8) & 255, o);
+        fputc(fb[i] & 255, o);
+    }
+    fclose(o);
+}
 extern Cpu *rt_cpu;
 int rt_measure;
 extern int rt_exit_code;
@@ -35,6 +50,10 @@ static unsigned watchdog_s;
 static void watchdog_fire(void) {
     fprintf(stderr, "\n[rt] WATCHDOG: %us without finishing. last backward branch=%08X loops=%u\n",
             watchdog_s, rt_loop_site, rt_loops);
+    { extern int rt_bios_in_irq(void); extern uint32_t rt_depth;
+      fprintf(stderr, "[rt] state: in_irq=%d psr_if=%02X mode=%02X depth=%u IME=%u IE=%04X DISPSTAT=%04X hwframes=%llu irqs=%llu\n", rt_bios_in_irq(),
+              cpu.psr_if, cpu.mode, rt_depth, hw_read(0x04000208, 2), hw_read(0x04000200, 2), hw_read(0x04000004, 2), (unsigned long long)rt_frames_done, (unsigned long long)rt_irq_delivered); }
+    write_ppm();
     rt_abort(&cpu, "watchdog");
     fflush(stderr);
     exit(3);
@@ -222,10 +241,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--unresolved") && i + 1 < argc) rt_unresolved_path = argv[++i];
         else if (!strcmp(argv[i], "--keys") && i + 1 < argc) { if (rt_script_keys(argv[++i])) { fprintf(stderr, "--keys: invalid script"); return 1; } }
         else if (!strcmp(argv[i], "--snap") && i + 1 < argc) rt_script_snaps(argv[++i]);
+        else if (!strcmp(argv[i], "--peek") && i + 1 < argc) { extern int rt_script_peek(const char *); rt_script_peek(argv[++i]); }
         else if (!strcmp(argv[i], "--frames-dir") && i + 1 < argc) rt_script_dir(argv[++i]);
         else if (!strcmp(argv[i], "--sav") && i + 1 < argc) sav = argv[++i];
         else if (!strcmp(argv[i], "--stop-on-unresolved")) { extern int rt_stop_on_unresolved; rt_stop_on_unresolved = 1; }
-        else if (!strcmp(argv[i], "--ppm") && i + 1 < argc) ppm = argv[++i];
+        else if (!strcmp(argv[i], "--ppm") && i + 1 < argc) { ppm = argv[++i]; g_ppm = ppm; }
         else if (!strcmp(argv[i], "--trace-psr")) { extern int rt_trace_psr; rt_trace_psr = 200; }
         else if (!strcmp(argv[i], "--timeout") && i + 1 < argc) watchdog_s = (unsigned)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) {

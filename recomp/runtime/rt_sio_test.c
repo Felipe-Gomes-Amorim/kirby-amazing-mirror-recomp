@@ -45,10 +45,12 @@ static int run_until_idle(Sio **s, int n, int net) {
 }
 
 static void setup_modes(Sio **s, int n) {
-    for (int i = 0; i < n; i++) wr(s[i], SIOCNT, 2, MODE_MULTI_115200 | IRQEN);
+    for (int i = 0; i < n; i++) { wr(s[i], 0x134, 2, 0); wr(s[i], SIOCNT, 2, MODE_MULTI_115200 | IRQEN); }   /* o jogo escreve RCNT=0 (reset e 0x8000) */
 }
 
 static void round_check(const char *tag, Sio **s, int n, const uint16_t want[4], int net) {
+    if (net)   /* filhos entregam o ACK da rodada anterior (o mestre espera por ele) */
+        for (int k = 0; k < 3; k++) { for (int i = 1; i < n; i++) rt_sio_poll(s[i]); SLEEP_MS(2); }
     /* mestre inicia; os filhos devem ficar ocupados (net: depois de um poll) */
     wr(s[0], SIOCNT, 2, MODE_MULTI_115200 | IRQEN | START);
     CHECK(rd(s[0], SIOCNT, 2) & START, "%s: master busy right after Start", tag);
@@ -86,6 +88,8 @@ static void test_null(void) {
     Sio *s = rt_sio_new(NULL);
     Sio *a[1] = {s};
     CHECK(rd(s, SIOCNT, 2) == 0, "null: SIOCNT resets to 0 (SI=0 parent, SD=0 not connected)");
+    CHECK(rd(s, 0x134, 2) == 0x8000, "null: RCNT resets to 0x8000 (BIOS state after a cartridge boot)");
+    wr(s, 0x134, 2, 0);
     wr(s, SIOCNT, 2, MODE_MULTI_115200);
     wr(s, SEND, 2, 0x1234);
     wr(s, SIOCNT, 2, MODE_MULTI_115200 | START);
@@ -170,6 +174,7 @@ static void test_tcp(void) {
     CHECK(c1->player_id == 1, "tcp: first child got id 1");
     LinkTransport *c2 = link_local_join("127.0.0.1", port);
     s[2] = rt_sio_new(c2);
+    wr(s[2], 0x134, 2, 0);
     wr(s[2], SIOCNT, 2, MODE_MULTI_115200 | IRQEN);
     for (int w = 0; w < 3000; w++) {
         rt_sio_poll(s[0]); rt_sio_poll(s[1]); rt_sio_poll(s[2]);
