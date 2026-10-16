@@ -18,12 +18,12 @@ not an emulator. Think of it as translating the compiled game once, ahead of tim
 
 ## Quick start (no Python needed)
 
-Download `KirbyRecomp.zip` from the [Releases](../../releases) page (about 95 MB), extract it
+Download `KirbyRecomp.zip` from the [Releases](../../releases) page (about 122 MB), extract it
 somewhere you can write to, then:
 
 1. **Drag your ROM onto `KirbyRecomp.exe`** (or run it and pick the file).
 2. The launcher opens. Choose window size, fullscreen, scaling and volume, then press **Play**.
-3. The first run is playable within seconds (a built-in interpreter) while the fully compiled
+3. The first run is playable in about 15 seconds (a built-in interpreter) while the fully compiled
    version is built in the background, a few minutes at low priority. The next start uses the
    compiled game and opens in under a second.
 

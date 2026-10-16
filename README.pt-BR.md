@@ -17,12 +17,12 @@ resultado a um runtime que imita o hardware (vídeo, DMA, timers, interrupções
 
 ## Início rápido (sem Python)
 
-Baixe o `KirbyRecomp.zip` na página de [Releases](../../releases) (cerca de 95 MB), extraia
+Baixe o `KirbyRecomp.zip` na página de [Releases](../../releases) (cerca de 122 MB), extraia
 em uma pasta onde você possa gravar e:
 
 1. **Arraste a sua ROM sobre `KirbyRecomp.exe`** (ou abra o programa e escolha o arquivo).
 2. O launcher abre. Escolha tamanho da janela, tela cheia, escala e volume e aperte **Play**.
-3. Na primeira vez o jogo já é jogável em segundos (interpretador embutido) enquanto a versão
+3. Na primeira vez o jogo já é jogável em cerca de 15 segundos (interpretador embutido) enquanto a versão
    compilada é construída em segundo plano, em alguns minutos e com prioridade baixa. Nas próximas
    aberturas usa o jogo compilado e abre em menos de um segundo.
 
