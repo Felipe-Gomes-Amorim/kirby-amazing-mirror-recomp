@@ -50,7 +50,12 @@ def message(title, text, error=False):
 
 
 def pick_rom():
-    """Win32 'open file' dialog through ctypes (no tkinter, nothing extra to ship)."""
+    return file_dialog(False, 'Choose your Kirby & The Amazing Mirror (USA) ROM',
+                       'GBA ROM (*.gba)\0*.gba\0All files\0*.*\0\0')
+
+
+def file_dialog(save, title, filt, default_name=''):
+    """Win32 open/save dialog through ctypes (no tkinter, nothing extra to ship). Returns a path or None."""
     from ctypes import wintypes
 
     class OFN(ctypes.Structure):
@@ -69,12 +74,21 @@ def pick_rom():
     buf = ctypes.create_unicode_buffer(1024)
     o = OFN()
     o.lStructSize = ctypes.sizeof(OFN)
-    o.lpstrFilter = 'GBA ROM (*.gba)\0*.gba\0All files\0*.*\0\0'
+    # the filter holds embedded NULs: a plain Python str assigned to LPCWSTR would be cut at the first one
+    flt = ctypes.create_unicode_buffer(filt, len(filt) + 1)
+    o.lpstrFilter = ctypes.cast(flt, wintypes.LPCWSTR)
     o.lpstrFile = ctypes.cast(buf, wintypes.LPWSTR)
     o.nMaxFile = 1024
-    o.lpstrTitle = 'Choose your Kirby & The Amazing Mirror (USA) ROM'
-    o.Flags = 0x00001000 | 0x00000800 | 0x00080000      # FILEMUSTEXIST | PATHMUSTEXIST | EXPLORER
-    return buf.value if ctypes.windll.comdlg32.GetOpenFileNameW(ctypes.byref(o)) else None
+    o.lpstrTitle = title
+    if default_name:
+        buf.value = default_name
+    if save:
+        o.Flags = 0x00000002 | 0x00000800 | 0x00080000      # OVERWRITEPROMPT | PATHMUSTEXIST | EXPLORER
+        ok = ctypes.windll.comdlg32.GetSaveFileNameW(ctypes.byref(o))
+    else:
+        o.Flags = 0x00001000 | 0x00000800 | 0x00080000      # FILEMUSTEXIST | PATHMUSTEXIST | EXPLORER
+        ok = ctypes.windll.comdlg32.GetOpenFileNameW(ctypes.byref(o))
+    return buf.value if ok else None
 
 
 def find_rom(arg):
@@ -418,7 +432,68 @@ class LauncherEnv:
     def start_background_build(self):
         return start_background_build(self.rom, self.out_dir, self.stamp)
 
+    # ---- save management (launcher/savemgr.py; NOTES.md "Gerenciamento de save") -------------------------
+    def save_path(self):
+        """Where kirby.exe keeps the save: next to the ROM, with the .gba extension swapped for .sav."""
+        return os.path.splitext(self.rom)[0] + '.sav'
+
+    def rom_stem(self):
+        return os.path.splitext(os.path.basename(self.rom))[0]
+
+    def rom_sha1(self):
+        if not getattr(self, '_sha', None):
+            self._sha = sha1_of(self.rom)
+        return self._sha
+
+    def backup_root(self):
+        return os.path.join(BASE, 'backups')
+
+    def backup_now(self):
+        try:
+            import savemgr
+            path = savemgr.backup_save(self.save_path(), self.backup_root(), self.rom_sha1(), self.rom_stem())
+            if path:
+                log('save backup: ' + path)
+        except Exception as e:                         # a failed backup must never stop the game from starting
+            log('save backup failed: %r' % (e,))
+
+    def open_save_dir(self):
+        sav = self.save_path()
+        if os.path.isfile(sav):
+            subprocess.Popen(['explorer', '/select,', os.path.normpath(sav)])      # opens the folder, selects the file
+        else:
+            os.startfile(os.path.dirname(sav))
+
+    def export_save(self):
+        import savemgr
+        sav = self.save_path()
+        if not os.path.isfile(sav):
+            message('Kirby Recomp', 'There is no save file yet.\n\nPlay and save in the game first.')
+            return
+        dst = file_dialog(True, 'Export save', 'GBA save (*.sav)\0*.sav\0All files\0*.*\0\0',
+                          self.rom_stem() + '.sav')
+        if not dst:
+            return
+        if not dst.lower().endswith('.sav') and '.' not in os.path.basename(dst):
+            dst += '.sav'
+        try:
+            savemgr.export_save(sav, dst)
+            log('save exported to ' + dst)
+            message('Kirby Recomp', 'Save exported to:\n' + dst)
+        except OSError as e:
+            message('Kirby Recomp', 'Could not export the save:\n%s' % e, True)
+
+    def import_save(self):
+        import savemgr
+        src = file_dialog(False, 'Import save', 'GBA save (*.sav)\0*.sav\0All files\0*.*\0\0')
+        if not src:
+            return
+        ok, msg = savemgr.import_save(src, self.save_path(), self.backup_root(), self.rom_sha1(), self.rom_stem())
+        log('save import %s: %s (%s)' % ('ok' if ok else 'rejected', msg, src))
+        message('Kirby Recomp', msg, not ok)
+
     def run_game(self, exe):
+        self.backup_now()                              # snapshot of the save before the game can touch it
         log('starting ' + exe)
         return subprocess.run([exe, self.rom], cwd=os.path.dirname(exe)).returncode
 

@@ -19,6 +19,7 @@ import time
 
 STATE_NONE, STATE_PREPARING, STATE_FAST, STATE_READY, STATE_ERROR = 0, 1, 2, 3, 4
 KL_QUIT, KL_PLAY, KL_PICK_ROM = 0, 1, 2
+KL_OPEN_SAVE_DIR, KL_EXPORT_SAVE, KL_IMPORT_SAVE = 3, 4, 5
 EXIT_BACK_TO_LAUNCHER = 77       # kirby.exe exits with this when the user presses F1
 
 # (marker printed by tools/build_all.py, weight in percent)
@@ -206,6 +207,14 @@ class Controller:
                 if self.env.pick_new_rom():
                     self._worker = None
                     self.start()
+                continue
+            if r in (KL_OPEN_SAVE_DIR, KL_EXPORT_SAVE, KL_IMPORT_SAVE):
+                action = {KL_OPEN_SAVE_DIR: 'open_save_dir', KL_EXPORT_SAVE: 'export_save',
+                          KL_IMPORT_SAVE: 'import_save'}[r]
+                try:
+                    getattr(self.env, action)()
+                except Exception as e:                       # a save action must never take the launcher down
+                    self.env.log('%s failed: %r' % (action, e))
                 continue
             if r == KL_PLAY:
                 if not self.playable():
