@@ -235,7 +235,7 @@ static void scen_a(KlStatus *o, int s) {
     }
     case 4:
         set_status(o, 2, 40, "Compiling 4/16...", "x.gba", 1);
-        CHECK(count_color(ACC, 201, 96, 459, 103) > 600, "progress bar filled (state 2, 40%)");
+        CHECK(count_color(ACC, 201, 88, 459, 95) > 600, "progress bar filled (state 2, 40%)");
         kl_test_widget("play", &x, &y, &w, &h);
         CHECK(pixel_is(x + 6, y + 6, ACC), "Play is drawn enabled in state 2");
         CHECK(!kl_test_widget("selectrom", NULL, NULL, NULL, NULL), "no SELECT ROM... when a verified ROM is loaded");

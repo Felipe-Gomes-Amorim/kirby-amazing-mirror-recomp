@@ -45,6 +45,14 @@ static int hover = -1;
 static int dragging;                 /* slider drag: 0 none, 1 volume, 2 deadzone */
 static int page;                     /* 0 main, 1 keyboard, 2 controller */
 static int capture = -1;             /* CFG_BTN_* being remapped, or -1 */
+static int confirm;                  /* 1 = the "overwrite current save?" dialog is open */
+
+/* texts and the progress bar drawn on the last frame (layout checks in the tests) */
+#define MAX_TEXTS 40
+static SDL_Rect texts[MAX_TEXTS];
+static int ntexts, rec_texts;
+static SDL_Rect bar_rect;
+static int bar_drawn;
 static char note[96];
 static Uint32 note_until;
 static int note_err;
@@ -106,6 +114,10 @@ static int text_w(const char *s, int scale) {
 }
 
 static void text(const char *s, int x, int y, int scale, SDL_Color c) {
+    if (rec_texts && ntexts < MAX_TEXTS && *s) {
+        SDL_Rect r = { x, y, (int)strlen(s) * 6 * scale - scale, 7 * scale };
+        texts[ntexts++] = r;
+    }
     setc(c);
     for (; *s; s++, x += 6 * scale) {
         const uint8_t *rows = win_font_rows((unsigned char)*s);
@@ -210,6 +222,7 @@ static void add_shape(const char *id, int btn, int shape, int x, int y, int w, i
 }
 
 static int rom_missing(void) { return st.state == 0 || !st.rom_ok; }
+static int rom_loaded(void) { return st.rom[0] && st.rom_ok; }      /* a verified ROM: the save can be managed */
 
 static void layout(void) {
     static const char *const size_ids[6] = { "size1", "size2", "size3", "size4", "size5", "size6" };
@@ -217,7 +230,11 @@ static void layout(void) {
     char fid[32] = "";
     if (nw && focus >= 0 && focus < nw) snprintf(fid, sizeof fid, "%s", wd[focus].id);
     nw = 0;
-    if (page) {
+    if (confirm) {                            /* modal: only YES / NO are reachable */
+        add("confirm_yes", W_BUTTON, 120, 176, 100, 24, "YES");
+        add("confirm_no", W_BUTTON, 260, 176, 100, 24, "NO");
+        wd[1].primary = 1;
+    } else if (page) {
         /* editable pages: tabs + reset + back on top, the GBA outline in the middle */
         add("tab_keyboard", W_RADIO, 12, 6, 130, 22, "KEYBOARD");
         wd[nw - 1].on = page == 1;
@@ -244,24 +261,28 @@ static void layout(void) {
     } else {
         if (rom_missing()) add("selectrom", W_BUTTON, 298, 34, 170, 22, "SELECT ROM...");
         for (int i = 0; i < 6; i++) {
-            add(size_ids[i], W_RADIO, 220 + i * 42, 116, 40, 24, size_lbl[i]);
+            add(size_ids[i], W_RADIO, 220 + i * 42, 106, 40, 22, size_lbl[i]);
             wd[nw - 1].on = cfg.scale == i + 1;
             wd[nw - 1].enabled = !cfg.fullscreen;          /* the size is irrelevant in full screen */
         }
-        add("fullscreen", W_CHECK, 84, 146, 22, 22, "FULLSCREEN");
+        add("fullscreen", W_CHECK, 84, 132, 22, 22, "FULLSCREEN");
         wd[nw - 1].on = cfg.fullscreen;
-        add("scale_integer", W_RADIO, 220, 174, 96, 24, "INTEGER");
+        add("scale_integer", W_RADIO, 220, 158, 96, 22, "INTEGER");
         wd[nw - 1].on = cfg.scaling == CFG_SCALING_INTEGER;
-        add("scale_fit", W_RADIO, 322, 174, 50, 24, "FIT");
+        add("scale_fit", W_RADIO, 322, 158, 50, 22, "FIT");
         wd[nw - 1].on = cfg.scaling == CFG_SCALING_FIT;
-        add("scale_stretch", W_RADIO, 378, 174, 94, 24, "STRETCH");
+        add("scale_stretch", W_RADIO, 378, 158, 94, 22, "STRETCH");
         wd[nw - 1].on = cfg.scaling == CFG_SCALING_STRETCH;
-        add("volume", W_SLIDER, 220, 206, 190, 22, "");
-        add("mute", W_CHECK, 84, 234, 22, 22, "MUTE");
+        add("volume", W_SLIDER, 220, 184, 190, 22, "");
+        add("mute", W_CHECK, 84, 210, 22, 22, "MUTE");
+        add("save_open", W_BUTTON, 84, 236, 140, 22, "OPEN FOLDER");
+        add("save_export", W_BUTTON, 230, 236, 116, 22, "EXPORT...");
+        add("save_import", W_BUTTON, 352, 236, 116, 22, "IMPORT...");
+        for (int i = nw - 3; i < nw; i++) wd[i].enabled = rom_loaded();   /* no ROM, no save */
         wd[nw - 1].on = cfg.mute;
-        add("keyboard", W_BUTTON, 84, 262, 140, 24, "KEYBOARD...");
-        add("controller", W_BUTTON, 230, 262, 166, 24, "CONTROLLER...");
-        add("reset", W_BUTTON, 402, 262, 66, 24, "RESET");
+        add("keyboard", W_BUTTON, 84, 262, 140, 22, "KEYBOARD...");
+        add("controller", W_BUTTON, 230, 262, 166, 22, "CONTROLLER...");
+        add("reset", W_BUTTON, 402, 262, 66, 22, "RESET");
         add("play", W_BUTTON, 80, 290, 180, 20, "PLAY");
         wd[nw - 1].primary = 1;
         wd[nw - 1].enabled = st.state != 1;       /* disabled while the fast mode is being prepared */
@@ -393,6 +414,18 @@ static void activate(int i) {
         else { cfg_reset_keyboard(&cfg); cfg_reset_controller(&cfg); set_note("Input settings reset to defaults", 0); }
         save_cfg();
         capture = -1;
+    } else if (!strcmp(id, "save_open")) {
+        result = KL_OPEN_SAVE_DIR; running = 0;
+    } else if (!strcmp(id, "save_export")) {
+        result = KL_EXPORT_SAVE; running = 0;
+    } else if (!strcmp(id, "save_import")) {
+        confirm = 1; layout(); focus = 1;           /* focus NO: the safe answer */
+        return;
+    } else if (!strcmp(id, "confirm_yes")) {
+        confirm = 0; result = KL_IMPORT_SAVE; running = 0;
+    } else if (!strcmp(id, "confirm_no")) {
+        confirm = 0; layout(); focus = 0;
+        return;
     } else if (!strcmp(id, "selectrom")) {
         result = KL_PICK_ROM; running = 0;
     } else if (!strcmp(id, "play")) {
@@ -554,7 +587,7 @@ static void draw_main(void) {
         const char *b = basename_of(st.rom);
         char name[40];
         size_t n = strlen(b);
-        if (n > 30) snprintf(name, sizeof name, "...%.27s", b + n - 27); else snprintf(name, sizeof name, "%.30s", b);
+        if (n > 22) snprintf(name, sizeof name, "...%.19s", b + n - 19); else snprintf(name, sizeof name, "%.22s", b);
         snprintf(rom, sizeof rom, st.rom_ok ? "ROM: %s OK" : "ROM: %s (unverified)", name);
         rc = st.rom_ok ? C_OK : C_ERR;
     } else {
@@ -566,26 +599,34 @@ static void draw_main(void) {
         text(cap, 468 - text_w(cap, 1), 21, 1, C_DIM);
     }
     /* status panel */
-    SDL_Rect panel = { 12, 62, 456, 46 };
+    SDL_Rect panel = { 12, 58, 456, 42 };
     fill(panel, C_PANEL);
     frame(panel, C_DIM);
-    text("STATUS", 20, 66, 1, C_DIM);
-    text(state_text(), 20, 76, 2, st.state == 4 ? C_ERR : C_TEXT);
-    if (st.text[0]) text(st.text, 20, 96, 1, C_DIM);
+    text("STATUS", 20, 61, 1, C_DIM);
+    text(state_text(), 20, 70, 2, st.state == 4 ? C_ERR : C_TEXT);
+    if (st.text[0]) {                         /* clipped so it never runs under the progress bar */
+        char t[40];
+        clip(st.text, 170, t, sizeof t);
+        text(t, 20, 88, 1, C_DIM);
+    }
+    bar_drawn = 0;
     if (st.state == 1 || st.state == 2) {
-        SDL_Rect bar = { 200, 95, 260, 9 };
+        SDL_Rect bar = { 200, 87, 260, 9 };
         frame(bar, C_TEXT);
         int p = st.percent < 0 ? 0 : st.percent > 100 ? 100 : st.percent;
-        SDL_Rect f = { 201, 96, 258 * p / 100, 7 };
+        SDL_Rect f = { 201, 88, 258 * p / 100, 7 };
         if (f.w > 0) fill(f, C_ACC);
+        bar_rect = bar;
+        bar_drawn = 1;
     }
     /* groups and row labels */
-    text("VIDEO", 12, 121, 2, C_ACC);
-    text("WINDOW SIZE", 84, 121, 2, cfg.fullscreen ? C_DIM : C_TEXT);
-    text("SCALING", 84, 179, 2, C_TEXT);
-    text("AUDIO", 12, 211, 2, C_ACC);
-    text("VOLUME", 84, 211, 2, cfg.mute ? C_DIM : C_TEXT);
-    text("INPUT", 12, 267, 2, C_ACC);
+    text("VIDEO", 12, 110, 2, C_ACC);
+    text("WINDOW SIZE", 84, 110, 2, cfg.fullscreen ? C_DIM : C_TEXT);
+    text("SCALING", 84, 162, 2, C_TEXT);
+    text("AUDIO", 12, 188, 2, C_ACC);
+    text("VOLUME", 84, 188, 2, cfg.mute ? C_DIM : C_TEXT);
+    text("SAVE", 12, 240, 2, rom_loaded() ? C_ACC : C_DIM);
+    text("INPUT", 12, 266, 2, C_ACC);
     /* footer */
     if (note[0] && SDL_GetTicks() < note_until) text(note, 12, 313, 1, note_err ? C_ERR : C_OK);
     else text("TAB/ARROWS: MOVE   ENTER/SPACE: SELECT   ESC: QUIT", 12, 313, 1, C_DIM);
@@ -642,10 +683,27 @@ static void draw_edit(void) {
     text("ARROWS: MOVE  ENTER: REMAP  ESC: BACK  RESET: THIS TAB", 12, 313, 1, C_DIM);
 }
 
+static void draw_confirm(void) {                 /* modal dialog over a dimmed screen */
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, 190);
+    SDL_Rect all = { 0, 0, KL_W, KL_H };
+    SDL_RenderFillRect(ren, &all);
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
+    SDL_Rect box = { 70, 104, 340, 110 };
+    fill(box, C_PANEL);
+    frame(box, C_ACC);
+    text_center("OVERWRITE CURRENT SAVE?", (SDL_Rect){ 70, 118, 340, 14 }, 2, C_TEXT);
+    text_center("A BACKUP IS KEPT", (SDL_Rect){ 70, 142, 340, 14 }, 2, C_OK);
+}
+
 static void draw_canvas(void) {
+    ntexts = 0; bar_drawn = 0;
     setc(C_BG);
     SDL_RenderClear(ren);
+    rec_texts = 1;
     if (page) draw_edit(); else draw_main();
+    rec_texts = 0;      /* texts inside widgets are covered by the widget rectangles */
+    if (confirm) draw_confirm();
     for (int i = 0; i < nw; i++) draw_widget(i);
 }
 
@@ -694,6 +752,7 @@ static void nav(int dir) {
 }
 
 static void go_back(void) {
+    if (confirm) { confirm = 0; layout(); focus = 0; return; }
     if (page) { page = 0; capture = -1; focus = 0; layout(); }
 }
 
@@ -704,7 +763,7 @@ static void on_key(SDL_Keycode k, int shift) {
         return;
     }
     if (k == SDLK_ESCAPE) {
-        if (page) go_back();
+        if (confirm || page) go_back();
         else { result = KL_QUIT; running = 0; }
         return;
     }
@@ -829,6 +888,24 @@ KL_API int kl_test_capture(void) { return capture; }
 KL_API const char *kl_test_note(void) { return note[0] && SDL_GetTicks() < note_until ? note : ""; }
 KL_API void kl_test_fake_pad(int present, int ax, int ay) { fake_pad = present; fake_ax = ax; fake_ay = ay; }
 KL_API int kl_test_pad_present(void) { return pad_present(); }
+KL_API int kl_test_confirm(void) { return confirm; }
+KL_API int kl_test_text_count(void) { return ntexts; }
+KL_API int kl_test_text(int i, int *x, int *y, int *w, int *h) {
+    if (i < 0 || i >= ntexts) return 0;
+    if (x) *x = texts[i].x;
+    if (y) *y = texts[i].y;
+    if (w) *w = texts[i].w;
+    if (h) *h = texts[i].h;
+    return 1;
+}
+KL_API int kl_test_bar(int *x, int *y, int *w, int *h) {
+    if (!bar_drawn) return 0;
+    if (x) *x = bar_rect.x;
+    if (y) *y = bar_rect.y;
+    if (w) *w = bar_rect.w;
+    if (h) *h = bar_rect.h;
+    return 1;
+}
 
 /* The last frame of the canvas, exactly KL_W x KL_H (read back from the canvas texture). */
 KL_API int kl_test_snapshot(uint32_t *out, int cap, int *w, int *h) {
@@ -854,7 +931,7 @@ KL_API int kl_run(const char *ini_path, KlPoll poll) {
     snprintf(ini, sizeof ini, "%s", ini_path ? ini_path : "kirby.ini");
     cfg_load(ini, &cfg);
     memset(&st, 0, sizeof st);
-    dropped[0] = 0; note[0] = 0; page = 0; focus = 0; hover = -1; dragging = 0; nw = 0; capture = -1;
+    dropped[0] = 0; note[0] = 0; page = 0; focus = 0; hover = -1; dragging = 0; nw = 0; capture = -1; confirm = 0;
     fake_pad = -1; pad = NULL;
     result = KL_QUIT; running = 1;
 

@@ -37,4 +37,11 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host "== test_kirby_ui_edit (kirby_ui.dll)"
 & "$out\test_kirby_ui_edit.exe" $out
 if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE }
+# 5) SAVE section: return codes, import confirmation, layout checks
+& $gcc @flags -o "$out\test_kirby_ui_save.exe" "$root\hw\tests\test_kirby_ui_save.c" "$root\hw\config_ini.c" `
+    "-L$out" -lkirby_ui "-L$Sdl\lib" -lSDL2
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Write-Host "== test_kirby_ui_save (kirby_ui.dll)"
+& "$out\test_kirby_ui_save.exe" $out
+if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE }
 exit $rc
