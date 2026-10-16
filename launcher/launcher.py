@@ -243,9 +243,33 @@ def build(rom, out_dir, stamp, ui):
     return rc == 0, tail
 
 
+def zig_cache_dir():
+    """Writable per-user copy of the Zig cache shipped in the package (it makes the first build seconds
+    instead of ~1 minute). None when the package carries no cache (dev tree)."""
+    shipped = os.path.join(APP, 'tools', 'zigcache')
+    if not os.path.isdir(shipped):
+        return None
+    dst = os.path.join(BASE, 'zigcache')
+    mark = os.path.join(dst, '.seeded')
+    if not os.path.exists(mark):
+        try:
+            if os.path.isdir(dst):
+                shutil.rmtree(dst, ignore_errors=True)
+            shutil.copytree(shipped, dst)
+            with open(mark, 'w') as f:
+                f.write('1')
+            log('seeded the Zig cache from the package')
+        except OSError as e:
+            log('could not seed the Zig cache (%s); the first build will be slower' % e)
+    return dst
+
+
 def tool_env():
     env = dict(os.environ)
     env.setdefault('KIRBY_ZIG', os.path.join(APP, 'tools', 'zig', 'zig.exe'))   # setdefault: dev overrides
+    zc = zig_cache_dir()
+    if zc:
+        env['ZIG_GLOBAL_CACHE_DIR'] = zc
     env.setdefault('SDL2_DIR', os.path.join(APP, 'sdl2'))
     env['PYTHONIOENCODING'] = 'utf-8'
     env['PYTHONPATH'] = WORK
@@ -447,12 +471,13 @@ def run_full_launcher(rom, out_dir, stamp, flags):
     kl_run yet and no fake UI was requested (the caller then keeps the previous behaviour)."""
     sys.path.insert(0, HERE)
     import flow
-    ui = KlUI(flow)
-    if not ui.available():
-        if not os.environ.get('KIRBY_FAKE_UI'):
-            return None
-        ui = flow.FakeUI(log=log, max_polls=5000, interval=0.2)   # dev stand-in: wait up to ~17 min
+    if os.environ.get('KIRBY_FAKE_UI'):                  # automation: no window, "press" Play when playable
+        ui = flow.FakeUI(log=log, max_polls=5000, interval=0.2)
         log('using the fake UI (KIRBY_FAKE_UI)')
+    else:
+        ui = KlUI(flow)
+        if not ui.available():
+            return None
     env = LauncherEnv(rom, out_dir, stamp, flow)
     ini_path = os.path.join(os.path.dirname(rom), 'kirby.ini')
     return flow.Controller(env).run(ui, ini_path, shift_held=shift_held())

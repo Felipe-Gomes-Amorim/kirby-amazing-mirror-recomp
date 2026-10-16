@@ -183,6 +183,32 @@ def main():
     run([zexe, 'cc', '-target', 'x86_64-windows-gnu', '-O2', '-municode', '-Wl,--subsystem,windows',
          os.path.join(ROOT, 'launcher', 'stub.c'), '-o', os.path.join(dist, 'KirbyRecomp.exe')])
     shutil.copy2(os.path.join(ROOT, 'LICENSE'), os.path.join(dist, 'LICENSE'))
+    print('4b/6 warm the Zig cache (the real interpreter-only build on a zero-filled dummy ROM; no game data)')
+    zcache = os.path.join(app, 'tools', 'zigcache')
+    os.makedirs(zcache, exist_ok=True)
+    tmp = os.path.join(ROOT, 'build', 'dist_cache', 'warm')
+    rmtree_retry(tmp)
+    os.makedirs(tmp)
+    dummy = os.path.join(tmp, 'dummy.gba')
+    with open(dummy, 'wb') as f:
+        f.write(bytes(16 * 1024 * 1024))
+    # Run it EXACTLY like the launcher does: from a staged copy of the sources whose directory does NOT contain
+    # the Zig lib dir. Zig's cache manifests classify input files by path prefix (cwd / lib dir / cache dir);
+    # warming from a cwd that contains the lib dir (e.g. the repo with dist/ inside it) records different
+    # prefixes and the shipped cache never hits for users (measured: 127 s instead of 6 s).
+    work = os.path.join(tmp, 'work')
+    for sub in ('recomp', 'hw', 'tools'):
+        shutil.copytree(os.path.join(app, sub), os.path.join(work, sub),
+                        ignore=shutil.ignore_patterns('zig', 'zigcache', '__pycache__', '*.pyc'))
+    env = dict(os.environ, KIRBY_ZIG=zexe, SDL2_DIR=os.path.join(app, 'sdl2'), ZIG_GLOBAL_CACHE_DIR=zcache,
+               PYTHONPATH=work, KIRBY_WORK=work)
+    subprocess.run([sys.executable, '-m', 'recomp.program', '--rom', dummy, '--out', os.path.join(tmp, 'out'),
+                    '--interp-only'], cwd=work, env=env, check=True, capture_output=True)
+    for sub in ('tmp',):
+        rmtree_retry(os.path.join(zcache, sub))
+    rmtree_retry(tmp)
+    zsize = sum(os.path.getsize(os.path.join(r, n)) for r, _, fs in os.walk(zcache) for n in fs)
+    print(f'  zig cache shipped: {zsize / 1e6:.0f} MB')
     print('5/6 README + third-party notices')
     with open(os.path.join(dist, 'THIRD_PARTY_NOTICES.txt'), 'w', encoding='utf-8') as f:
         f.write(NOTICES)

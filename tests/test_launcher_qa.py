@@ -1149,7 +1149,6 @@ class KeyboardControllerBindingTest(InputCase):
         eff = self.effective('[keyboard]\na=Q\nb=W\n')
         self.assertEqual((eff['A'][0], eff['B'][0]), (self.scan('Q'), self.scan('W')))
 
-    @unittest.expectedFailure
     def test_unknown_keyboard_name_falls_back_to_the_default_key(self):
         """FALHA CONHECIDA (rt_input.c rt_input_init): nome que o SDL nao conhece deixa o botao SEM tecla
         (kb_sc = UNKNOWN) em vez de voltar ao padrao ("invalid value falls back to its default")."""
@@ -1158,7 +1157,6 @@ class KeyboardControllerBindingTest(InputCase):
                 eff = self.effective(f'[keyboard]\na={name}\n')
                 self.assertEqual(eff['A'][0], self.def_kb['A'])
 
-    @unittest.expectedFailure
     def test_unknown_controller_name_falls_back_to_the_default_button(self):
         """FALHA CONHECIDA (rt_input.c): `a=banana` deixa o A do controle sem botao (INVALID)."""
         for name in ('banana', 'button1', 'triangle'):
