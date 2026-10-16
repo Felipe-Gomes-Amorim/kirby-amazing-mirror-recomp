@@ -11,6 +11,7 @@ const unsigned rc_table_n = 0;
 double rt_hwstep_us;
 uint64_t rt_hwstep_calls, rt_hwstep_cycles;
 int rt_measure;
+void rt_save_tick(void) {}
 double rt_now_us(void) { return 0; }
 
 static int fails;

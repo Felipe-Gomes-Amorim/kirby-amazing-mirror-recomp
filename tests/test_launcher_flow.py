@@ -9,7 +9,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'launcher'))
 
 from flow import (Controller, FakeUI, BuildMonitor, STATE_PREPARING, STATE_FAST, STATE_READY,  # noqa: E402
-                  STATE_ERROR, EXIT_BACK_TO_LAUNCHER, read_ini_value, read_scaling)
+                  STATE_ERROR, EXIT_BACK_TO_LAUNCHER, read_ini_value, read_scaling,
+                  KL_OPEN_SAVE_DIR, KL_EXPORT_SAVE, KL_IMPORT_SAVE)
 
 
 class FakeEnv:
@@ -48,6 +49,22 @@ class FakeEnv:
     def pick_new_rom(self):
         self.picks += 1
         return True
+
+    save_actions = None
+
+    def _act(self, name):
+        (self.save_actions if self.save_actions is not None else []).append(name)
+        if getattr(self, 'boom', None) == name:
+            raise OSError('simulated failure')
+
+    def open_save_dir(self):
+        self._act('open')
+
+    def export_save(self):
+        self._act('export')
+
+    def import_save(self):
+        self._act('import')
 
 
 def make_ini(tmp, show=1):
@@ -126,6 +143,49 @@ class FlowTests(unittest.TestCase):
         Controller(env).run(ui, make_ini(self.tmp))
         self.assertEqual(env.picks, 1)
         self.assertEqual(env.ran, ['fast.exe'])
+
+
+class SaveActionTests(unittest.TestCase):
+    """The three SAVE buttons return codes 3/4/5; the controller runs the action and shows the screen again."""
+
+    def setUp(self):
+        self._t = tempfile.TemporaryDirectory()
+        self.tmp = self._t.name
+
+    def tearDown(self):
+        self._t.cleanup()
+
+    class ScriptUI:
+        def __init__(self, codes):
+            self.codes = list(codes)
+
+        def run(self, ini, poll):
+            return self.codes.pop(0) if self.codes else 0
+
+    def test_each_save_button_runs_its_action_and_returns_to_the_screen(self):
+        env = FakeEnv(self.tmp, compiled=True)
+        env.save_actions = []
+        ui = self.ScriptUI([KL_OPEN_SAVE_DIR, KL_EXPORT_SAVE, KL_IMPORT_SAVE, 0])
+        self.assertEqual(Controller(env).run(ui, make_ini(self.tmp)), 0)
+        self.assertEqual(env.save_actions, ['open', 'export', 'import'])
+        self.assertEqual(env.ran, [])                         # none of them starts the game
+
+    def test_a_failing_save_action_does_not_take_the_launcher_down(self):
+        env = FakeEnv(self.tmp, compiled=True)
+        env.save_actions, env.boom = [], 'export'
+        ui = self.ScriptUI([KL_EXPORT_SAVE, KL_PLAY_CODE, 0])
+        code = Controller(env).run(ui, make_ini(self.tmp))
+        self.assertEqual(code, 0)
+        self.assertEqual(env.ran, ['compiled.exe'])           # it kept running and Play still worked
+        self.assertTrue(any('export_save failed' in m for m in env.logs))
+
+    def test_unknown_return_codes_quit(self):
+        env = FakeEnv(self.tmp, compiled=True)
+        self.assertEqual(Controller(env).run(self.ScriptUI([99]), make_ini(self.tmp)), 0)
+        self.assertEqual(env.ran, [])
+
+
+KL_PLAY_CODE = 1
 
 
 class MonitorTests(unittest.TestCase):
