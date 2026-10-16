@@ -38,6 +38,12 @@ struct Sio {
     int id_latched;          /* bits 4-5 do SIOCNT (so valem apos a 1a troca) */
     int irq_flag;            /* IF bit 7 */
     int ack_pending;         /* filho: avisar o mestre (depois do IRQ servido) que a troca acabou */
+    /* lockstep por quadro */
+    uint32_t frame, fcyc;    /* quadro do hw e ciclos desde o inicio dele (so avancam com o relogio emulado) */
+    LinkRound rounds[LINK_MAX_ROUNDS]; int nrounds;   /* mestre: trocas deste quadro */
+    LinkRound sched[LINK_MAX_ROUNDS]; int nsched, isched;   /* filho: trocas do mestre a reproduzir */
+    uint16_t sendlog[LINK_MAX_ROUNDS]; int nsendlog;   /* filho: SIOMLT_SEND no inicio de cada troca do quadro */
+    uint64_t xhash, xcount;  /* hash FNV-1a (quadro, ciclo, 4 halfwords) de cada troca concluida */
     /* validacao do protocolo do jogo (so estatistica): FEFE = sincronismo, depois 12 halfwords cuja soma
      * (16 bits) tem que ser 0xFFF1 (= -15) */
     int pk_idx[4];
@@ -54,6 +60,11 @@ Sio *rt_sio_new(LinkTransport *t) {
     s->tp = t;
     s->rcnt = 0x8000;   /* reset da BIOS apos o boot por cartucho (MainInit testa (RCNT & 0xC000) != 0x8000) */
     for (int i = 0; i < 4; i++) s->multi[i] = LINK_ABSENT;
+    s->xhash = 1469598103934665603ull;
+    if (t && t->lockstep && t->player_id != 0 && t->frame_begin) {   /* filho: so roda o quadro 0 com o do host */
+        s->nsched = t->frame_begin(t, 0, s->sched, LINK_MAX_ROUNDS);
+        if (s->nsched < 0) s->nsched = 0;
+    }
     return s;
 }
 void rt_sio_free(Sio *s) {
@@ -116,16 +127,42 @@ static void complete(Sio *s) {
     s->remain = 0;
     s->id_latched = s->tp ? s->tp->player_id & 3 : 0;
     rt_sio_exchanges++;
+    {   /* hash do fluxo de halfwords: duas execucoes iguais tem que dar o mesmo valor */
+        uint32_t w[2] = {s->frame, s->fcyc};
+        const uint8_t *b[2] = {(const uint8_t *)w, (const uint8_t *)s->multi};
+        for (int k = 0; k < 2; k++)
+            for (size_t i = 0; i < 8; i++) s->xhash = (s->xhash ^ b[k][i]) * 1099511628211ull;
+        s->xcount++;
+        static FILE *xf; static int xf_init;
+        if (!xf_init) { xf_init = 1; const char *e = getenv("KIRBY_SIO_LOG"); if (e && *e) xf = fopen(e, "w"); }
+        if (xf) fprintf(xf, "%u %u %04X %04X %04X %04X\n", s->frame, s->fcyc, s->multi[0], s->multi[1], s->multi[2], s->multi[3]);
+    }
     if (s->siocnt & 0x4000) s->irq_flag = 1;
     if (s->tp && s->tp->ack && s->tp->player_id != 0) s->ack_pending = 1;
 }
 
 void rt_sio_advance(Sio *s, uint32_t cycles) {
-    if (!s->busy) return;
-    if (cycles >= s->remain) complete(s);
-    else s->remain -= cycles;
+    s->fcyc += cycles;
+    if (s->busy) {
+        if (cycles >= s->remain) complete(s);
+        else s->remain -= cycles;
+    }
+    /* filho em lockstep: reproduz as trocas que o mestre fez neste quadro, no mesmo deslocamento */
+    while (s->isched < s->nsched && s->fcyc >= s->sched[s->isched].off && !s->busy) {
+        const LinkRound *r = &s->sched[s->isched++];
+        if (s->nsendlog < LINK_MAX_ROUNDS) s->sendlog[s->nsendlog++] = s->send;   /* uma por troca (mesmo as puladas) */
+        if (multiplay(s)) begin(s, r->v);
+    }
 }
-uint32_t rt_sio_cycles_to_event(Sio *s) { return s->busy ? (s->remain ? s->remain : 1) : 0; }
+uint32_t rt_sio_cycles_to_event(Sio *s) {
+    uint32_t e = s->busy ? (s->remain ? s->remain : 1) : 0;
+    if (!s->busy && s->isched < s->nsched) {
+        uint32_t off = s->sched[s->isched].off;
+        uint32_t d = off > s->fcyc ? off - s->fcyc : 1;
+        if (!e || d < e) e = d;
+    }
+    return e;
+}
 int rt_sio_irq_flag(Sio *s) { return s->irq_flag; }
 
 void rt_sio_poll(Sio *s) {
@@ -145,7 +182,30 @@ void rt_sio_poll(Sio *s) {
 static void start_master(Sio *s) {
     uint16_t vals[4] = {s->send, LINK_ABSENT, LINK_ABSENT, LINK_ABSENT};
     if (s->tp && s->tp->exchange) s->tp->exchange(s->tp, s->send, vals);
+    if (s->tp && s->tp->lockstep && s->nrounds < LINK_MAX_ROUNDS) {
+        s->rounds[s->nrounds].off = s->fcyc;
+        memcpy(s->rounds[s->nrounds].v, vals, sizeof vals);
+        s->nrounds++;
+    }
     begin(s, vals);
+}
+
+/* Fim de um quadro do hw (chamado por grab_frame). Em lockstep e a barreira: o host entrega as trocas do
+ * quadro e espera o filho terminar o mesmo quadro; o filho avisa que terminou e espera o quadro seguinte. */
+void rt_sio_frame_end(Sio *s) {
+    LinkTransport *t = s->tp;
+    if (!t || !t->lockstep) return;
+    while (s->isched < s->nsched && s->nsendlog < LINK_MAX_ROUNDS) { s->sendlog[s->nsendlog++] = s->send; s->isched++; }   /* trocas nao alcancadas */
+    if (t->frame_end) t->frame_end(t, s->frame, s->sendlog, s->nsendlog, s->rounds, s->nrounds);
+    s->nrounds = 0;
+    s->nsendlog = 0;
+    s->frame++;
+    s->fcyc = 0;
+    s->nsched = s->isched = 0;
+    if (t->player_id != 0 && t->frame_begin) {
+        int n = t->frame_begin(t, s->frame, s->sched, LINK_MAX_ROUNDS);
+        s->nsched = n > 0 ? n : 0;
+    }
 }
 
 static uint16_t siocnt_read(const Sio *s) {
@@ -336,8 +396,16 @@ void link_hub_disconnect(LinkTransport *t) {
  * velho, o mestre so inicia a rodada N+1 depois que todo filho presente confirmou (ACK) a rodada N: o ACK
  * sai quando o filho terminou a troca E o handler do IRQ serial (que escreve o proximo SEND) ja rodou.
  * Espera maxima 50 ms de relogio real por filho (depois segue com o valor que tiver). */
-enum { M_HELLO = 1, M_SEND = 2, M_ROUND = 3, M_ACK = 4 };
-typedef struct { uint8_t type, a; uint16_t v[4]; uint16_t round; } Msg;   /* 12 bytes */
+enum { M_HELLO = 1, M_SEND = 2, M_ROUND = 3, M_ACK = 4, M_FRAME = 5, M_DONE = 6 };
+/* tamanho fixo (400 bytes): M_FRAME leva as trocas do quadro do mestre; os demais so usam o cabecalho */
+typedef struct { uint8_t type, a; uint16_t n; uint32_t frame; uint16_t v[4]; uint16_t s[LINK_MAX_ROUNDS]; LinkRound r[LINK_MAX_ROUNDS]; } Msg;
+
+static Msg mkmsg(int type, int a) {
+    Msg m;
+    memset(&m, 0, sizeof m);
+    m.type = (uint8_t)type; m.a = (uint8_t)a;
+    return m;
+}
 
 typedef struct Peer { sock_t fd; Msg buf; int have; } Peer;
 typedef struct Local {
@@ -350,6 +418,11 @@ typedef struct Local {
     uint32_t mask;            /* host: presentes; join: ultima mascara recebida */
     uint16_t my_send;         /* join: reenvia ao reconectar */
     char addr[64];
+    int lock;                 /* lockstep por quadro ligado */
+    int delay;                /* atraso do SEND dos filhos, em trocas (LINK_DELAY) */
+    uint16_t fifo[4][256];    /* host: SENDs dos filhos ainda nao consumidos (anel) */
+    int fhead[4], fcount[4];
+    uint64_t underflows;
     unsigned tries;
     uint64_t ack_waits, ack_timeouts;
 } Local;
@@ -372,9 +445,30 @@ static void set_nonblock(sock_t fd) {
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof one);
 }
+static int would_block(void) {
+#ifdef _WIN32
+    return WSAGetLastError() == WSAEWOULDBLOCK;
+#else
+    return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINPROGRESS;
+#endif
+}
+static void wait_fd(sock_t fd, int want_write, int ms) {
+    fd_set fs;
+    FD_ZERO(&fs);
+    FD_SET(fd, &fs);
+    struct timeval tv = {ms / 1000, (ms % 1000) * 1000};
+    select((int)fd + 1, want_write ? NULL : &fs, want_write ? &fs : NULL, NULL, &tv);
+}
 static int send_msg(sock_t fd, const Msg *m) {
-    int n = (int)send(fd, (const char *)m, (int)sizeof *m, 0);
-    return n == (int)sizeof *m ? 0 : -1;
+    int sent = 0;
+    double t0 = rt_now_us();
+    while (sent < (int)sizeof *m) {
+        int n = (int)send(fd, (const char *)m + sent, (int)sizeof *m - sent, 0);
+        if (n > 0) { sent += n; continue; }
+        if (n < 0 && would_block() && rt_now_us() - t0 < 5e6) { wait_fd(fd, 1, 20); continue; }
+        return -1;
+    }
+    return 0;
 }
 /* 1 = mensagem completa; 0 = nada; -1 = desconectou */
 static int recv_msg(Peer *p, Msg *m) {
@@ -393,19 +487,32 @@ static int recv_msg(Peer *p, Msg *m) {
     }
 }
 
+/* espera uma mensagem (select, sem sleep): 1 = ok, -1 = desconectou, -2 = estourou `ms` */
+static int wait_msg(Peer *p, Msg *m, int ms) {
+    double t0 = rt_now_us();
+    for (;;) {
+        int r = recv_msg(p, m);
+        if (r != 0) return r;
+        if (rt_now_us() - t0 > ms * 1000.0) return -2;
+        wait_fd(p->fd, 0, 20);
+    }
+}
+
 static uint32_t local_mask(LinkTransport *t) { return ((Local *)t->priv)->mask | (1u << t->player_id); }
 
 static void local_drop(Local *l, int i) {
     if (l->peers[i].fd != SOCK_BAD) sock_close(l->peers[i].fd);
     l->peers[i].fd = SOCK_BAD; l->peers[i].have = 0;
     if (l->host) { l->mask &= ~(1u << i); l->latest[i] = LINK_ABSENT; rt_log("[link] player %d disconnected", i + 1); }
+    else { l->mask = 0; rt_log("[link] host disconnected (playing without cable)"); }
 }
 
 static void local_publish(LinkTransport *t, uint16_t v) {
     Local *l = t->priv;
     l->my_send = v;
-    if (!l->host && l->peers[0].fd != SOCK_BAD) {
-        Msg m = {M_SEND, (uint8_t)t->player_id, {v, 0, 0, 0}, 0};
+    if (!l->lock && !l->host && l->peers[0].fd != SOCK_BAD) {
+        Msg m = mkmsg(M_SEND, t->player_id);
+        m.v[0] = v;
         if (send_msg(l->peers[0].fd, &m) != 0) local_drop(l, 0);
     }
 }
@@ -413,7 +520,8 @@ static void local_publish(LinkTransport *t, uint16_t v) {
 static void local_ack(LinkTransport *t) {   /* filho: confirma a rodada recebida */
     Local *l = t->priv;
     if (!l->host && l->peers[0].fd != SOCK_BAD) {
-        Msg m = {M_ACK, (uint8_t)t->player_id, {0, 0, 0, 0}, l->round};
+        Msg m = mkmsg(M_ACK, t->player_id);
+        m.frame = l->round;
         if (send_msg(l->peers[0].fd, &m) != 0) local_drop(l, 0);
     }
 }
@@ -429,9 +537,10 @@ static void host_pump(Local *l) {
         set_nonblock(c);
         l->peers[id].fd = c; l->peers[id].have = 0;
         l->mask |= 1u << id;
-        l->latest[id] = LINK_ABSENT;
+        l->latest[id] = l->lock ? 0 : LINK_ABSENT;
         l->acked[id] = l->round;   /* entra sincronizado: nao atrasa a rodada em curso */
-        Msg h = {M_HELLO, (uint8_t)id, {(uint16_t)l->players, (uint16_t)l->mask, 0, 0}, 0};
+        Msg h = mkmsg(M_HELLO, id);
+        h.v[0] = (uint16_t)l->players; h.v[1] = (uint16_t)l->mask;
         send_msg(c, &h);
         rt_log("[link] player %d connected", id + 1);
     }
@@ -441,7 +550,7 @@ static void host_pump(Local *l) {
         int r;
         while ((r = recv_msg(&l->peers[i], &m)) == 1) {
             if (m.type == M_SEND) l->latest[i] = m.v[0];
-            else if (m.type == M_ACK) l->acked[i] = m.round;
+            else if (m.type == M_ACK) l->acked[i] = (uint16_t)m.frame;
         }
         if (r < 0) local_drop(l, i);
     }
@@ -449,6 +558,19 @@ static void host_pump(Local *l) {
 
 static int local_exchange(LinkTransport *t, uint16_t my, uint16_t out[4]) {
     Local *l = t->priv;
+    if (l->lock) {   /* lockstep: cada filho entrega o SEND de uma troca de ha ~LINK_DELAY trocas (FIFO) */
+        out[0] = my;
+        for (int i = 1; i < 4; i++) {
+            if (!((l->mask >> i) & 1)) { out[i] = LINK_ABSENT; continue; }
+            if (l->fcount[i] > 0) {
+                l->latest[i] = l->fifo[i][l->fhead[i]];
+                l->fhead[i] = (l->fhead[i] + 1) & 255;
+                l->fcount[i]--;
+            } else l->underflows++;   /* o filho ainda nao entregou: repete o ultimo valor */
+            out[i] = l->latest[i];
+        }
+        return 1;
+    }
     /* espera os filhos terminarem a rodada anterior (e o handler deles escrever o proximo SEND) */
     double t0 = 0;
     static int noack = -1;
@@ -466,7 +588,9 @@ static int local_exchange(LinkTransport *t, uint16_t my, uint16_t out[4]) {
     l->round++;
     out[0] = my;
     for (int i = 1; i < 4; i++) out[i] = (l->mask >> i) & 1 ? l->latest[i] : LINK_ABSENT;
-    Msg m = {M_ROUND, (uint8_t)l->mask, {out[0], out[1], out[2], out[3]}, l->round};
+    Msg m = mkmsg(M_ROUND, l->mask);
+    memcpy(m.v, out, sizeof m.v);
+    m.frame = l->round;
     for (int i = 1; i < l->players; i++)
         if (l->peers[i].fd != SOCK_BAD && send_msg(l->peers[i].fd, &m) != 0) local_drop(l, i);
     return 1;
@@ -474,6 +598,7 @@ static int local_exchange(LinkTransport *t, uint16_t my, uint16_t out[4]) {
 
 static int local_poll(LinkTransport *t, LinkEvent *ev) {
     Local *l = t->priv;
+    if (l->lock) return 0;   /* lockstep: tudo passa por frame_begin/frame_end */
     if (l->host) { host_pump(l); return 0; }
     if (l->peers[0].fd == SOCK_BAD) {
         if ((l->tries++ & 0x3F) != 0) return 0;   /* tenta conectar de vez em quando */
@@ -499,7 +624,7 @@ static int local_poll(LinkTransport *t, LinkEvent *ev) {
     }
     if (m.type == M_ROUND) {
         l->mask = m.a;
-        l->round = m.round;
+        l->round = (uint16_t)m.frame;
         ev->type = 1;
         memcpy(ev->values, m.v, sizeof ev->values);
         return 1;
@@ -507,8 +632,63 @@ static int local_poll(LinkTransport *t, LinkEvent *ev) {
     return 0;
 }
 
+/* ---- lockstep por quadro ---- */
+static void local_frame_end(LinkTransport *t, uint32_t frame, const uint16_t *sends, int ns, const LinkRound *r, int n) {
+    Local *l = t->priv;
+    if (!l->host) {   /* filho: terminei o quadro `frame`; este e o SEND que o mestre usa no quadro seguinte */
+        if (l->peers[0].fd == SOCK_BAD) return;
+        Msg m = mkmsg(M_DONE, t->player_id);
+        m.frame = frame; m.n = (uint16_t)ns;
+        if (ns > 0) memcpy(m.s, sends, sizeof(uint16_t) * (size_t)ns);
+        if (send_msg(l->peers[0].fd, &m) != 0) local_drop(l, 0);
+        return;
+    }
+    Msg m = mkmsg(M_FRAME, l->mask);
+    m.frame = frame;
+    m.n = (uint16_t)n;
+    if (n > 0) memcpy(m.r, r, sizeof(LinkRound) * (size_t)n);
+    for (int i = 1; i < l->players; i++)
+        if (l->peers[i].fd != SOCK_BAD && send_msg(l->peers[i].fd, &m) != 0) local_drop(l, i);
+    for (int i = 1; i < l->players; i++) {   /* o quadro N+1 so comeca depois de todo filho terminar o N */
+        while (l->peers[i].fd != SOCK_BAD) {
+            Msg d;
+            int rc = wait_msg(&l->peers[i], &d, 30000);
+            if (rc == 1 && d.type == M_DONE) {
+                for (int k = 0; k < d.n && k < LINK_MAX_ROUNDS && l->fcount[i] < 256; k++)
+                    l->fifo[i][(l->fhead[i] + l->fcount[i]++) & 255] = d.s[k];
+                break;
+            }
+            if (rc == 1) continue;
+            if (rc == -2) rt_log("[link] player %d did not finish frame %u in 30 s", i + 1, frame);
+            local_drop(l, i);
+        }
+    }
+}
+
+static int local_frame_begin(LinkTransport *t, uint32_t frame, LinkRound *out, int max) {
+    Local *l = t->priv;
+    (void)frame;
+    if (l->host || l->peers[0].fd == SOCK_BAD) return 0;
+    for (;;) {
+        Msg m;
+        int rc = wait_msg(&l->peers[0], &m, 30000);
+        if (rc == 1 && m.type == M_FRAME) {
+            l->mask = m.a;
+            int n = m.n < max ? m.n : max;
+            memcpy(out, m.r, sizeof(LinkRound) * (size_t)n);
+            return n;
+        }
+        if (rc == 1) continue;
+        if (rc == -2) rt_log("[link] host sent nothing for 30 s (frame %u)", frame);
+        local_drop(l, 0);
+        return 0;
+    }
+}
+
 static void local_close(LinkTransport *t) {
     Local *l = t->priv;
+    if (l->host && l->lock && l->underflows)
+        rt_log("[link] lockstep: %llu exchanges ran out of child data (delay too short)", (unsigned long long)l->underflows);
     if (l->host && l->ack_timeouts)
         rt_log("[link] master waited for child acks %llu times, %llu hit the 50 ms limit",
                (unsigned long long)l->ack_waits, (unsigned long long)l->ack_timeouts);
@@ -561,7 +741,78 @@ LinkTransport *link_local_join(const char *host, int port) {
     return local_new(l, 1);
 }
 
+static sock_t try_connect(const char *addr, int port, int ms) {
+    sock_t c = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET; a.sin_port = htons((uint16_t)port);
+    inet_pton(AF_INET, addr, &a.sin_addr);
+    set_nonblock(c);
+    if (connect(c, (struct sockaddr *)&a, sizeof a) == 0) return c;
+    if (would_block()) {
+        fd_set w, e;
+        FD_ZERO(&w); FD_ZERO(&e); FD_SET(c, &w); FD_SET(c, &e);
+        struct timeval tv = {ms / 1000, (ms % 1000) * 1000};
+        if (select((int)c + 1, NULL, &w, &e, &tv) > 0 && FD_ISSET(c, &w) && !FD_ISSET(c, &e)) {
+            int err = 0;
+#ifdef _WIN32
+            int len = sizeof err;
+#else
+            socklen_t len = sizeof err;
+#endif
+            getsockopt(c, SOL_SOCKET, SO_ERROR, (char *)&err, &len);
+            if (err == 0) return c;
+        }
+    }
+    sock_close(c);
+    return SOCK_BAD;
+}
+
+int link_local_lockstep(LinkTransport **tp, int wait_s) {
+    LinkTransport *t = *tp;
+    if (!t || strcmp(t->name, "local")) return 0;
+    Local *l = t->priv;
+    double t0 = rt_now_us(), limit = (wait_s > 0 ? wait_s : 120) * 1e6;
+    if (l->host) {
+        uint32_t full = (1u << l->players) - 1;
+        l->lock = 1;
+        rt_log("[link] lockstep: waiting for %d player(s)...", l->players - 1);
+        while ((l->mask & full) != full && rt_now_us() - t0 < limit) {
+            host_pump(l);
+            if ((l->mask & full) != full) wait_fd(l->listener, 0, 50);
+        }
+        if ((l->mask & full) != full) rt_log("[link] timeout: starting with mask %X", l->mask);
+        { const char *e = getenv("KIRBY_LINK_DELAY"); l->delay = e ? atoi(e) : 20; }
+        if (l->delay < 0) l->delay = 0;
+        if (l->delay > 100) l->delay = 100;
+        for (int i = 1; i < l->players; i++)   /* atraso inicial: SEND de reset (0) */
+            for (int k = 0; k < l->delay; k++) l->fifo[i][(l->fhead[i] + l->fcount[i]++) & 255] = 0;
+        sock_close(l->listener);   /* quem chegar depois nao entra: o quadro dele nao bateria com o do host */
+        l->listener = SOCK_BAD;
+    } else {
+        while (l->peers[0].fd == SOCK_BAD && rt_now_us() - t0 < limit)
+            l->peers[0].fd = try_connect(l->addr, l->port, 250);
+        Msg m;
+        int rc = l->peers[0].fd == SOCK_BAD ? -3 : wait_msg(&l->peers[0], &m, (int)((limit - (rt_now_us() - t0)) / 1000));
+        if (rc != 1 || m.type != M_HELLO) {
+            rt_log("[link] could not join %s:%d (host not found or not accepting)", l->addr, l->port);
+            t->close(t);
+            *tp = NULL;
+            return -1;
+        }
+        t->player_id = m.a; l->players = t->players = m.v[0]; l->mask = m.v[1];
+        l->lock = 1;
+        rt_log("[link] connected as player %d of %d (lockstep)", m.a + 1, m.v[0]);
+    }
+    t->lockstep = 1;
+    t->frame_end = local_frame_end;
+    t->frame_begin = local_frame_begin;
+    t->ack = NULL;
+    return 0;
+}
+
 /* =============================================================== instancia global e configuracao */
+int rt_link_nopace;
 Sio *rt_sio_cur;
 
 uint16_t rt_sio_irq_pending(void) {
@@ -577,6 +828,10 @@ int rt_sio_setup(const char *mode, int players, int port, const char *host) {
     else if (!strcmp(mode, "solo")) t = link_null_create();
     else { rt_log("[link] unknown mode '%s' (use off|host|join)", mode); return -1; }
     if (!t) return -2;
+    if (!getenv("KIRBY_LINK_FREE") && strcmp(mode, "solo")) {   /* KIRBY_LINK_FREE=1: troca livre sem lockstep (diagnostico) */
+        const char *w = getenv("KIRBY_LINK_WAIT_S");
+        if (link_local_lockstep(&t, w ? atoi(w) : 120) < 0) return -3;
+    }
     rt_sio_cur = rt_sio_new(t);
     return 0;
 }
@@ -624,6 +879,8 @@ void rt_sio_report(void) {
     for (int p = 0; p < 4; p++)
         printf(" P%d valid=%llu invalid=%llu sync=%llu%s", p + 1, (unsigned long long)s->pk_valid[p],
                (unsigned long long)s->pk_invalid[p], (unsigned long long)s->pk_sync[p], p < 3 ? " |" : "\n");
-    printf("LINK: %llu exchanges completed (%s)\n", (unsigned long long)rt_sio_exchanges,
-           rt_sio_cur->tp ? rt_sio_cur->tp->name : "none");
+    printf("LINK: %llu exchanges completed (%s%s)\n", (unsigned long long)rt_sio_exchanges,
+           rt_sio_cur->tp ? rt_sio_cur->tp->name : "none", rt_sio_cur->tp && rt_sio_cur->tp->lockstep ? ", lockstep" : "");
+    printf("LINK exchange hash: %016llx over %llu exchanges, %u frames\n", (unsigned long long)s->xhash,
+           (unsigned long long)s->xcount, s->frame);
 }

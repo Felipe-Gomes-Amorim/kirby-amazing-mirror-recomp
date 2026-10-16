@@ -16,6 +16,7 @@ void rt_save_tick(void) {}
 Sio *rt_sio_cur;
 uint16_t rt_sio_irq_pending(void) { return 0; }
 void rt_sio_poll(Sio *s) { (void)s; }
+void rt_sio_frame_end(Sio *s) { (void)s; }
 uint32_t rt_sio_cycles_to_event(Sio *s) { (void)s; return 0; }
 void rt_sio_advance(Sio *s, uint32_t c) { (void)s; (void)c; }
 int rt_sio_read(Sio *s, uint32_t a, int z, uint32_t *o) { (void)s; (void)a; (void)z; (void)o; return 0; }

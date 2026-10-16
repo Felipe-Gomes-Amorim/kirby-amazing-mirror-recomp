@@ -1833,6 +1833,7 @@ cache global do zig, +alguns s).
 - ArcTan2 e RegisterRamReset: ainda sem conferencia com a BIOS real.
 
 ### Cabo link P1.5: duas instancias reais (Nasus) - resultado parcial
+> **Superado pelo 'Cabo link P2a' (lockstep por quadro):** os bloqueios 1-3 abaixo foram resolvidos (partida alcancada, fluxo deterministico, join fecha limpo).
 - **0x08151DB0 nao era travamento**: e a espera de DISPSTAT do titulo (laco de VBlank por polling). Em modo link o jogo nao chama VBlankIntrWait nessa tela, entao o contador de quadros parava e o `--frames`/hooks nao andavam. Correcao: `grab_frame(Cpu*)` em `gba_bios.c` conta quadros pelo hw quando passam >3 quadros sem VBlankIntrWait. **So com `rt_sio_cur != NULL`**: mode=off conta so por VBlankIntrWait (um teste do boot, IRQs=600/601, pegou a diferenca e foi corrigido).
 - RCNT reseta em 0x8000 no runtime (SIO desligado ate o jogo escrever RCNT=0). Testes de `--selftest-link` escrevem RCNT=0.
 - Condicoes do mestre conferidas no `rt_sio.c` (SD=1, SI=0, ID=0, start so do mestre, Timer3 reload 0xBBBC/17476 ciclos, IRQ serial = IF bit 7 em `rt_irq_service`, acesso byte/16/32 bits).
@@ -1844,6 +1845,18 @@ cache global do zig, +alguns s).
 - Proximo passo: pedir a Poppy o caminho de menu exato ate 0x0801A688 (ou usar `--peek` em 0x03002558) e fixar a partida das duas instancias por um barramento de sincronizacao de quadro (lockstep de partida) em vez de wall-clock.
 - Diagnostico: `KIRBY_SIO_TRACE=N`, `KIRBY_SIO_EX=N` (+`KIRBY_SIO_EX_FROM=troca`), `KIRBY_SIO_PKT=N`, `KIRBY_LINK_NOACK=1`; `--peek ADDR,..` imprime palavras da RAM a cada `--snap`; `rt_sio_report` mostra validos/invalidos por slot.
 - Suite completa (139 testes) verde e quadro final 3000 frames mode=off md5 0455812b... identico.
+
+### Cabo link P2a: lockstep por quadro, deterministico (Nasus)
+**Resultado:** duas instancias reais (`--link host` / `--link join`) passam pelo menu SUB-GAMES > Speed Eaters > MULTI PLAYER, fazem o handshake de multiboot do Kirby (0x6200/0x81xx/0x8F51/0x70AE/E4E4), entram no gLink (0xFEFE) e **chegam a partida de Speed Eaters**, sem "Communication Error": 5200 quadros, **P1 valid=2673 / P2 valid=2672 / invalid=1 cada** (so o primeiro pacote, de aquecimento), identico nas duas instancias. O A do host inicia a partida nas duas telas; o A do join aparece no host (X de falsa largada no Kirby amarelo = P2). Antes (relogio real) so havia P1 valido e o resultado variava de execucao para execucao.
+**Modelo (`LinkTransport.lockstep`, `frame_begin`/`frame_end`; `rt_sio_frame_end` e chamado por `grab_frame` a cada quadro do hw):**
+- O host e a referencia. Quadro N: host executa N inteiro, entrega as trocas que fez (`LinkRound` = deslocamento em ciclos desde o inicio do quadro + 4 halfwords) e **espera o filho terminar o N**; so entao comeca o N+1. O filho espera `M_FRAME(N)`, executa o N reproduzindo as trocas do mestre nos mesmos deslocamentos (inicia a troca, IRQ serial ao fim, como no hw) e responde `M_DONE(N)`. Nenhuma instancia executa o quadro N+1 antes de a outra terminar o N (barreira por quadro do hw, vale sem VBlankIntrWait).
+- **SEND do filho (o ponto delicado):** o gLink manda 1 halfword por TROCA (16 trocas/quadro: 0xFEFE + 14 + ociosa). O filho nao pode influenciar uma troca do quadro N que o host ja executou, entao o filho devolve o SIOMLT_SEND que tinha no INICIO de cada troca (`sends[]`) e o host os consome em ordem (FIFO) com **atraso fixo de `LINK_DELAY`=20 trocas** (~1,25 quadro; `KIRBY_LINK_DELAY=N`, faixa 0-100; >= max de trocas por quadro, que mediu 16). FIFO fixo (nao "o valor mais recente") mantem o fluxo de pacotes alinhado. Faltou dado (underflow) = repete o ultimo valor e conta (`[link] lockstep: N exchanges ran out of child data`); nos testes deu 0.
+- Sem relogio real: o encontro por ACK de 50 ms foi substituido (so existe com `KIRBY_LINK_FREE=1`, modo antigo por troca, usado por `--selftest-link`). Setup: o host espera todos os jogadores (ate `KIRBY_LINK_WAIT_S`=120 s) e **fecha o listener** (quem chegar depois nao entra: o quadro dele nao bateria); o join tenta conectar (nao bloqueante, 250 ms por tentativa) ate o mesmo limite, senao roda sem cabo.
+- **Pacing:** igual a antes (60 fps pelo relogio de audio/QPC em cada instancia; o filho acompanha o host porque bloqueia no `M_FRAME`). `--link-nopace` desliga o pacing mesmo com janela (testes rapidos). Sem janela nunca houve pacing.
+**Determinismo:** `KIRBY_SIO_LOG=arquivo` grava `quadro ciclo-no-quadro s0 s1 s2 s3` de cada troca concluida; `rt_sio_report` imprime `LINK exchange hash` (FNV-1a de quadro, ciclo e 4 halfwords). Resultado: duas execucoes com o mesmo roteiro = mesmo hash (`3f70b1ec58b17557`, 11397 trocas, 3203 quadros) e host == join (mesmo hash e logs byte a byte iguais). Teste: `tests/test_link_lockstep.py` (RECOMP_SLOW=1): 2 execucoes x 3700 quadros, hash igual, host==join, P1 e P2 validos > 500 nas duas instancias. Constante `KEYS_COOP` e o gancho do roteiro do lobby do co-op da Poppy (ainda nao entregue; hoje o teste usa o roteiro SUB-GAMES acima).
+**Trocas por quadro vs pacote de 24 B por quadro (para a P2/rede escolher o formato):** decidi **trocas (halfwords) agrupadas por quadro**, nao um pacote de 24 B. Motivo: ate chegar ao gLink o jogo usa handshakes de multiboot (0x6200, 0x8101+n, 0x8F51, 0x70AE, E4E4, 1 troca por quadro) que nao tem formato de pacote; o gLink so comeca depois. Mensagens por quadro (400 B hoje, fixas, comprimiveis): host->filho `M_FRAME` = ate 32 trocas (deslocamento u32 + 4 halfwords) + mascara de presentes; filho->host `M_DONE` = ate 32 halfwords (SEND no inicio de cada troca). Em regime gLink sao 16 trocas = **32 B por jogador por quadro** (16 halfwords) mais 16 deslocamentos; os deslocamentos sao periodicos (Timer3 17476 ciclos) e podem virar delta u16 ou ser omitidos. Para a rede: o lockstep puro exige 1 RTT por quadro; para latencia > ~16 ms o caminho e deixar o host adiantar K quadros (atraso de entrada, como o proprio jogo ja faz com os 16 quadros de espera) - nao implementado.
+**Fechamento do join:** a causa era a reconexao: depois que o host saia, o filho tentava `connect` a cada 64 polls e cada tentativa recusada em localhost custa ~1 s no Windows (parecia travado, `timeout` matava). Agora o filho nao reconecta; quando o host cai, o filho segue sem cabo (`[link] host disconnected`) e sai normalmente (teste: host 900 quadros, join 1800 -> join sai com rc=0 em ~11 s).
+**Sem mudanca de comportamento fora do link:** mode=off md5 do quadro final (3000 quadros) igual (0455812b...); `--selftest-link` OK (hub e TCP no modo antigo); suite (159 testes com RECOMP_SLOW=1) verde.
 
 ## Som (M4A) e save (SRAM) (Riven)
 Fonte: desmontagem a mao dos enderecos abaixo (capstone) + ram_code.csv da Poppy. E o motor
@@ -2471,4 +2484,61 @@ Estado em 2026-10-16 do `hw/hw.c` + `rt_sio.c` (Nasus/Gwen, P1) marcado entre pa
 | 7 parado > 16 quadros | igual a 6 MAS com `LS+0x2A0+p = 2` nas duas unidades (profundidade alvo >= 2) — o jogo para ~16 quadros e da 7 | so se algum codigo escrever a profundidade alvo (nao ha referencia literal a 0x02038570-73; ver pendencia) |
 | 8 checksum de estado | `check=True` (`LS+4` bit3) e inverter bits 10-11 de uma entrada (`G_SEND[3] ^= 0x0C`); o mestre da 8 em 1 quadro; sem a adulteracao nao ha erro | dessincronia real (RNG/estado diferente) com a flag de verificacao ligada |
 **Fases do lobby (decodificacao estatica)**: pacote de lobby = byte0=2, [1]=modo/versao, [2..3]=0x0123, [4..0xB]=perfil de 8 B, [0xC..0xD]=mascara de ack, [0xE]=fase (0x20,0x22,0x40,0x41,0x42), enviado pelos emissores 0x0803169C (hello), 0x08031764/0x08031860/0x080319F0/0x08031AA8. Ordem dinamica e o escritor do bit19 ainda dependem de tracos reais.
-**Pendencias**: (a) quem escreve a profundidade alvo `LS+0x2A0+p`; (b) erro 5; (c) tracos reais do lobby (formato pedido no ROLES.md); (d) meta-teste com Nasus: a bancada e o runtime devem produzir o mesmo fluxo de halfwords.
+**Pendencias**: (a) quem escreve a profundidade alvo `LS+0x2A0+p`; (b) erro 5; (c) tracos reais do lobby: FEITO na secao 13 (via `--peek`, sem mudar o runtime); (d) meta-teste com Nasus: a bancada e o runtime devem produzir o mesmo fluxo de halfwords.
+
+
+### 13. P0c: caminho de menu ate o co-op, lobby decodificado com tracos reais (Poppy, 2026-10-16)
+**Correcao da premissa.** A tela `TRANSMITTING... Please connect the Game Boy Advance Game Link cable` NAO e so o handshake de download play: e uma etapa de **deteccao** (biblioteca em `0x0803024C..0x08030D4C`, tabela em `link_functions.csv`, camada `lobby`) que decide, por console, entre "baixar o jogo" (o filho responde `0x72xx`, caminho multiboot) e "todos tem o cartucho" (o filho responde `0x8F51`; **multi-pak**, `0x0300050C = 1`). Com as duas instancias tendo a ROM e o resultado multi-pak, o jogo liga o **gLink** (`LinkEnable` 0x0815898C) e segue para o lobby de pacotes. Isso vale para **SUB-GAMES > MULTI PLAYER** (`SubGameLobbyCreate` 0x08019F28, `0x0203AD10 = 6`) e para o **co-op da aventura** (`START GAME > MULTI PLAYER`, `AdventureLobbyCreate` 0x08032B0C). O lobby com `LinkStartTimer` (0x0801A688) e o dos sub-jogos; o co-op usa `0x08031DF0`.
+
+**Caminho de menu (titulo -> co-op), medido com `rt_boot.exe` em modo link** (o contador de quadros do `--keys` e o do hw: nas telas de titulo/arquivo o jogo espera DISPSTAT por polling, entao em modo SEM link o contador para; use sempre `--link`):
+| quadro | tela | tecla | condicao de espera / observacao |
+|---|---|---|---|
+| ~600 | titulo "PRESS START" | `A@700+8` | pronto a partir de ~700 |
+| ~1000 | FILE SELECT (FILE 1) | `A@800+8` e `A@1060+8` | **a selecao do arquivo so vale com 2 pressoes** (800 e 1060); sem a de 800 o jogo cai em 1 jogador (`0x0203AD10 = 4`). NAO remova nenhuma tecla |
+| ~1100-1300 | GAME SELECT (START GAME no topo) | `A@1300+8` | abre o popup ONE PLAYER / MULTI PLAYER |
+| ~1330 | popup (cursor em ONE PLAYER) | `DOWN@1350+4`, `A@1400+8` | A sem o DOWN escolhe 1 jogador |
+| ~1500 | TRANSMITTING "Please connect..." | — | deteccao: `0x03000490` = {ID, jogadores, estado, flags}; `0x0300050C` = 1 |
+| ~1524 | idem, ate "OK?" | — | os dois ficam com `[2]==2` (jogadores=2); o P1 espera ~90 quadros e mostra **OK?** (P2 aparece no filho) |
+| ~1700 | "OK?" (so no P1/host) | `A@1700+8` (**so o host**) | confirma; o host manda `0xE4E4`, `[2]=3`, o jogo chama `LinkEnable` (quadro ~1713, `0x03002558 = 1`) |
+| 1715-1745 | lobby gLink (secao abaixo) | — | ~30 quadros; termina com 1 quadro de pacote vazio |
+| ~1745-2000 | GAME PAK SELECTION ("CHOOSE A GAME PAK TO PLAY", P1/P2) | `A@2000+8` (**os dois**) | escolher o arquivo de cada console |
+| 2017-2365 | contagem de inicio (pacotes tipo 3) | — | ~350 quadros |
+| 2376-2398 | 2o lobby (mesma sequencia de fases, perfil novo) | — | |
+| ~2419 | fase de jogo: `0x0203AD10 = 2`, pacotes de teclas (sessao 1) | — | co-op rodando (Rainbow Route, HUD com telefone rosa no P1 e laranja no P2) |
+
+Scripts (formato `--keys`; tambem em `tools/link_trace.py --coop-keys host|join`):
+- **host**: `A@700+8,A@800+8,A@1060+8,A@1300+8,DOWN@1350+4,A@1400+8,A@1700+8,A@2000+8`
+- **join**: `A@700+8,A@800+8,A@1060+8,A@1300+8,DOWN@1350+4,A@1400+8,A@2000+8`
+Execucao: host = `rt_boot.exe ROM --link host --link-players 2 --link-port P --keys <host> --frames 3001 --sav none --mute ...`; 1 s depois join = `... --link join --link-host 127.0.0.1 --link-port P --keys <join> ...`. **5/5 execucoes identicas** (md5 do quadro 3000 igual; `--peek` igual quadro a quadro em duas execucoes), ~10 s para 3000 quadros. A ordem importa pouco, mas se a mesma tecla for pressionada fora da janela o jogo cai em outro menu (ex.: sem `A@800` -> 1 jogador).
+
+**Como saber que chegou** (`--peek`; valores medidos nos dois processos no quadro 3000):
+| nivel | endereco | valor |
+|---|---|---|
+| deteccao concluida | `0x03000490` = `00020200` (host) / `00020201` (join) e `0x0300050C = 1` | jogadores = 2, estado 2 (3 depois do OK) |
+| link ligado | `0x03002558` | **1** (a partir do quadro ~1713) |
+| gLink sincronizado | `0x03002554` | host **0x8393**, join **0x8303** (bit 15 = sincronizado, bit 7 = mestre, bits 8-9 = mascara dos 2 jogadores) |
+| co-op rodando | `0x0203AD10` = **2**, `0x0203AD30` = **2**, `0x02038580` = 0 (sem erro) | quadro >= ~2420 |
+Se `0x0203AD10 = 4` e `0x0203AD30 = 1` o jogo entrou em 1 jogador (tecla fora de lugar). `0x0300050C = -1` com `0x03000490 = 0` = a deteccao ainda nao comecou/terminou.
+
+**Deteccao (referencia em `tools/link_sim.py`)**: os dois consoles trocam `[mestre] 0x6200|contador` / `[filho] 0x8F51` (1 troca por quadro), depois `0x70AE`; no quadro ~40 `[1]=1` e ~70 `[1]=2`; o mestre so passa a `[2]=3` quando o host chama `DetectHostConfirm` (0x08030C1C, tecla A do "OK?") e passa a mandar `0xE4E4`. Reproduzido no Unicorn (2 unidades) com timing ideal e igual ao das duas instancias reais (`0x03000478` = `8F51211D`, `70AE2135`...). Os dois consoles ficam com `0x0300050C = 1` (nao ha "mestre = 1 / filho = 2" aqui).
+
+**Fases do lobby (pacotes `byte0=2`, `[2..3]=0x0123`, bytes 4-11 = perfil, 12-13 = mascara de ack, 14 = fase), do host (P1) e do join (P2), quadros do 1o lobby**:
+| quadro | quem | fase `[0xE]` | ack `[0xC..D]` | significado |
+|---|---|---|---|---|
+| 1715 | host | 0x00 idle | 0000 | 1o pacote apos `LinkEnable` (perfil `0000ff03 08141EB3`) |
+| 1718 | host | **0x20 hello** | 0001 | ja ouviu a si mesmo (bit 0) |
+| 1720 | join | **0x40 child-hello** | 0003 | ouviu o hello do host; ack dos jogadores 0 e 1 |
+| 1724 | host | 0x20 | **0003** | ouviu o filho (bits 0,1) |
+| 1727 | join | **0x41 child-ack** | 0003 | status passa a 0x8303/0x8393 (bit 15) |
+| 1735 | host | **0x22 host-ready** | **0013** | bit 4 = confirmacao do P1 |
+| 1737-1740 | join | **0x42 child-ready** (alterna com 0x41) | **0002** | so o proprio bit |
+| 1741 | host | 0x22 | **0033** | bits 4 e 5 = confirmacao dos dois: lobby completo |
+| 1744 | todos | pacote vazio (1 quadro) | | fim do lobby |
+| 1745 | host | **tipo 0x20** (teclas), sessao **02**, quadro 0 | | o lockstep comeca; join no quadro 1744 |
+Leitura: ack `0x0F` = jogadores de quem o hello foi ouvido; `0x10<<p` = confirmacao do jogador p (so o host as agrega: 0x13 -> 0x33). Fases 0x20/0x22 = host; 0x40/0x41/0x42 = filho; as trocas 0x41 <-> 0x42 do filho sao reenvios ate o 0x22 chegar. Depois do GAME PAK: pacotes **tipo 0x03** (`03 02 CC 00..`: byte1 = sessao 02, byte2 = contador que sobe 1 a cada 6 quadros de 0 a 0x35; no 0x34 o host manda parametros extras `[8]=02, [0xF]=FF`), e o **2o lobby** (quadros 2376-2398, mesmas fases, perfil `92edfb5c 00001408` = semente/ID da fase) seguido de pacotes de teclas com sessao **01** a partir do quadro ~2419 (`0x0203AD10 = 2`).
+
+**Flag bit19 de `0x03002440`**: **nunca vale 1** neste caminho (amostrado a cada quadro de 1660 a 2555 nos dois processos: so oscilam os bits 0-1 a cada 13 quadros; bit 24 fixo). Funcao: `LinkEnable`/`LinkDisable` e o laco principal `0x08151C54` so a leem para decidir se refazem `LinkInit(0)`/o vetor de IRQ (`0x08158F0C`); o link funciona sem ela (`LinkEnable` apenas escreve `0x03002558 = 1`). Quem a liga e outro caminho (candidatos: 0x0801CC30, 0x0803CD98/0x0803CFC4, 0x0803E050, 0x08083494, 0x08124430) que este fluxo nao executa. **Nao e pre-requisito para o co-op.** (No `link_sim` eu a ligava so para exercitar o `LinkInit`.)
+
+**Decodificador**: `tools/link_trace.py` le o log do `--peek` (`python tools/link_trace.py host.log join.log`) e imprime so as mudancas (fases do lobby, tipo 0x20, tipo 3, status); `--peek-arg` da a lista de 30 enderecos; limite do runtime: `--snap` com <= 128 quadros por execucao. Teste: `tests.test_link_protocol` (30 testes, ~20 s) inclui decodificador offline e **duas instancias reais ate o co-op** (`TestTwoInstancesCoop`, usa uma porta livre em 127.0.0.1; logs em arquivo, nao pipe: com pipe os dois processos travam por buffer cheio).
+
+**Pendencias antigas**: (a) **profundidade alvo `LS+0x2A0+p` e o erro 5 tem a mesma origem**: `0x08030D4C` (chamada so de 0x0801AA04, 0x08020140, 0x08032AD4, 0x08032DE4 — lobby/sessao, nunca do `LinkFrameSync`) procura no anel de entradas do jogador p a entrada de quadro `LS.frame - 5`; se nao acha -> erro 5; se acha grava `(cabeca - posicao) & 0xF` em `LS+0x2A0+p`, e e esse valor >= 2 que liga a espera do `LinkFrameSync` (erro 7). Em jogo normal ninguem chama `0x08030D4C`, por isso a profundidade fica 0 e a queda de jogador da erro 6. (b) Nao reproduzi o erro 5 em execucao: precisa chegar a um dos 4 chamadores (pausa/retomada da sessao). (c) A flag `0x2B` de `0x03000490` e o unico "OK?" do host: sem a tecla A do host o co-op nunca comeca (o join sozinho nao basta).

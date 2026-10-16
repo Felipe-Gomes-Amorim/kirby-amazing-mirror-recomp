@@ -250,7 +250,7 @@ paced_done:
 
 void rt_window_install(int window, int scale, int pace) {
     use_window = window;
-    paced = pace;
+    { extern int rt_link_nopace; paced = pace && !rt_link_nopace; }
     t_start = rt_now_us();
 #ifdef RT_WINDOW
     if (window && win_open_ex("Kirby & The Amazing Mirror", scale, rt_cfg_get(3)) < 0) {

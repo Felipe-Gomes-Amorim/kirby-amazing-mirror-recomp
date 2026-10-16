@@ -270,5 +270,185 @@ class TestLinkOffRegression(unittest.TestCase):
         self.assertEqual(self.shot(), self.shot())
 
 
+# ----------------------------------------------------------------------------------------------------------------
+# Decodificador de tracos (tools/link_trace.py) - offline, so precisa do Python
+# ----------------------------------------------------------------------------------------------------------------
+import link_trace as LT   # noqa: E402  (tools/ ja esta no sys.path)
+
+# bytes reais capturados do host no menu -> co-op (quadros 1718, 1745/1746, 2017 do roteiro COOP_KEYS)
+REAL_LOBBY = bytes.fromhex('020123010000ff03b31e14080100200000000000')
+REAL_KEYS = bytes.fromhex('2002000000000000000000000000000001000000')
+REAL_T3 = bytes.fromhex('0302000000000000000000000000000010010000')
+
+
+def peek_line(frame, send=None, recv=None, **extra):
+    words = {}
+    for base, data, n in ((LT.SEND, send, 5), (LT.RECV, recv, 20)):
+        data = (data or b'').ljust(4 * n, b'\0')
+        for i in range(n):
+            words[base + 4 * i] = int.from_bytes(data[4 * i:4 * i + 4], 'little')
+    words.update({LT.STATUS: 0, LT.FLAGS: 0, LT.LINKON: 1, LT.SESSION: 0, LT.NPLAYERS: 2})
+    words.update(extra)
+    return '[peek] frame=%d %s' % (frame, ' '.join('%08X=%08X' % (a, v) for a, v in words.items()))
+
+
+class TestTraceDecoder(unittest.TestCase):
+    def test_peek_arg_fits_runtime_limit(self):
+        addrs = LT.peek_arg().split(',')
+        self.assertLessEqual(len(addrs), 32)             # rt_script.c: peeks[32]
+        self.assertEqual(len(set(addrs)), len(addrs))
+
+    def test_lobby_packet(self):
+        d = LT.decode_packet(REAL_LOBBY)
+        self.assertEqual((d['kind'], d['version'], d['ack'], d['phase'], d['phase_name']), ('lobby', 1, 1, 0x20, 'hello'))
+        self.assertEqual(d['profile'], '0000ff03b31e1408')
+
+    def test_lobby_phase_codes(self):
+        for code, name in ((0x20, 'hello'), (0x22, 'host-ready'), (0x40, 'child-hello'), (0x41, 'child-ack'), (0x42, 'child-ready')):
+            b = bytearray(REAL_LOBBY)
+            b[14] = code
+            self.assertEqual(LT.decode_packet(bytes(b))['phase_name'], name)
+
+    def test_keys_packet(self):
+        d = LT.decode_packet(REAL_KEYS)
+        self.assertEqual((d['kind'], d['session'], d['frame']), ('keys', 2, 1))
+        self.assertEqual(d['inputs'], [0] * 8)
+
+    def test_keys_packet_inputs_are_12_bit_newest_first(self):
+        b = bytearray(20)
+        b[0], b[1] = 0x20, 5
+        vals = [0x3FE, 0x001, 0xABC, 0x000, 0x123, 0x456, 0x789, 0xFFF]
+        acc = 0
+        for i, v in enumerate(vals):
+            acc |= v << (12 * i)
+        b[2:14] = acc.to_bytes(12, 'little')
+        b[16:20] = (77).to_bytes(4, 'little')
+        d = LT.decode_packet(bytes(b))
+        self.assertEqual(d['inputs'], vals)
+        self.assertEqual(d['frame'], 77)
+
+    def test_other_and_empty(self):
+        self.assertEqual(LT.decode_packet(REAL_T3)['kind'], 'other')
+        self.assertEqual(LT.decode_packet(bytes(20))['kind'], 'empty')
+        self.assertEqual(LT.decode_packet(None)['kind'], 'none')
+
+    def test_parse_ignores_noise_and_truncated_pairs(self):
+        text = 'SWI 0x06 x5\n[snap] frame=1 foo\n[peek] frame=3 030036B0=00000001 030036B4=0000\n[peek] frame=4 030036B0=0000000A\n'
+        rec = LT.parse_peek_log(text)
+        self.assertEqual(sorted(rec), [3, 4])
+        self.assertEqual(rec[4][LT.SEND], 10)
+        self.assertEqual(rec[3][LT.SEND], 1)
+
+    def test_events_lobby_sequence(self):
+        def lobby(phase, ack):
+            b = bytearray(REAL_LOBBY)
+            b[12], b[14] = ack, phase
+            return bytes(b)
+        frames = [(1, lobby(0x20, 1)), (2, lobby(0x20, 1)), (3, lobby(0x20, 3)), (4, lobby(0x22, 0x13)), (5, REAL_KEYS)]
+        text = '\n'.join(peek_line(f, send=b) for f, b in frames)
+        ev = [t for _, t in LT.events(LT.parse_peek_log(text)) if t.startswith('envia')]
+        self.assertEqual(len(ev), 4)                      # o quadro repetido (2) nao gera evento
+        self.assertIn('fase=0x20', ev[0])
+        self.assertIn('ack=0003', ev[1])
+        self.assertIn('fase=0x22', ev[2])
+        self.assertTrue(ev[3].startswith('envia      KEYS sessao=02'))
+
+    def test_coop_script_shape(self):
+        for who in ('host', 'join'):
+            self.assertTrue(LT.COOP_KEYS[who].startswith(LT.COOP_KEYS_COMMON))
+        self.assertIn('A@1700+8', LT.COOP_KEYS['host'])
+        self.assertNotIn('A@1700+8', LT.COOP_KEYS['join'])
+        self.assertLess(len(LT.COOP_KEYS['host']), 1023)   # o rt_boot aceita ate 128 eventos / 1023 caracteres
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# Duas instancias reais ate o co-op (sem rede externa: 127.0.0.1)
+# ----------------------------------------------------------------------------------------------------------------
+import socket   # noqa: E402
+import time     # noqa: E402
+
+
+def _free_port():
+    with socket.socket() as s:
+        s.bind(('127.0.0.1', 0))
+        return s.getsockname()[1]
+
+
+@unittest.skipUnless(os.path.exists(BOOT_EXE) and os.path.exists(ROM_PATH), 'precisa de rt_boot.exe e baserom.gba')
+class TestTwoInstancesCoop(unittest.TestCase):
+    """Roteiro COOP_KEYS leva host e join do titulo ate o co-op, medido pelo --peek. ~10 s, deterministico."""
+
+    @classmethod
+    def setUpClass(cls):
+        port = _free_port()
+        window = ','.join(str(f) for f in range(1700, 1770)) + ',2020,2400,%d' % LT.COOP_FRAMES
+        cls.logs = {}
+        procs, files = {}, {}
+        with tempfile.TemporaryDirectory() as d:
+            common = [BOOT_EXE, ROM_PATH, '--frames', str(LT.COOP_FRAMES + 1), '--sav', 'none', '--mute',
+                      '--snap', window, '--peek', LT.peek_arg()]
+            extra = {'host': ['--link', 'host', '--link-players', '2', '--link-port', str(port)],
+                     'join': ['--link', 'join', '--link-host', '127.0.0.1', '--link-port', str(port)]}
+            for who in ('host', 'join'):
+                files[who] = open(os.path.join(d, who + '.log'), 'wb')       # arquivo, nao pipe: os dois logs sao grandes
+                procs[who] = subprocess.Popen(common + extra[who] + ['--keys', LT.COOP_KEYS[who], '--frames-dir', os.path.join(d, who)],
+                                              stdout=subprocess.DEVNULL, stderr=files[who], cwd=ROOT)
+                time.sleep(1)
+            for who, p in procs.items():
+                try:
+                    p.wait(timeout=150)
+                    note = ''
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    p.wait()
+                    note = 'TIMEOUT\n'
+                files[who].close()
+                with open(os.path.join(d, who + '.log'), 'rb') as fh:
+                    cls.logs[who] = note + fh.read().decode('utf-8', 'replace')
+        cls.rec = {who: LT.parse_peek_log(txt) for who, txt in cls.logs.items()}
+
+    def test_both_reach_coop_session(self):
+        for who, status in (('host', 0x8393), ('join', 0x8303)):
+            self.assertNotIn('TIMEOUT', self.logs[who][:20], who)
+            self.assertIn(LT.COOP_FRAMES, self.rec[who], who)
+            d = self.rec[who][LT.COOP_FRAMES]
+            self.assertEqual(d[LT.SESSION], 2, who)            # modo "jogo em link"
+            self.assertEqual(d[LT.NPLAYERS], 2, who)
+            self.assertEqual(d[LT.LINKON], 1, who)
+            self.assertEqual(d[LT.STATUS], status, who)        # bit15 = sincronizado; 0x80 = mestre so no host
+
+    def _send_phases(self, who):
+        out = []
+        for fr in sorted(self.rec[who]):
+            p = LT.decode_packet(LT.words_to_bytes(self.rec[who][fr], LT.SEND, 5))
+            if p['kind'] == 'lobby' and (not out or out[-1] != p['phase']):
+                out.append(p['phase'])
+        return out
+
+    def test_lobby_phase_order(self):
+        host = self._send_phases('host')
+        join = self._send_phases('join')
+        # host: idle(0x00) -> hello(0x20) -> host-ready(0x22); join: idle -> child-hello(0x40) -> child-ack(0x41) -> child-ready(0x42)
+        self.assertEqual([p for p in host if p in (0x20, 0x22)][:2], [0x20, 0x22], host)
+        for want in (0x40, 0x41, 0x42):
+            self.assertIn(want, join, join)
+        self.assertLess(join.index(0x40), join.index(0x41))
+        self.assertLess(join.index(0x41), join.index(0x42))
+
+    def test_keys_start_with_session_byte_2_and_frames_count_up(self):
+        seen = []
+        for fr in sorted(self.rec['host']):
+            if fr >= 1770:
+                break
+            p = LT.decode_packet(LT.words_to_bytes(self.rec['host'][fr], LT.SEND, 5))
+            if p['kind'] == 'keys':
+                seen.append((p['session'], p['frame']))
+        self.assertTrue(seen, 'nenhum pacote de teclas no host entre 1700 e 1769')
+        self.assertEqual({s for s, _ in seen}, {2})
+        frames = [f for _, f in seen]
+        self.assertEqual(frames, sorted(frames))
+        self.assertEqual(frames[0], 0)
+
+
 if __name__ == '__main__':
     unittest.main()

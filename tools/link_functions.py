@@ -53,6 +53,17 @@ CURATED = {
                  'payload to recv_dest[p*20], keeps header bit5 per player; clears the internal buffer. Then gLink[2] |= gLink[3] and derives '
                  'gLink[8] flags (bits 4-6) from player 0 header', 'high'),
     0x081576a0: ('glink', 'LinkStartTimer', 'if master: gLink[8] |= 0x80 (enables the Timer3 exchange chain; the lobby calls it once at 0x0801A688)', 'high'),
+    0x08151c54: ('glink', 'MainFrameLink', 'per-frame main loop: if 0x03002558: BuildInputPacket, LinkMain(0x030036B0,0x03002490,0)->0x03002554, LinkFrameSync, error screen if 0; else if flags&0x180000==0x80000: 0x08158F0C', 'high'),
+    0x0803024c: ('lobby', 'DetectInit', 'starts the player-detection handshake: RCNT/SIOCNT multi-play 0x6003, IRQ vector 0x030017B0 = 0x08030899, clears 0x03000490 state, 0x0300050C=0', 'high'),
+    0x08030c40: ('lobby', 'DetectPoll', 'per-frame; arg<<13 is the header of the value sent; dispatches on 0x0300050C: 0 -> 0x080302EC, 1 -> 0x0803040C, 2 -> 0x080305F8', 'high'),
+    0x08030898: ('lobby', 'DetectIrq', 'serial IRQ of the detection: SIOMLT_SEND = 0x8F51/0x70AE (child) or counter|header (master); 0xE4E4 = host confirmed', 'high'),
+    0x08030c1c: ('lobby', 'DetectHostConfirm', 'if [0x03000490+0x2B]==0 and [0x03000490+2]==2 then [0x2B]=1: the master starts sending 0xE4E4 (state 3 = go)', 'high'),
+    0x08030b38: ('lobby', 'DetectStop', '0x0300050C=-1, SIOCNT mode off, restores IRQ vector, state cleared, IE serial off', 'high'),
+    0x08030c94: ('lobby', 'LobbyTasksCreate', 'clears recv 0x03002490/send 0x030036B0/0x020382A0, LinkStartTimer, creates the hello/scan tasks 0x0803149D and 0x0803169D', 'high'),
+    0x08032b0c: ('lobby', 'AdventureLobbyCreate', 'creates the adventure multi-pak lobby task (state 0x08031D25) - MULTI PLAYER of START GAME', 'high'),
+    0x08031d24: ('lobby', 'AdventureLobbyInit', 'LinkDisable, RCNT=0, clears detection state, DetectInit, next state 0x08031DF1', 'high'),
+    0x08031df0: ('lobby', 'AdventureLobbyWait', 'per-frame: DetectPoll(1); [2]==3 -> save ID/count in 0x0203AD3C/0x0203AD30 and go to 0x08032BED; host (ID 0) waits 90 frames with [2]==2, shows OK? and waits for A (-> DetectHostConfirm)', 'high'),
+    0x08019f28: ('lobby', 'SubGameLobbyCreate', 'creates the SUB-GAMES multi-player lobby task (0x0203AD10=6); caller 0x0813ED00 (menu state 5)', 'high'),
     0x081576bc: ('glink', 'LinkStop', 'IME off; IE&=~0xC0 (serial+timer3 off); SIOCNT=0x2003 (multi-play, no IRQ); TM3CNT_L=0xBBBC; IF=0xC0; gLink[8]&=0x7F', 'high'),
     0x08158f54: ('glink-irq', 'LinkIrqHandler (ARM, IWRAM 0x030068E0)', 'Serial IRQ (IF bit7) AND Timer3 IRQ (IF bit6) share vector slot 0 -> this code. '
                  'Reads SIOMULTI0-3 (one ldm of 2 words), stores SIOCNT.bit6 (error) in gLink[9]. SEND side: idx=gLink[0x14]; -1 => SIOMLT_SEND=0xFEFE and swaps the '

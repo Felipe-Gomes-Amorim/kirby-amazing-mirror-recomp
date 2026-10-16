@@ -254,6 +254,7 @@ static void grab_frame(Cpu *c) {
     if (!fb) return;
     last_frame = fb;
     rt_frames_done++;
+    if (rt_sio_cur) rt_sio_frame_end(rt_sio_cur);   /* lockstep por quadro (barreira) */
     if (rt_sio_cur && rt_frames_done - last_vbw_hwframe > 3) {   /* so em modo link: mode=off conta so por VBlankIntrWait */
         rt_frames_counted++;
         { extern void rt_save_tick(void); rt_save_tick(); }

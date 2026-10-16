@@ -204,6 +204,7 @@ int main(int argc, char **argv) {
             rt_scaling_override = !strcmp(v, "integer") ? 0 : !strcmp(v, "stretch") ? 2 : 1;
         }
         else if (!strcmp(argv[i], "--link") && i + 1 < argc) { snprintf(link_mode, sizeof link_mode, "%s", argv[++i]); link_cli = 1; }
+        else if (!strcmp(argv[i], "--link-nopace")) rt_link_nopace = 1;   /* testes: sem ritmo de 60 fps */
         else if (!strcmp(argv[i], "--link-players") && i + 1 < argc) link_players = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--link-port") && i + 1 < argc) link_port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--link-host") && i + 1 < argc) snprintf(link_host, sizeof link_host, "%s", argv[++i]);
@@ -293,7 +294,8 @@ int main(int argc, char **argv) {
         if (rt_cfg_get(5)) { extern int rt_mute; rt_mute = 1; }
     }
     rt_cpu = &cpu;
-    rt_sio_setup(link_mode, link_players, link_port, link_host);   /* mode=off: nada muda */
+    { int lr = rt_sio_setup(link_mode, link_players, link_port, link_host);   /* mode=off: nada muda */
+      if (lr < 0) fprintf(stderr, "[link] link unavailable (%d): running without cable\n", lr); }
     if (selftest) {
         extern int rt_selftest_sram(Cpu *);
         extern int rt_selftest_interp(Cpu *);
