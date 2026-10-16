@@ -482,8 +482,58 @@ renomeada de um arquivo de texto) para o caso invalido; um controle USB/Bluetoot
 | 31 | **[BLOQUEIA]** F1 durante o jogo -> launcher -> Play | Launcher volta com as MESMAS teclas/botoes (conferir nas abas Keyboard/Controller); Play reabre o jogo e as teclas remapeadas continuam valendo; nada foi regravado com padroes |
 | 32 | Remapear com o jogo ja fechado e abrir de novo; editar o `kirby.ini` a mao com nome SDL invalido (`a=Foo`) | Tecla valida vale; nome invalido: ver achado de nomes invalidos (hoje deixa o botao sem tecla: confirmar e reportar) |
 | 33 | Analogico: movimento suave, diagonais, parar no centro; ajustar `deadzone` (0, padrao 8000, 32767) | 8 direcoes por combinacao de eixos; sem tremida na borda (histerese 85%); deadzone 0 reage a qualquer toque; 32767 so deflexao total; `Left stick as D-pad` desmarcado: analogico ignorado e D-pad continua |
-Aceite: itens 1-8, 12-13, 21-23 e 25-31 (marcados **[BLOQUEIA]**) sao obrigatorios para liberar; os demais, sem
-regressao em relacao a versao anterior.
+| 34 | **[BLOQUEIA]** Salvar no jogo pela 1a vez | `<nome da ROM>.sav` aparece ao lado da ROM, com EXATAMENTE 32768 bytes; nao fica `.sav.tmp` |
+| 35 | **[BLOQUEIA]** Salvar no jogo, esperar ~6 s e matar o `kirby.exe` pelo Gerenciador de Tarefas (Finalizar tarefa) | Ao reabrir, o progresso esta la (debounce 1 s, teto 5 s). Matar em MENOS de 1 s pode perder essa ultima escrita (aceitavel), mas NUNCA corromper |
+| 36 | **[BLOQUEIA]** Salvar e sair de 4 formas: Esc, fechar a janela (X / Alt+F4), F1 (volta ao launcher), logoff/desligar com o jogo aberto | Em todas o progresso esta gravado ao reabrir |
+| 37 | **[BLOQUEIA]** Pasta da ROM somente-leitura ou disco cheio durante o jogo | O jogo NAO trava; 1 aviso em `kirby.log` (`[save] could not write ... will retry`), nao repete a cada tentativa; liberado o espaco/permissao, aparece `write recovered` e o save e gravado |
+| 38 | **[BLOQUEIA]** Backups automaticos: jogar, salvar, sair, abrir o launcher e dar Play | Surge `%LOCALAPPDATA%\KirbyRecomp\Backups\<sha1 da ROM>\<nome>_AAAAMMDD_HHMMSS.sav` com o save ANTERIOR ao Play; save inalterado -> nenhum backup novo; depois de 11+ saves diferentes ficam so os 10 mais recentes |
+| 39 | **[BLOQUEIA]** `OPEN FOLDER` | Abre o Explorer na pasta do `.sav`; sem ROM carregada o botao fica desabilitado |
+| 40 | **[BLOQUEIA]** `EXPORT...` | Janela de salvar arquivo; o `.sav` exportado tem o MESMO hash (SHA-1) do original; cancelar nao faz nada; sobrescrever um arquivo existente pede confirmacao do Windows |
+| 41 | **[BLOQUEIA]** `IMPORT...` com arquivo valido | Pergunta `OVERWRITE CURRENT SAVE? A BACKUP IS KEPT` (padrao NAO); NAO/Esc nao muda nada; SIM substitui o save e o save antigo aparece em Backups; Play abre com o progresso importado |
+| 42 | **[BLOQUEIA]** `IMPORT...` com arquivo de tamanho errado (0 bytes, 1 KB, 64 KB, um `.png`) | Recusado com mensagem em ingles dizendo o motivo/tamanho esperado (32768); save atual intacto; nenhum backup criado |
+| 43 | `IMPORT...` de um save "em branco" (32768 bytes todos 0xFF ou 0x00) | Aviso explicito (save vazio) antes de sobrescrever; o backup do atual e feito |
+| 44 | Round trip: EXPORT, jogar mais, IMPORT o exportado | O progresso volta EXATAMENTE ao do export; o progresso descartado fica no backup mais recente |
+| 45 | **[BLOQUEIA]** Pasta da ROM com acento (ex.: `Joao` com til), espaco e caracteres nao-latinos (japones/cirilico) | Salvar, backup, abrir pasta, exportar e importar funcionam; o `.sav` fica ao lado da ROM (nunca em outro lugar nem com `?` no nome) |
+| 46 | Botoes SAVE sem ROM carregada ou com ROM invalida | OPEN FOLDER/EXPORT/IMPORT desabilitados (cinza); nenhum aceita clique |
+| 47 | **[BLOQUEIA]** F1 durante o jogo -> IMPORT -> Play | O jogo abre com o save IMPORTADO e nao o antigo (o gravador nao pode sobrescrever o arquivo importado com a SRAM velha: o jogo ja saiu e gravou ANTES do import) |
+Aceite: itens 1-8, 12-13, 21-23, 25-31 e 34-42, 45, 47 (marcados **[BLOQUEIA]**) sao obrigatorios para liberar; os
+demais, sem regressao em relacao a versao anterior.
+
+### QA do gerenciamento de save (Poppy) - `tests/test_save_qa.py`
+`python -m unittest tests.test_save_qa -v` (~3 s). Complementa o `tests/test_save.py` do Nasus (autoteste com relogio
+falso + kills aleatorios do `rt_boot.exe`, que precisa do build): aqui o `recomp/runtime/rt_save.c` REAL e compilado
+num harness (relogio falso, SRAM simulada, `fwrite` interceptado), entao roda sem ROM nem build.
+**Runtime (`RuntimeSaveTest`, 16 testes, todos OK):**
+| contrato | verificado |
+|---|---|
+| arquivo novo / existente | 1o flush cria 32768 bytes de 0xFF; ida e volta byte a byte; arquivo curto e preenchido com 0xFF, maior e cortado em 32 KiB |
+| debounce ~1 s | 0 flush em +0 e +0,5 s; 1 flush em +1,1 s; limpo nunca regrava (mtime igual em 39 s); escrita do mesmo valor nao suja |
+| rajada | 100 escritas em 200 ms = 1 flush so, com o conteudo final |
+| teto | escrevendo todo quadro por 12 s: 2 a 3 flushes (no maximo 5 s de atraso) |
+| saida | `exit` normal grava sem precisar de tick (atexit); `kill -9` (`_exit`) antes do debounce deixa o save antigo INTEIRO, depois do debounce o novo esta em disco |
+| atomicidade | `fwrite` do `.tmp` interrompido (morre) apos 0, 1, 100, 16384 e 32767 bytes: o `.sav` e sempre o antigo ou o novo inteiro, 32768 bytes; a proxima execucao grava normal e nao sobra `.tmp`; primeira gravacao morta: sem `.sav` ou inteiro |
+| falha + nova tentativa | `.tmp` impossivel de criar (diretorio no lugar): `.sav` intacto, tenta a cada ciclo (>= 3 falhas em 5 s), 1 unico aviso `could not write` por sequencia, recupera quando liberado |
+| caminhos | acento, espaco, parenteses, e nao-ANSI (japones, cirilico): grava no lugar certo (usa UTF-8 -> wide) |
+| autoteste do proprio runtime (`rt_selftest_save`) | passa |
+Resultado: o gravador novo corrige as 3 falhas do antigo (`fopen("wb")` truncava antes de escrever; so gravava no exit; caminho
+fora da pagina ANSI virava `?`). Limite conhecido e aceito: `kill -9` perde ate ~1 s (ate 5 s sob escrita continua) de progresso.
+**Launcher (`LauncherSaveContractTest`, 15 testes): PULAM ate existir `launcher/savemgr.py`** (Riven). Interface de teste
+(injeta pasta de backups e relogio; qualquer outra assinatura e so avisar que o teste se adapta):
+```
+backup_save(sav_path, backup_root, rom_sha1, rom_name, now=None) -> str | None   # None se igual ao backup mais recente
+import_save(src_path, sav_path, backup_root, rom_sha1, rom_name, now=None) -> (ok: bool, message: str)
+export_save(sav_path, dst_path) -> None
+# backups: <backup_root>/<rom_sha1>/<rom_name>_AAAAMMDD_HHMMSS.sav ; rotacao automatica (10 mais recentes)
+```
+Ja escritos (contra o contrato do Riven): backup so quando o save mudou; nome no padrao e pasta por SHA-1; rotacao em 10
+removendo os mais antigos; dois saves diferentes no MESMO segundo nao se sobrescrevem; backups separados por ROM; sem
+`.sav` = nada a fazer; import recusa 0/1/100/32767/32769/65536/131072 bytes SEM tocar no save nem criar backup e com
+mensagem; save "em branco" (0xFF/0x00) avisa; import faz o backup do ATUAL antes e troca por rename (sem `.tmp`); import de
+arquivo inexistente da erro; falha na troca (os.replace quebrado) deixa o original intacto; export nao altera o save e
+sobrescreve o destino; round trip exportar -> importar identico (SHA-1) com acento/espaco nos DOIS caminhos.
+O oraculo desses testes e o `SaveModel` (validacao, nomes, rotacao) que roda sempre em `ModelSpecTest`.
+**Pendencias:** Riven entrega `savemgr.py` (ou diz os nomes que usou); Gwen: a UI ja devolve KL_OPEN_SAVE_DIR/EXPORT/IMPORT
+(botoes desabilitados sem ROM valida, confirmacao dentro da UI); roteiro manual 34-47 acima.
 
 ### Teclas, botoes e analogico: contrato e testes (Poppy)
 Os testes rodam o `rt_input_init()`/`rt_input_poll()` REAIS (`recomp/runtime/rt_input.c`, RT_WINDOW) com uma camada
@@ -1075,6 +1125,39 @@ All UI text in English. Files: `hw/launcher_ui.c` (kirby_ui.dll; the file list i
   force `fake_pad`); game (kirby.exe) input already reads the same ini via rt_input.c; capturing joystick
   hats/axes (only SDL game-controller buttons) and non-SDL-mapped controllers.
 
+### 15. Launcher: SAVE section (OPEN FOLDER / EXPORT... / IMPORT...) (Gwen)
+Contract: NOTES 'Gerenciamento de save: plano e contrato (Riven)'. English UI; same 3 source files for kirby_ui.dll.
+- **New `kl_run` return codes** (enum in `launcher_ui.h`, documented there): `KL_OPEN_SAVE_DIR = 3`,
+  `KL_EXPORT_SAVE = 4`, `KL_IMPORT_SAVE = 5`. The launcher performs the action and calls `kl_run` again (the ini
+  and settings are re-read each call). `KL_QUIT = 0`, `KL_PLAY = 1`, `KL_PICK_ROM = 2` are unchanged.
+- **UI:** a `SAVE` row with `OPEN FOLDER`, `EXPORT...`, `IMPORT...` between AUDIO and INPUT. The three buttons are
+  **disabled (greyed, no click/Enter) unless a verified ROM is loaded** (`rom[0] != 0 && rom_ok == 1`; no ROM, or an
+  unverified ROM, disables them). OPEN FOLDER and EXPORT... return their code immediately.
+- **IMPORT confirmation lives in the UI:** IMPORT... opens a modal dialog over the dimmed screen,
+  `OVERWRITE CURRENT SAVE?` / `A BACKUP IS KEPT` with `[YES] [NO]`. Focus starts on **NO** (the safe answer); NO,
+  Esc, or the controller's east button close it without leaving the screen; Left/Right/d-pad switch between the two;
+  only YES returns `KL_IMPORT_SAVE`. While the dialog is open nothing behind it is clickable or focusable. By the
+  contract, the launcher must back up the current `.sav` before overwriting and validate 32768 bytes - the UI has
+  already asked the user, so do not ask again.
+- **Keyboard / controller:** the three buttons are in the normal focus order (MUTE -> OPEN FOLDER -> EXPORT... ->
+  IMPORT... -> KEYBOARD...; Left/Right move along the row; d-pad and south/east work the same as on the keyboard).
+- **Layout re-flowed** to make room without anything stacking: status panel 58..100, rows every 26 px (window size
+  y=106, fullscreen 132, scaling 158, volume 184, mute 210, SAVE 236, INPUT 262, PLAY/QUIT 290), footer 313. Texts
+  that could collide were bounded: the ROM line is at most 40 characters (long names become `...<last 19>`), the
+  status free text is clipped to 170 px so it never runs under the progress bar (now at y=87).
+- **Layout tests use real geometry, not eyeballing:** the UI records every free text and the progress bar of the
+  last frame (`kl_test_text_count/kl_test_text/kl_test_bar`); `test_kirby_ui_save.c` checks, for 8 states (no ROM,
+  preparing, building with a long text, ready, unverified with a very long path, error, 1X caption, full-screen
+  stretch), that no widget leaves the canvas, no two widgets overlap, no text is behind a widget or the progress
+  bar, no two texts overlap, and the slider's `100%` stays clear. It also compares snapshot pixels (enabled vs
+  disabled button) and dumps frames: `build/hw/ui_save.png`, `ui_save_confirm.png`, `ui_save_long.png`,
+  `ui_save_building.png`.
+- **Tests (`hw/tests/run_ui.ps1`, every event carries the window id):** enabled/disabled by ROM state; codes 3, 4, 5
+  by mouse, keyboard (Enter/Space/Esc/Left) and simulated controller; the dialog is modal; NO then IMPORT again;
+  navigation through the SAVE row. All earlier suites (config, UI, editor) still pass.
+- **Not done:** the real actions (open the Explorer, file dialogs, backup/validation, the `.sav` rotation) belong to
+  the Python launcher (Riven) and the runtime flush (Nasus); the UI only reports the intent.
+
 - Cuidado para o runtime: `hw_irq_pending` ja aplica IME e IE&IF; o runtime so decide o despacho.
   O registro BIOS_IF (0x03007FF8) e IWRAM, fica a cargo do runtime ao tratar VBlankIntrWait.
 
@@ -1567,6 +1650,35 @@ cache global do zig, +alguns s).
 - Limite: `SDL_PushEvent` de CONTROLLERBUTTON nao muda o estado lido por `SDL_GameControllerGetButton`;
   por isso o teste usa joysticks virtuais (caminho real de SDL, nao simulacao de eventos).
 
+### Save atomico da SRAM (Nasus) - `recomp/runtime/rt_save.c`
+- **Suja**: o barramento incrementa `gba_sram_gen` a cada escrita que MUDA a SRAM (0x0E000000..
+  0x0E007FFF; escrever o mesmo valor nao suja - o verify do jogo nao gera flush).
+- **Debounce**: `rt_save_tick()` (1x por quadro, em `VBlankIntrWait`; caminho comum = 1 comparacao)
+  grava **~1 s apos a ULTIMA escrita**, ou no maximo **5 s apos a primeira** se o jogo escreve sem
+  parar (so assim nunca fica sem gravar).
+- **Atomico**: escreve `<save>.tmp` (`fwrite` + `fflush` + `_commit`/FlushFileBuffers) e
+  `MoveFileExW(tmp, sav, REPLACE_EXISTING|WRITE_THROUGH)` (caminhos UTF-8 -> `_wfopen`/wide, com
+  acento e espaco; fora do Windows `rename`). O `.sav` **nunca e escrito diretamente**.
+- **Tambem grava** no `atexit` (cobre F1 = 77, Esc e janela fechada), em F1 (explicito), em
+  `CTRL_CLOSE/C/BREAK/LOGOFF/SHUTDOWN` (`SetConsoleCtrlHandler`, outra thread, com secao critica) e
+  `SIGTERM`. `kirby.exe` e app grafico: o evento de console so chega no `rt_boot`; no jogo vale o
+  fechar da janela (`SDL_QUIT` -> atexit). Nao testei `taskkill` sem `/F` nem logoff.
+- **Falha**: 1 aviso por sequencia no `kirby.log` (`[save] could not write <arq> (error N, <motivo>);
+  will retry`), nova tentativa no proximo ciclo (1 s), aviso de recuperacao; o jogo nao trava.
+- **Custo medido**: (a) simulado, jogo escrevendo 64 B/quadro por 1 min (3600 quadros, relogio
+  falso): **12 flushes/min**, custo medio **8,3 us por quadro** (30 ms no minuto inteiro, ~2,6 ms por
+  gravacao); (b) jogo real (8000 quadros = 2,2 min de jogo, menu -> 1a fase): **2 flushes**
+  (formatacao do save), 13,4 ms de escrita no total (~6,7 ms cada, com fsync), tick 1,7 us/quadro;
+  reabrindo com o save existente: **0 flushes**. Um flush de ~3-7 ms cai num quadro de 16,7 ms: sem
+  impacto perceptivel com a folga de 9x. `rt_boot --bench`/`--window` imprimem `SAVE: ...`.
+- **Testes** (`tests/test_save.py`, usa `rt_boot.exe`; `KIRBY_RT_BOOT` para apontar outro):
+  `--selftest-save DIR` (relogio falso: sem flush no mesmo quadro nem a 0,5 s; 1 flush a ~1 s;
+  `.sav` com o byte escrito e 32768 bytes; sem `.tmp` sobrando; escrita de mesmo valor nao suja;
+  escrita continua = 10-13 flushes/min; falha em diretorio inexistente -> tentativas repetidas e
+  recuperacao): OK. **Kill**: um processo grava a SRAM inteira sem parar (cada geracao = 1 byte
+  uniforme) e o teste o mata com `TerminateProcess` (= kill -9) em 40 instantes aleatorios:
+  **40/40 `.sav` com 32768 bytes uniformes** (antigo ou novo, nunca parcial).
+
 ### O que falta / riscos
 - Interpretador de fallback: endereco de RAM sem overlay ainda **aborta**; ROM sem funcao
   vira "retorna" (logado). Codigo em RAM que mude depois nao e achado sozinho fora do
@@ -2020,3 +2132,13 @@ Sem save states (a pilha nativa do C impede congelar em qualquer ponto).
   desabilitados se nao houver ROM; IMPORT pede confirmacao ("OVERWRITE CURRENT SAVE? A BACKUP IS KEPT").
 - **QA (Poppy)**: kill -9 durante a escrita nao corrompe; flush em ~1 s; backups rotacionam em 10; import de tamanho errado
   recusado; export/import round-trip identico; save com caminho com acento e espaco.
+
+### Save completo (Riven) - launcher v0.5
+`launcher/savemgr.py` (QA: `tests/test_save_qa.py`, 34 testes): `backup_save` (so se difere do backup mais recente; 10 por ROM em
+`%LOCALAPPDATA%\KirbyRecompackups\<sha1>\<nome>_AAAAMMDD_HHMMSS.sav`, `_1`, `_2`... no mesmo segundo), `import_save` (valida
+32768 bytes, avisa se vazio, faz backup antes, troca atomica por `os.replace`), `export_save`. `flow.Controller` trata os codigos 3/4/5 de
+`kl_run` (abrir pasta / exportar / importar), executa a acao e volta a tela; uma acao que falha nao derruba o launcher; codigo
+desconhecido = sair. `LauncherEnv.run_game` faz o backup antes de cada Play. Dialogos Win32 de abrir/salvar via ctypes (o filtro
+de tipos passou a ser um buffer proprio: antes o NUL embutido cortava a string no 1o separador).
+Nota de teste: `tests.test_save` procura `build/recomp/program/rt_boot.exe`; um build de desenvolvimento antigo faz esses 2 testes
+falharem (nao e defeito do gravador). Defina `KIRBY_RT_BOOT` com um `rt_boot.exe` recente (`recomp.program --interp-only`).

@@ -50,8 +50,15 @@ Windows may warn about an unsigned program: the launcher runs a compiler and the
 | Launcher | build status, window size 1x–6x, fullscreen, Integer / Fit / Stretch scaling, volume, Play |
 | Input | keyboard and one controller (tested with a generic pad), remapping screens, analog stick with adjustable dead zone |
 | Sound | PCM and PSG through SDL2 audio (not compared against a reference yet) |
-| Save | 32 KiB `<rom>.sav` next to the ROM |
+| Save | 32 KiB `<rom>.sav` next to the ROM; written within ~1 s of the game saving (atomic), automatic backups, export/import from the launcher |
 | Play while building | interpreter now, compiled game on the next start |
+
+### Saves
+
+The save is the raw 32 KiB `.sav` other emulators use, kept next to your ROM. It is written about a second after the game
+saves, through a temporary file that is renamed over the old one, so a crash cannot leave it half-written. Each time you press
+Play the launcher also keeps a backup (the 10 most recent per ROM) in `%LOCALAPPDATA%\KirbyRecompackups`. The **Save** section
+of the launcher can open the folder, **export** the save to a file and **import** one (the current save is backed up first).
 
 ### Known limitations
 

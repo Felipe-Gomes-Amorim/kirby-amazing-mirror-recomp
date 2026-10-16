@@ -49,8 +49,15 @@ O Windows pode avisar sobre programa não assinado: o launcher executa um compil
 | Launcher | estado da construção, janela 1x–6x, tela cheia, escala Integer / Fit / Stretch, volume, Play |
 | Entrada | teclado e um controle (testado com um genérico), telas de remapeamento, analógico com zona morta ajustável |
 | Som | PCM e PSG por SDL2 (ainda não comparado com uma referência) |
-| Save | `<rom>.sav` de 32 KiB ao lado da ROM |
+| Save | `<rom>.sav` de 32 KiB ao lado da ROM; gravado ~1 s depois de o jogo salvar (atômico), backups automáticos, exportar/importar no launcher |
 | Jogar enquanto compila | interpretador agora, jogo compilado na próxima abertura |
+
+### Saves
+
+O save é o `.sav` cru de 32 KiB que outros emuladores usam, guardado ao lado da ROM. Ele é gravado cerca de um segundo depois de o jogo
+salvar, por um arquivo temporário que é renomeado sobre o antigo, então uma queda não o deixa pela metade. A cada **Play** o launcher
+guarda também um backup (os 10 mais recentes por ROM) em `%LOCALAPPDATA%\KirbyRecompackups`. A seção **Save** do launcher abre a
+pasta, **exporta** o save para um arquivo e **importa** outro (o save atual recebe backup antes).
 
 ### Limitações conhecidas
 
