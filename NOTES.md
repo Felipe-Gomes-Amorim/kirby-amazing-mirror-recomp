@@ -2003,3 +2003,20 @@ Tres armadilhas medidas:
 3. O launcher so usa a UI falsa quando `KIRBY_FAKE_UI` esta definido (antes, dependia de a DLL nao ter `kl_run`).
 Zip: 95 -> 122 MB. Cache enviado: 76 MB (copiado para `%LOCALAPPDATA%\KirbyRecomp\zigcache` na 1a abertura).
 Medicoes anteriores de 183 s e 529 s foram invalidas (dois testes concorrentes na mesma pasta).
+
+## Gerenciamento de save: plano e contrato (Riven)
+Decisao do usuario: fazer (1) gravar ao escrever + atomico, (2) backups automaticos, (3) abrir pasta, exportar/importar `.sav`.
+Sem save states (a pilha nativa do C impede congelar em qualquer ponto).
+- **Arquivo do save**: `<pasta da ROM>/<nome da ROM>.sav`, cru, **32768 bytes** (SRAM, formato dos outros emuladores).
+- **Runtime (Nasus)**: marca a SRAM como "suja" a cada escrita do jogo; um *debounce* de ~1 s grava (flush) em
+  `<save>.tmp` e **renomeia** sobre o `.sav` (MoveFileEx com REPLACE_EXISTING = atomico); tambem grava ao sair (atexit),
+  ao F1 e ao fechar a janela. Nunca grava um arquivo parcial. Falha de gravacao: avisar 1x no log, tentar de novo.
+- **Launcher (Riven, Python)**: antes de iniciar o jogo copia o `.sav` para
+  `%LOCALAPPDATA%\KirbyRecompackups\<sha1 da ROM>\<nome>_AAAAMMDD_HHMMSS.sav` se ele difere do backup mais recente;
+  guarda os **10 mais recentes**. Acoes: abrir pasta do save (`os.startfile`), exportar (GetSaveFileName), importar
+  (valida tamanho 32768, avisa se vazio/tudo 0xFF, **faz backup antes** de sobrescrever).
+- **UI (Gwen)**: secao "SAVE" na tela principal com tres botoes: OPEN FOLDER, EXPORT..., IMPORT... Novos retornos de
+  `kl_run`: KL_OPEN_SAVE_DIR=3, KL_EXPORT_SAVE=4, KL_IMPORT_SAVE=5 (o launcher trata e chama `kl_run` de novo). Botoes
+  desabilitados se nao houver ROM; IMPORT pede confirmacao ("OVERWRITE CURRENT SAVE? A BACKUP IS KEPT").
+- **QA (Poppy)**: kill -9 durante a escrita nao corrompe; flush em ~1 s; backups rotacionam em 10; import de tamanho errado
+  recusado; export/import round-trip identico; save com caminho com acento e espaco.
