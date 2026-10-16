@@ -181,6 +181,14 @@ int main(int argc, char **argv) {
             const char *v = argv[++i];
             rt_scaling_override = !strcmp(v, "integer") ? 0 : !strcmp(v, "stretch") ? 2 : 1;
         }
+        else if (!strcmp(argv[i], "--selftest-save") && i + 1 < argc) {
+            extern int rt_selftest_save(const char *dir);
+            return rt_selftest_save(argv[i + 1]) ? 1 : 0;
+        }
+        else if (!strcmp(argv[i], "--selftest-save-writer") && i + 1 < argc) {
+            extern int rt_selftest_save_writer(const char *path);
+            return rt_selftest_save_writer(argv[i + 1]);
+        }
         else if (!strcmp(argv[i], "--selftest-input")) {
             extern int rt_selftest_input_entry(void);
             return rt_selftest_input_entry() ? 1 : 0;
@@ -247,6 +255,7 @@ int main(int argc, char **argv) {
             if (b2 && (!e || b2 > e)) e = b2;
             if (e) strcpy(e + 1, "kirby.log"); else strcpy(lg, "kirby.log");
             rt_input_set_log_entry(lg);
+            { extern void rt_log_set(const char *p); rt_log_set(lg); }
         }
         if (!scale_explicit) scale = rt_cfg_get(0);
         if (rt_cfg_get(5)) { extern int rt_mute; rt_mute = 1; }
@@ -277,7 +286,7 @@ int main(int argc, char **argv) {
     while (!cpu.stop) rt_call(&cpu);
 
     rt_window_close();
-    if (window || bench) rt_report_speed();
+    if (window || bench) { extern void rt_save_report(void); rt_report_speed(); rt_save_report(); }
     const char *why = cpu.stop == RT_STOP_FRAMES ? "frames"
                       : cpu.stop == RT_STOP_VBLANK_WAIT ? "first VBlankIntrWait"
                       : cpu.stop == RT_STOP_STOPCALL  ? "SWI Stop" : "erro";

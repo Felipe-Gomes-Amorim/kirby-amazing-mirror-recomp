@@ -10,6 +10,12 @@
 static uint8_t ewram[0x40000];
 static uint8_t iwram[0x8000];
 static uint8_t sram[0x8000];
+uint32_t gba_sram_gen;   /* incrementa a cada escrita que muda a SRAM (rt_save.c) */
+
+static inline void sram_put(uint32_t a, uint8_t v) {
+    uint8_t *p = &sram[a & 0x7FFF];
+    if (*p != v) { *p = v; gba_sram_gen++; }
+}
 static const uint8_t *rom;
 static uint32_t rom_size;
 
@@ -83,7 +89,7 @@ void gba_write8(uint32_t a, uint32_t v) {
     case 3: iwram[a & 0x7FFF] = (uint8_t)v; return;
     case 4: case 5: case 6: case 7: hw_write(a, 1, v & 0xFF); return;
     case 8: case 9: case 10: case 11: case 12: case 13: return; /* ROM: ignora */
-    case 14: case 15: sram[a & 0x7FFF] = (uint8_t)v; return;
+    case 14: case 15: sram_put(a, (uint8_t)v); return;
     case 0: return;
     }
     gba_bus_unmapped(a, 1, 1);
@@ -95,7 +101,7 @@ void gba_write16(uint32_t a, uint32_t v) {
     case 3: { uint32_t o = a & 0x7FFF; iwram[o] = (uint8_t)v; iwram[o + 1] = (uint8_t)(v >> 8); return; }
     case 4: case 5: case 6: case 7: hw_write(a, 2, v & 0xFFFF); return;
     case 8: case 9: case 10: case 11: case 12: case 13: return;
-    case 14: case 15: sram[a & 0x7FFF] = (uint8_t)v; return; /* HW: so 8 bits (baixo) */
+    case 14: case 15: sram_put(a, (uint8_t)v); return; /* HW: so 8 bits (baixo) */
     case 0: return;
     }
     gba_bus_unmapped(a, 2, 1);
@@ -107,7 +113,7 @@ void gba_write32(uint32_t a, uint32_t v) {
     case 3: memcpy(iwram + (a & 0x7FFF), &v, 4); return;
     case 4: case 5: case 6: case 7: hw_write(a, 4, v); return;
     case 8: case 9: case 10: case 11: case 12: case 13: return;
-    case 14: case 15: sram[a & 0x7FFF] = (uint8_t)v; return;
+    case 14: case 15: sram_put(a, (uint8_t)v); return;
     case 0: return;
     }
     gba_bus_unmapped(a, 4, 1);

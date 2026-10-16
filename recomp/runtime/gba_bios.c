@@ -325,6 +325,7 @@ static int vblank_intr_wait(Cpu *c, uint32_t next) {
     }
     c->pc = next;
     rt_frames_counted++;
+    { extern void rt_save_tick(void); rt_save_tick(); }
     if (rt_frame_hook) rt_frame_hook(rt_frames_counted);
     if (c->stop) return 1;
     if (rt_frames_limit && rt_frames_counted >= rt_frames_limit) {

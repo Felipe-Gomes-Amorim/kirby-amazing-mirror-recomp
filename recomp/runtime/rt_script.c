@@ -19,7 +19,6 @@
 #include "gba_rt.h"
 
 const uint32_t *hw_get_framebuffer(void);
-void rt_script_sram_save(void);
 
 typedef struct { uint64_t at, until; uint16_t mask; } KeyEv;
 static KeyEv keys[128];
@@ -114,31 +113,9 @@ void rt_script_install(void) {
     if (nkeys || nsnaps) rt_frame_hook = frame_hook;
 }
 
-/* ---- save SRAM ---- */
-void rt_script_sram(const char *path) {
-    strncpy(sav_path, path, sizeof sav_path - 1);
-    FILE *f = fopen(sav_path, "rb");
-    uint8_t buf[0x8000];
-    memset(buf, 0xFF, sizeof buf);
-    if (f) {
-        size_t n = fread(buf, 1, sizeof buf, f);
-        (void)n;
-        fclose(f);
-    }
-    gba_sram_set(buf);
-    atexit(rt_script_sram_save);
-}
-
-void rt_script_sram_save(void) {
-    if (!sav_path[0]) return;
-    uint8_t buf[0x8000];
-    gba_sram_get(buf);
-    FILE *f = fopen(sav_path, "wb");
-    if (f) {
-        fwrite(buf, 1, sizeof buf, f);
-        fclose(f);
-    }
-}
+/* ---- save SRAM: ver rt_save.c (gravacao atomica .tmp + rename) ---- */
+void rt_save_open(const char *path);
+void rt_script_sram(const char *path) { rt_save_open(path); }
 
 /* ---- autoteste: rotinas SRAM copiadas para a pilha em sp arbitrario ---- */
 extern uint64_t rt_sram_alias_hits;

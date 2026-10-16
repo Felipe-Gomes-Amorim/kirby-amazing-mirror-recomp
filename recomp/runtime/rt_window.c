@@ -174,6 +174,7 @@ static void win_hook(uint64_t frame) {
             }
         }
         if (hk & 1) {   /* F1: volta ao launcher (codigo de saida 77); o save e gravado no atexit */
+            { extern void rt_save_flush(const char *why, int force); rt_save_flush("F1", 0); }
             rt_exit_code = 77;
             rt_cpu->stop = RT_STOP_FRAMES;
             return;

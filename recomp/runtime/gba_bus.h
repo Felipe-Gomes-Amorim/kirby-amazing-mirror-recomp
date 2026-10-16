@@ -59,6 +59,7 @@ uint32_t gba_rom_size(void);
 uint8_t *gba_ewram(void);
 uint8_t *gba_iwram(void);
 /* save SRAM de 32 KiB (espelhada em 0x0E000000..0x0FFFFFFF) */
+extern uint32_t gba_sram_gen;   /* escritas que mudaram a SRAM (para o save em disco) */
 void gba_sram_set(const uint8_t *p32k);
 void gba_sram_get(uint8_t *p32k);
 const uint32_t *hw_get_framebuffer(void);

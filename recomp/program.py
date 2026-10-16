@@ -151,7 +151,7 @@ def build(rom, funcs, bad=None, jobs=8, nshards=None, verbose=True, opt=None):
         return obj
 
     rt_srcs = [os.path.join(RUNTIME, n) for n in ('gba_bus.c', 'gba_rt.c', 'gba_bios.c', 'rt_main.c',
-                                                    'rt_script.c', 'rt_window.c', 'rt_interp.c', 'rt_input.c')]
+                                                    'rt_script.c', 'rt_window.c', 'rt_interp.c', 'rt_input.c', 'rt_save.c')]
     rt_srcs.append(os.path.join(ROOT, 'hw', 'hw.c'))   # strong: substitui os stubs fracos
     t1 = time.time()
     with ThreadPoolExecutor(jobs) as ex:
