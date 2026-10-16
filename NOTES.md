@@ -1983,3 +1983,23 @@ Feedback com capturas (tela cheia 1903x1079 mostrava o jogo em 1440x960 = 6x int
 ### Controle fisico testado (usuario)
 Testado com **um controle generico**: funciona (leitura por posicao, analogico, remapeamento). Modelos Xbox, PlayStation e
 Switch Pro seguem sem teste proprio; dependem dos mapeamentos do SDL_GameController.
+
+## Cache do zig no pacote e nomes invalidos no .ini (Riven)
+**Nomes invalidos**: `rt_input_init` agora cai no padrao (e loga `unknown key name 'X' ... using the default 'Y'`) quando o SDL
+nao conhece o nome de tecla/botao digitado a mao; os 2 `expectedFailure` do QA viraram testes normais (80 passam).
+**Cache do zig empacotado** (`package_release.py`, passo 4b; launcher `zig_cache_dir()`):
+| Medida (modo rapido, layout do launcher) | Tempo |
+|---|---|
+| cache vazio | 76,6 s |
+| cache empacotado (copia por Python) | **5,9 s** |
+| launcher completo, ambiente limpo: janela do jogo no ar | **14 s** (antes 58 s); inclui copiar o cache (7 s) |
+| construcao completa em segundo plano | pronta em 234 s desde o inicio; 2a abertura 275 ms |
+Tres armadilhas medidas:
+1. `-target native` prende o cache a CPU de quem compilou: o build passou a usar `-target x86_64-windows-gnu`
+   (`KIRBY_ZIG_TARGET=native` restaura). Custo: ~507 q/s (8,5x tempo real) contra ~565-590 (9,5x) antes.
+2. O cache do zig classifica arquivos por **prefixo de caminho** (cwd / lib dir / cache dir). Aquecer o cache com cwd =
+   raiz do repo (que contem `dist/.../zig/lib`) gravou prefixos que nunca casam no launcher: 127 s em vez de 6 s.
+   O aquecimento agora roda numa copia dos fontes FORA da arvore do zig, igual ao launcher.
+3. O launcher so usa a UI falsa quando `KIRBY_FAKE_UI` esta definido (antes, dependia de a DLL nao ter `kl_run`).
+Zip: 95 -> 122 MB. Cache enviado: 76 MB (copiado para `%LOCALAPPDATA%\KirbyRecomp\zigcache` na 1a abertura).
+Medicoes anteriores de 183 s e 529 s foram invalidas (dois testes concorrentes na mesma pasta).
