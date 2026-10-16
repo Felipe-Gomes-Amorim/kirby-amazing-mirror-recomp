@@ -122,14 +122,31 @@ static int reserved(SDL_Scancode sc) {
     return sc == SDL_SCANCODE_ESCAPE || sc == SDL_SCANCODE_F11 || sc == SDL_SCANCODE_F1;
 }
 
+static SDL_Scancode key_scancode(const char *name) {
+    SDL_Keycode k = SDL_GetKeyFromName(name);
+    SDL_Scancode sc = k != SDLK_UNKNOWN ? SDL_GetScancodeFromKey(k) : SDL_SCANCODE_UNKNOWN;
+    if (sc == SDL_SCANCODE_UNKNOWN) sc = SDL_GetScancodeFromName(name);
+    return sc;
+}
+
 void rt_input_init(void) {
     if (input_ready) return;
+    KirbyConfig defs;
+    cfg_defaults(&defs);
     for (int i = 0; i < NBTN; i++) {
-        SDL_Keycode k = SDL_GetKeyFromName(rt_cfg.kb[i]);
-        SDL_Scancode sc = k != SDLK_UNKNOWN ? SDL_GetScancodeFromKey(k) : SDL_SCANCODE_UNKNOWN;
-        if (sc == SDL_SCANCODE_UNKNOWN) sc = SDL_GetScancodeFromName(rt_cfg.kb[i]);
+        SDL_Scancode sc = key_scancode(rt_cfg.kb[i]);
+        if (sc == SDL_SCANCODE_UNKNOWN) {          /* a name SDL does not know (typed by hand): use the default */
+            ilog("unknown key name '%s' for button %d; using the default '%s'", rt_cfg.kb[i], i,
+                 defs.key[CFG_IDX[i]]);
+            sc = key_scancode(defs.key[CFG_IDX[i]]);
+        }
         kb_sc[i] = reserved(sc) ? SDL_SCANCODE_UNKNOWN : sc;   /* reservadas nao remapeiam */
         pad_btn[i] = SDL_GameControllerGetButtonFromString(rt_cfg.pad[i]);
+        if (pad_btn[i] == SDL_CONTROLLER_BUTTON_INVALID) {
+            ilog("unknown controller button name '%s' for button %d; using the default '%s'", rt_cfg.pad[i], i,
+                 defs.pad[CFG_IDX[i]]);
+            pad_btn[i] = SDL_GameControllerGetButtonFromString(defs.pad[CFG_IDX[i]]);
+        }
     }
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0)
         ilog("game controller support unavailable: %s", SDL_GetError());

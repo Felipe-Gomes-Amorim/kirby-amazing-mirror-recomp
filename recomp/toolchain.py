@@ -38,13 +38,23 @@ def find_zig_cmd():
     for base in (ROOT, _launcher_dir()):
         cands.append(os.path.join(base, 'tools', 'zig', 'zig' + EXE))
         cands.append(os.path.join(base, 'zig', 'zig' + EXE))
+    tgt = _target_flags()
     for c in cands:
         if os.path.isfile(c):
-            return [c, 'cc']
+            return [c, 'cc'] + tgt
     p = shutil.which('zig')
     if p:
-        return [p, 'cc']
-    return [sys.executable, '-m', 'ziglang', 'cc']   # fallback: ambiente de desenvolvimento
+        return [p, 'cc'] + tgt
+    return [sys.executable, '-m', 'ziglang', 'cc'] + tgt   # fallback: ambiente de desenvolvimento
+
+
+def _target_flags():
+    """Compile for a FIXED target instead of `native`. With `native`, Zig's cached runtime libraries (compiler-rt,
+    mingw) are keyed to this machine's CPU, so a cache shipped in the release package never hits on another PC
+    (measured: 0.24 s with a relocated generic cache vs 55 s with the native target). Set KIRBY_ZIG_TARGET=native
+    to get the old behaviour, or any other target triple."""
+    t = os.environ.get('KIRBY_ZIG_TARGET', 'x86_64-windows-gnu' if os.name == 'nt' else '')
+    return ['-target', t] if t and t != 'native' else []
 
 
 def find_sdl():
