@@ -16,6 +16,7 @@ import tempfile
 import time
 import unittest
 
+from tests.netharness import Cluster, LT
 from tests.test_link_lockstep import EXE, ROM, KEYS_HOST, KEYS_JOIN, free_port, stats
 
 
@@ -124,6 +125,62 @@ class NetTest(unittest.TestCase):
             s.close()
             out = host.communicate(timeout=60)[0]
             self.assertIn('rejected a connection', out)
+
+
+COOP = LT.COOP_FRAMES
+
+
+def reached_coop(r, players):
+    st = r.state(COOP)   # (sessao, jogadores, status gLink, link ligado, erro)
+    return st is not None and st[0] == 2 and st[1] == players and st[3] == 1 and st[4] == 0
+
+
+@unittest.skipUnless(os.environ.get('RECOMP_SLOW') and EXE and os.path.exists(ROM),
+                     'RECOMP_SLOW=1 + rt_boot + baserom.gba')
+class MaxDelayTest(unittest.TestCase):
+    """K maximo por numero de jogadores: 2 -> 2; 3 e 4 -> 1 (KatAM: a cadeia do lobby passa por 2 saltos)."""
+
+    def cluster(self, n, delay, tmp, proxies=None, env=None):
+        status = os.path.join(tmp, 'host.json')
+        return Cluster(n, COOP + 1, extra=['--link-delay', str(delay)], per_instance_extra={0: ['--link-status', status]},
+                       proxies=proxies, env=env), status
+
+    def test_requested_above_max_is_reduced_and_reaches_coop(self):
+        for n, ask, want in ((2, 3, 2), (3, 2, 1), (4, 2, 1)):
+            with self.subTest(players=n, asked=ask), tempfile.TemporaryDirectory() as tmp:
+                c, status = self.cluster(n, ask, tmp)
+                with c:
+                    res = c.run()
+                for r in res:
+                    self.assertEqual(r.rc, 0, r.err[-300:])
+                    self.assertTrue(reached_coop(r, n), (r.idx, r.state(COOP)))
+                msg = '[link] K=%d is above %d for %d players, using %d' % (ask, want, n, want)
+                self.assertIn(msg, '\n'.join(res[0].link_lines()))
+                with open(status) as f:
+                    st = json.load(f)
+                self.assertEqual((st['delay'], st['delay_max'], st['players']), (want, want, n))
+
+    def test_auto_respects_the_max_with_latency(self):
+        # RTT ~70 ms pediria K=4 -> limitado ao maximo do numero de jogadores
+        for n, want in ((2, 2), (3, 1)):
+            with self.subTest(players=n), tempfile.TemporaryDirectory() as tmp:
+                c, status = self.cluster(n, 'auto', tmp, proxies={1: dict(latency_ms=35)})
+                with c:
+                    res = c.run(timeout=400)
+                for r in res:
+                    self.assertEqual(r.rc, 0, r.err[-300:])
+                    self.assertTrue(reached_coop(r, n), (r.idx, r.state(COOP)))
+                self.assertRegex('\n'.join(res[0].link_lines()), r'input delay K=%d frame\(s\) \(auto\)' % want)
+                with open(status) as f:
+                    self.assertEqual(json.load(f)['delay_max'], want)
+
+    def test_reference_hashes_two_players(self):
+        """Os hashes de referencia (roteiro SUB-GAMES) nao mudam: K=0 e K=2."""
+        with tempfile.TemporaryDirectory() as tmp:
+            for tag, k, frames, want in (('r0', 0, 3200, '3f70b1ec58b17557'), ('r2', 2, 3800, '57fb962b2ca52a64')):
+                hr, ho, jr, jo = run_pair(tmp, tag, frames, ['--link-delay', str(k)], [])
+                self.assertEqual((hr, jr), (0, 0))
+                self.assertEqual(stats(ho)[0], want, 'K=%d' % k)
 
 
 if __name__ == '__main__':

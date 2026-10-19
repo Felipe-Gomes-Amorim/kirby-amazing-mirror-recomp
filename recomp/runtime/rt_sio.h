@@ -24,7 +24,7 @@ typedef struct LinkRound {
 /* Medicao da sessao (host e filho): o launcher le o JSON gravado por --link-status / KIRBY_LINK_STATUS. */
 typedef struct LinkStats {
     int role;                  /* 0 = host, 1 = filho */
-    int players, delay;        /* jogadores; K (quadros de folga do host) */
+    int players, delay, delay_max;   /* jogadores; K efetivo (quadros de folga do host); K maximo para esse numero de jogadores */
     uint32_t mask;             /* jogadores presentes */
     char state[16];            /* starting | lockstep | free | dropped */
     uint32_t frame;            /* quadros do hw concluidos */

@@ -208,8 +208,8 @@ static void link_status_write(Sio *s) {
     FILE *f = fopen(tmp, "wb");
     if (!f) return;
     double fr = st.frame ? (double)st.frame : 1;
-    fprintf(f, "{\n \"state\": \"%s\", \"role\": \"%s\", \"players\": %d, \"mask\": %u, \"delay\": %d, \"frame\": %u,\n",
-            st.state, st.role ? "join" : "host", st.players, st.mask, st.delay, st.frame);
+    fprintf(f, "{\n \"state\": \"%s\", \"role\": \"%s\", \"players\": %d, \"mask\": %u, \"delay\": %d, \"delay_max\": %d, \"frame\": %u,\n",
+            st.state, st.role ? "join" : "host", st.players, st.mask, st.delay, st.delay_max, st.frame);
     fprintf(f, " \"rtt_ms\": [%.2f, %.2f, %.2f, %.2f], \"rtt_avg_ms\": [%.2f, %.2f, %.2f, %.2f], \"rtt_max_ms\": [%.2f, %.2f, %.2f, %.2f],\n",
             st.rtt_ms[0], st.rtt_ms[1], st.rtt_ms[2], st.rtt_ms[3], st.rtt_avg_ms[0], st.rtt_avg_ms[1], st.rtt_avg_ms[2], st.rtt_avg_ms[3],
             st.rtt_max_ms[0], st.rtt_max_ms[1], st.rtt_max_ms[2], st.rtt_max_ms[3]);
@@ -448,13 +448,16 @@ void link_hub_disconnect(LinkTransport *t) {
  * quadros do host na ordem, com atraso. O FIFO de SENDs do filho tem atraso fixo D = 20 + 17*K trocas
  * (o fluxo de trocas depende so de K, nunca do relogio: mesmo hash com ou sem latencia na rede). */
 enum { M_HELLO = 1, M_WELCOME = 2, M_REJECT = 3, M_SEND = 4, M_ROUND = 5, M_ACK = 6, M_FRAME = 7, M_DONE = 8,
-       M_PING = 9, M_PONG = 10 };
+       M_PING = 9, M_PONG = 10, M_INFO = 11 };
 #define PROTO_MAGIC 0x4C52424Bu   /* "KBRL" */
 #define PROTO_VER 2
 #define MSG_MAX 1024
 #define FQ_MAX 32
 #define HELLO_LEN 26
-#define LINK_K_SAFE 2   /* medido: K=3 (cabo com ~4,4 quadros de atraso) derruba o gLink do KatAM; K<=2 funciona */
+/* Maior K que o KatAM aguenta (medido, SUB-GAMES e co-op): 2 jogadores K<=2; 3 ou 4 jogadores K<=1. Com mais jogadores a
+ * cadeia do lobby do gLink passa por dois saltos (filho -> host -> outro filho, cada um com D trocas de atraso) e o
+ * jogo desiste (link desligado) ja em K=2; K>=3 falha ate com 2 jogadores. */
+static int link_k_max(int players) { return players <= 2 ? 2 : 1; }
 enum { R_BAD = 1, R_VERSION = 2, R_ROM = 3, R_FULL = 4, R_STARTED = 5 };
 
 typedef struct { uint8_t type; uint16_t len; uint8_t p[MSG_MAX]; } Msg;
@@ -477,6 +480,7 @@ typedef struct FrameIn {   /* filho: quadro do host recebido e ainda nao executa
 typedef struct Local {
     int host, port, players, lock, K, started;
     int D;                    /* atraso do SEND dos filhos, em trocas */
+    int Kmax;                 /* K maximo para o numero de jogadores */
     int timeout_ms;           /* espera maxima por um par em lockstep */
     sock_t listener;
     Peer peers[4];            /* host: indice = id do filho; join: peers[0] = host */
@@ -1011,6 +1015,9 @@ static void child_msg(Local *l, const Msg *m) {
     case M_PING:   /* devolve igual: o host calcula o RTT */
         peer_send(&l->peers[0], M_PONG, m->p, m->len);
         break;
+    case M_INFO:   /* host: K efetivo e maximo (so para a medicao) */
+        if (m->len >= 2) { l->K = m->p[0]; l->Kmax = m->p[1]; }
+        break;
     case M_WELCOME:
         if (m->len >= 3) {
             l->players = m->p[1]; l->mask = m->p[2];
@@ -1184,7 +1191,7 @@ static int local_stats(LinkTransport *t, LinkStats *out) {
     Local *l = t->priv;
     LinkStats *s = &l->st;
     s->role = l->host ? 0 : 1;
-    s->players = l->players; s->delay = l->K;
+    s->players = l->players; s->delay = l->K; s->delay_max = l->Kmax;
     s->mask = l->mask | (1u << t->player_id);
     s->tx_bytes = s->rx_bytes = 0;
     for (int i = 0; i < 4; i++) { s->tx[i] = l->peers[i].tx; s->rx[i] = l->peers[i].rx; s->tx_bytes += l->peers[i].tx; s->rx_bytes += l->peers[i].rx; }
@@ -1350,14 +1357,24 @@ int link_local_lockstep(LinkTransport **tp, int wait_s, int delay) {
             double med = nr ? rtts[nr / 2] : 0;
             if (med > worst) worst = med;
         }
-        if (delay >= 0) l->K = delay > 8 ? 8 : delay;
-        else if (worst < 12.0) l->K = 0;
-        else { l->K = (int)((worst - 12.0) / 16.7 + 0.999) + 1; if (l->K > LINK_K_SAFE) l->K = LINK_K_SAFE; }
-        if (l->K > LINK_K_SAFE) rt_log("[link] warning: K=%d is above %d: KatAM's gLink gives up when the cable delay exceeds ~3.5 frames (Communication Error)", l->K, LINK_K_SAFE);
+        l->Kmax = link_k_max(l->players);
+        if (delay >= 0) {
+            l->K = delay > 8 ? 8 : delay;
+            if (l->K > l->Kmax) {
+                if (getenv("KIRBY_LINK_FORCE_K")) rt_log("[link] warning: K=%d is above %d for %d players (forced by KIRBY_LINK_FORCE_K: the game will not reach the lobby)", l->K, l->Kmax, l->players);
+                else {
+                    rt_log("[link] K=%d is above %d for %d players, using %d", l->K, l->Kmax, l->players, l->Kmax);
+                    l->K = l->Kmax;
+                }
+            }
+        } else if (worst < 12.0) l->K = 0;
+        else { l->K = (int)((worst - 12.0) / 16.7 + 0.999) + 1; if (l->K > l->Kmax) l->K = l->Kmax; }
         rt_log("[link] RTT %.1f ms -> input delay K=%d frame(s) (%s)", worst, l->K, delay >= 0 ? "configured" : "auto");
         l->D = 20 + 17 * l->K;
         { const char *e = getenv("KIRBY_LINK_FIFO"); if (e && atoi(e) > 0 && atoi(e) < 200) l->D = atoi(e); }
         l->Dcur = 20;
+        for (int i = 1; i < l->players; i++)
+            if (l->peers[i].fd != SOCK_BAD) { uint8_t b[2] = {(uint8_t)l->K, (uint8_t)l->Kmax}; peer_send(&l->peers[i], M_INFO, b, 2); }
         l->started = 1;
         sock_close(l->listener);   /* quem chegar depois nao entra: o quadro dele nao bateria com o do host */
         l->listener = SOCK_BAD;
