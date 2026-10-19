@@ -21,6 +21,22 @@ typedef struct LinkRound {
     uint16_t v[4];
 } LinkRound;
 
+/* Medicao da sessao (host e filho): o launcher le o JSON gravado por --link-status / KIRBY_LINK_STATUS. */
+typedef struct LinkStats {
+    int role;                  /* 0 = host, 1 = filho */
+    int players, delay;        /* jogadores; K (quadros de folga do host) */
+    uint32_t mask;             /* jogadores presentes */
+    char state[16];            /* starting | lockstep | free | dropped */
+    uint32_t frame;            /* quadros do hw concluidos */
+    double rtt_ms[4], rtt_avg_ms[4], rtt_max_ms[4];   /* host: por filho (PING/PONG) */
+    uint64_t wait_frames; double wait_ms, wait_max_ms; /* quadros em que esperou o outro lado */
+    uint32_t frames_behind;    /* filho: quadros do host ja recebidos e ainda nao executados */
+    uint64_t tx[4], rx[4], tx_bytes, rx_bytes;         /* bytes pelo socket (cabecalho incluso) */
+    double seconds;
+    uint64_t underflows;
+    int desync; uint32_t desync_frame;
+} LinkStats;
+
 typedef struct LinkTransport LinkTransport;
 struct LinkTransport {
     const char *name;                  /* "null" | "hub" (no processo) | "local" (TCP 127.0.0.1) */
@@ -39,7 +55,8 @@ struct LinkTransport {
      * sequencia em ordem (FIFO) com atraso fixo de LINK_DELAY trocas (~1,2 quadro): o filho nao pode
      * influenciar uma troca do quadro N que o host ja executou, e o FIFO mantem o fluxo de pacotes alinhado. */
     int lockstep;
-    void (*frame_end)(LinkTransport *, uint32_t frame, const uint16_t *sends, int ns, const LinkRound *r, int n);
+    void (*frame_end)(LinkTransport *, uint32_t frame, const uint16_t *sends, int ns, const LinkRound *r, int n, uint64_t xhash);
+    int (*stats)(LinkTransport *, LinkStats *);
     int (*frame_begin)(LinkTransport *, uint32_t frame, LinkRound *out, int max);   /* filho: espera o quadro; n */
     void *priv;
 };
@@ -55,7 +72,11 @@ LinkTransport *link_local_host(int players, int port);
 LinkTransport *link_local_join(const char *host, int port);
 /* liga o lockstep por quadro no transporte local; host: espera os `players` entrarem, join: conecta
  * (ambos ate `wait_s` segundos). 0 = ok, <0 = nao conectou (o transporte e fechado) */
-int link_local_lockstep(LinkTransport **t, int wait_s);
+int link_local_lockstep(LinkTransport **t, int wait_s, int delay);   /* delay = K (0..8) ou -1 = automatico (mede o RTT) */
+void rt_link_set_bind(const char *addr);      /* host: endereco de escuta (padrao 127.0.0.1; 0.0.0.0 abre para a LAN) */
+void rt_link_read_bind(const char *ini_path); /* [link] bind= do kirby.ini (nao sobrepoe --link-bind / KIRBY_LINK_BIND) */
+void rt_link_sim(const char *spec);           /* "latencia_ms,jitter_ms,perda_%": rede simulada (testes) */
+extern int (*rt_link_idle)(void);             /* esperas longas atendem a janela; 0 = usuario fechou */
 
 /* ---- emulacao (instancias independentes: testes criam varias) ---- */
 Sio *rt_sio_new(LinkTransport *t);            /* t == NULL: cabo desconectado (jogador sozinho) */
@@ -70,8 +91,10 @@ int rt_sio_irq_flag(Sio *s);
 
 /* ---- instancia global do jogo (NULL = mode=off: tudo passa direto ao hw/) ---- */
 extern Sio *rt_sio_cur;
-int rt_sio_setup(const char *mode, int players, int port, const char *host);   /* 0 ok, <0 erro */
-void rt_sio_read_ini(const char *path, char *mode, int *players, int *port, char *host);
+int rt_sio_setup(const char *mode, int players, int port, const char *host, int delay);   /* 0 ok, <0 erro; delay -1 = auto */
+void rt_sio_read_ini(const char *path, char *mode, int *players, int *port, char *host, int *delay);
+int rt_sio_stats(LinkStats *out);             /* 1 = ha link ativo */
+extern const char *rt_link_status_path;       /* --link-status: JSON atualizado a cada 60 quadros */
 uint16_t rt_sio_irq_pending(void);            /* 0x0080 se IRQ serial habilitado e pendente */
 void rt_sio_report(void);
 extern uint64_t rt_sio_exchanges;

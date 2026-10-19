@@ -7,6 +7,7 @@
  *   [controller]  a=b b=a l=leftshoulder r=rightshoulder start=start select=back
  *                 up=dpup down=dpdown left=dpleft right=dpright stick_as_dpad=1 deadzone=8000
  *   [launcher]    show=1   language=en
+ *   [link]        mode=off   host=127.0.0.1   port=47900   players=2   delay=auto   name=Player
  *
  * Rules: `;` or `#` start a comment; keys are case-insensitive; unknown keys/sections are ignored;
  * an invalid value falls back to its default. Key names are SDL key names (SDL_GetKeyName),
@@ -17,6 +18,9 @@
  * scaling = integer | fit | stretch (default fit): integer = whole-number scale with black bars, fit = keep the
  * aspect ratio (letterbox), stretch = fill the whole window. Older files with only integer_scale=1 mean
  * scaling=integer, integer_scale=0 means fit; an explicit valid scaling= always wins.
+ *
+ * [link] numbers are read like the game runtime does (atoi: leading digits count, so port=47900x is 47900); an
+ * out-of-range number is ignored and the previous value stays. host/mode/name are copied verbatim (trimmed).
  *
  * Compatibility with v1 (flat file or [kirby] section with scale/mute/fullscreen/vsync): those keys are
  * accepted in the root, in [kirby], and in their v2 section. The v1 field names are unchanged. */
@@ -50,6 +54,13 @@ typedef struct {
     /* [launcher] */
     int launcher_show;    /* 0/1, default 1 (0 = open the game directly; Shift forces the launcher) */
     char language[8];     /* "en" */
+    /* [link] cable link (same names and defaults as rt_sio_read_ini in recomp/runtime/rt_sio.c) */
+    char link_mode[16];   /* off | host | join | solo, default off (anything else is read as off) */
+    char link_host[64];   /* address to join, default 127.0.0.1 (an empty value reads as the default) */
+    int link_port;        /* 1..65535, default 47900 */
+    int link_players;     /* 2..4 (host), default 2 */
+    int link_delay;       /* -1 = auto (default), or 0..8 frames of host slack (as --link-delay) */
+    char link_name[16];   /* player name for the lobby, default Player */
 } KirbyConfig;
 
 void cfg_defaults(KirbyConfig *c);

@@ -11,7 +11,7 @@
 #include "window_sdl.h"      /* WIN_TITLE, win_icon_pixels, win_font_rows */
 
 /* ------------------------------------------------------------------ widgets */
-typedef enum { W_BUTTON, W_RADIO, W_CHECK, W_SLIDER, W_SHAPE } WType;
+typedef enum { W_BUTTON, W_RADIO, W_CHECK, W_SLIDER, W_SHAPE, W_FIELD } WType;
 enum { SH_RECT, SH_CIRCLE };
 
 typedef struct {
@@ -24,7 +24,8 @@ typedef struct {
     int primary;            /* highlighted button (Play) */
     int btn;                /* W_SHAPE: CFG_BTN_* index */
     int shape;              /* W_SHAPE: SH_* */
-    int slider;             /* W_SLIDER: 0 = volume, 1 = deadzone */
+    int slider;             /* W_SLIDER: 0 = volume, 1 = deadzone, 2 = link delay */
+    int fld;                /* W_FIELD: 0 name, 1 address, 2 port */
 } Widget;
 
 #define MAX_W 32
@@ -46,6 +47,25 @@ static int dragging;                 /* slider drag: 0 none, 1 volume, 2 deadzon
 static int page;                     /* 0 main, 1 keyboard, 2 controller */
 static int capture = -1;             /* CFG_BTN_* being remapped, or -1 */
 static int confirm;                  /* 1 = the "overwrite current save?" dialog is open */
+
+/* ONLINE page */
+static char fbuf[3][64];             /* edit buffers: name, address, port */
+static const int fcap[3] = { 15, 45, 5 };
+static int editing = -1;             /* text field being typed in, -1 = none */
+static int keypad_field = -1;        /* field being edited with the on-screen keypad, -1 = closed */
+static char kp_backup[64];
+static int via_pad;                  /* the current activate() was triggered by the controller */
+static int cur_mod;                  /* keyboard modifiers of the key event being handled */
+static int start_page;
+static char want_focus[24];          /* widget id to focus after the next layout() */
+static KlOnlinePoll online_poll;
+static KlOnline onl;
+static void layout(void);
+static void focus_move(int d);
+static void nav(int dir);
+static int port_ok(void) { int n = atoi(fbuf[2]); return fbuf[2][0] && n >= 1 && n <= 65535; }
+static int online_busy(void) { return onl.state != KLO_OFFLINE; }
+static int slots_up(void) { int n = 0; for (int i = 0; i < 4; i++) if (onl.slots[i] == KLS_CONNECTED || onl.slots[i] == KLS_READY) n++; return n; }
 
 /* texts and the progress bar drawn on the last frame (layout checks in the tests) */
 #define MAX_TEXTS 40
@@ -230,10 +250,47 @@ static void layout(void) {
     char fid[32] = "";
     if (nw && focus >= 0 && focus < nw) snprintf(fid, sizeof fid, "%s", wd[focus].id);
     nw = 0;
-    if (confirm) {                            /* modal: only YES / NO are reachable */
+    if (keypad_field >= 0) {                  /* on-screen keypad (controller): digits, '.', DEL, CLR, OK, CANCEL */
+        static const char *const kid[10] = { "kp_0", "kp_1", "kp_2", "kp_3", "kp_4", "kp_5", "kp_6", "kp_7", "kp_8", "kp_9" };
+        for (int d = 1; d <= 9; d++) {
+            char lab[2] = { (char)('0' + d), 0 };
+            add(kid[d], W_BUTTON, 108 + ((d - 1) % 3) * 66, 108 + ((d - 1) / 3) * 36, 60, 28, lab);
+        }
+        add("kp_del", W_BUTTON, 306, 108, 60, 28, "DEL");
+        add("kp_clr", W_BUTTON, 306, 144, 60, 28, "CLR");
+        add("kp_dot", W_BUTTON, 306, 180, 60, 28, ".");
+        wd[nw - 1].enabled = keypad_field == 1;        /* a port has no dots */
+        add("kp_0", W_BUTTON, 108, 216, 60, 28, "0");
+        add("kp_ok", W_BUTTON, 174, 216, 126, 28, "OK");
+        wd[nw - 1].primary = 1;
+        add("kp_cancel", W_BUTTON, 306, 216, 72, 28, "CANCEL");
+    } else if (confirm) {                            /* modal: only YES / NO are reachable */
         add("confirm_yes", W_BUTTON, 120, 176, 100, 24, "YES");
         add("confirm_no", W_BUTTON, 260, 176, 100, 24, "NO");
         wd[1].primary = 1;
+    } else if (page == KL_PAGE_ONLINE) {
+        int off = !online_busy();
+        add("online_name", W_FIELD, 80, 34, 190, 22, "");   wd[nw - 1].fld = 0; wd[nw - 1].enabled = off;
+        for (int n = 2; n <= 4; n++) {
+            static const char *const pid[3] = { "online_p2", "online_p3", "online_p4" };
+            char lab[2] = { (char)('0' + n), 0 };
+            add(pid[n - 2], W_RADIO, 372 + (n - 2) * 32, 34, 30, 22, lab);
+            wd[nw - 1].on = cfg.link_players == n; wd[nw - 1].enabled = off;
+        }
+        add("online_addr", W_FIELD, 100, 62, 368, 22, "");  wd[nw - 1].fld = 1; wd[nw - 1].enabled = off;
+        add("online_port", W_FIELD, 80, 90, 70, 22, "");   wd[nw - 1].fld = 2; wd[nw - 1].enabled = off;
+        add("online_delay", W_SLIDER, 236, 90, 150, 22, ""); wd[nw - 1].slider = 2; wd[nw - 1].enabled = off;
+        add("online_host", W_BUTTON, 12, 118, 100, 24, "HOST");
+        wd[nw - 1].enabled = off && port_ok(); wd[nw - 1].primary = 1;
+        add("online_join", W_BUTTON, 118, 118, 100, 24, "JOIN");
+        wd[nw - 1].enabled = off && port_ok() && fbuf[1][0];
+        add("online_start", W_BUTTON, 224, 118, 100, 24, "START");
+        wd[nw - 1].enabled = onl.state == KLO_HOSTING && slots_up() >= 2;
+        add("online_leave", W_BUTTON, 330, 118, 100, 24, "LEAVE");
+        wd[nw - 1].enabled = online_busy();
+        add("online_copy", W_BUTTON, 396, 144, 72, 20, "COPY");
+        wd[nw - 1].enabled = onl.my_address[0] != 0;
+        add("online_back", W_BUTTON, 380, 6, 88, 22, "BACK");
     } else if (page) {
         /* editable pages: tabs + reset + back on top, the GBA outline in the middle */
         add("tab_keyboard", W_RADIO, 12, 6, 130, 22, "KEYBOARD");
@@ -260,6 +317,7 @@ static void layout(void) {
         }
     } else {
         if (rom_missing()) add("selectrom", W_BUTTON, 298, 34, 170, 22, "SELECT ROM...");
+        else add("online", W_BUTTON, 298, 34, 170, 22, "ONLINE...");            /* the same slot: a ROM is loaded */
         for (int i = 0; i < 6; i++) {
             add(size_ids[i], W_RADIO, 220 + i * 42, 106, 40, 22, size_lbl[i]);
             wd[nw - 1].on = cfg.scale == i + 1;
@@ -290,6 +348,10 @@ static void layout(void) {
     }
     focus = 0;
     for (int i = 0; i < nw; i++) if (fid[0] && !strcmp(wd[i].id, fid)) focus = i;
+    if (want_focus[0]) {
+        for (int i = 0; i < nw; i++) if (!strcmp(wd[i].id, want_focus)) focus = i;
+        want_focus[0] = 0;
+    }
 }
 
 static int find(const char *id) {
@@ -306,31 +368,26 @@ static void set_note(const char *s, int err) {
     note_err = err;
 }
 
-static void set_slider(int which, int lx, const Widget *k) {
-    int span = k->r.w > 0 ? k->r.w : 1;
-    int v = (lx - k->r.x) * (which ? 32767 : 100) / span;
-    if (v < 0) v = 0;
-    if (which) {
-        if (v > 32767) v = 32767;
-        if (v != cfg.deadzone) { cfg.deadzone = v; save_cfg(); }
-    } else {
-        if (v > 100) v = 100;
-        if (v != cfg.volume) { cfg.volume = v; save_cfg(); }
-    }
+static int *slider_ref(int kind) { return kind == 1 ? &cfg.deadzone : kind == 2 ? &cfg.link_delay : &cfg.volume; }
+static int slider_min(int kind) { return kind == 2 ? -1 : 0; }           /* link delay: -1 = auto */
+static int slider_max(int kind) { return kind == 1 ? 32767 : kind == 2 ? 8 : 100; }
+static int slider_step(int kind) { return kind == 1 ? 1000 : kind == 2 ? 1 : 5; }
+
+static void set_slider(int kind, int lx, const Widget *k) {
+    int span = k->r.w > 0 ? k->r.w : 1, lo = slider_min(kind), hi = slider_max(kind);
+    int v = lo + ((lx - k->r.x) * (hi - lo) + span / 2) / span;
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    int *ref = slider_ref(kind);
+    if (v != *ref) { *ref = v; save_cfg(); }
 }
 
 static void bump_slider(const Widget *k, int dir) {
-    if (k->slider) {
-        int v = cfg.deadzone + dir * 1000;
-        if (v < 0) v = 0;
-        if (v > 32767) v = 32767;
-        if (v != cfg.deadzone) { cfg.deadzone = v; save_cfg(); }
-    } else {
-        int v = cfg.volume + dir * 5;
-        if (v < 0) v = 0;
-        if (v > 100) v = 100;
-        if (v != cfg.volume) { cfg.volume = v; save_cfg(); }
-    }
+    int *ref = slider_ref(k->slider);
+    int v = *ref + dir * slider_step(k->slider);
+    if (v < slider_min(k->slider)) v = slider_min(k->slider);
+    if (v > slider_max(k->slider)) v = slider_max(k->slider);
+    if (v != *ref) { *ref = v; save_cfg(); }
 }
 
 static const char *const BTN_NAME[CFG_BTN_COUNT] = { "A", "B", "L", "R", "START", "SELECT", "UP", "DOWN", "LEFT", "RIGHT" };
@@ -381,6 +438,119 @@ static void capture_button(int sdl_button) {
     assign(capture, name);
 }
 
+/* ------------------------------------------------------------------ ONLINE page: fields and keypad */
+static void sync_fields(void) {
+    snprintf(fbuf[0], sizeof fbuf[0], "%s", cfg.link_name);
+    snprintf(fbuf[1], sizeof fbuf[1], "%s", cfg.link_host);
+    snprintf(fbuf[2], sizeof fbuf[2], "%d", cfg.link_port);
+}
+
+static void commit_fields(void) {
+    snprintf(cfg.link_name, sizeof cfg.link_name, "%.15s", fbuf[0][0] ? fbuf[0] : "Player");
+    if (fbuf[1][0]) snprintf(cfg.link_host, sizeof cfg.link_host, "%s", fbuf[1]);
+    if (port_ok()) cfg.link_port = atoi(fbuf[2]);
+    save_cfg();
+}
+
+static int field_char_ok(int f, int c) {
+    if (c < 32 || c > 126) return 0;
+    if (f == 0) return isalnum(c) || c == ' ' || c == '_' || c == '-' || c == '.';
+    if (f == 1) return isalnum(c) || c == '.' || c == '-' || c == ':' || c == '_';
+    return isdigit(c);
+}
+
+static void field_append(int f, int c) {
+    size_t n = strlen(fbuf[f]);
+    if ((int)n >= fcap[f] || !field_char_ok(f, c)) return;
+    fbuf[f][n] = (char)c;
+    fbuf[f][n + 1] = 0;
+}
+
+static void field_backspace(int f) { size_t n = strlen(fbuf[f]); if (n) fbuf[f][n - 1] = 0; }
+static void begin_edit(int f) { editing = f; SDL_StartTextInput(); }
+static void end_edit(void) {
+    if (editing < 0) return;
+    commit_fields();
+    SDL_StopTextInput();
+    editing = -1;
+}
+
+static void field_paste(int f) {
+    char *t = SDL_GetClipboardText();
+    if (!t) return;
+    for (const char *p = t; *p; p++) field_append(f, (unsigned char)*p);
+    SDL_free(t);
+}
+
+static void field_key(SDL_Keycode k, int shift) {                 /* a key while a field is being edited */
+    if (k == SDLK_BACKSPACE) field_backspace(editing);
+    else if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_ESCAPE) end_edit();
+    else if (k == SDLK_TAB) { end_edit(); focus_move(shift ? -1 : 1); }
+    else if (k == SDLK_UP || k == SDLK_DOWN) { end_edit(); nav(k == SDLK_UP ? 0 : 1); }
+    else if (k == SDLK_v && (cur_mod & KMOD_CTRL)) field_paste(editing);
+}
+
+static void field_activate(int f) {
+    end_edit();
+    if (via_pad) {                                                  /* controller: numbers on screen */
+        if (f == 0) { set_note("TYPE THE NAME ON A KEYBOARD", 1); return; }
+        keypad_field = f;
+        snprintf(kp_backup, sizeof kp_backup, "%s", fbuf[f]);
+        snprintf(want_focus, sizeof want_focus, "kp_5");
+        return;
+    }
+    begin_edit(f);
+}
+
+static void keypad_close(int keep) {
+    int f = keypad_field;
+    if (f < 0) return;
+    if (keep) commit_fields(); else snprintf(fbuf[f], sizeof fbuf[f], "%s", kp_backup);
+    keypad_field = -1;
+    snprintf(want_focus, sizeof want_focus, "%s", f == 1 ? "online_addr" : "online_port");
+}
+
+/* returns 1 when `id` was an ONLINE / keypad control */
+static int online_activate(const char *id) {
+    if (!strcmp(id, "online")) { page = KL_PAGE_ONLINE; capture = -1; focus = 0; sync_fields(); return 1; }
+    if (!strcmp(id, "online_back")) { end_edit(); commit_fields(); page = 0; focus = 0; return 1; }
+    if (!strncmp(id, "online_p", 8) && id[8] >= '2' && id[8] <= '4') { cfg.link_players = id[8] - '0'; save_cfg(); return 1; }
+    if (!strcmp(id, "online_host") || !strcmp(id, "online_join")) {
+        int join = !strcmp(id, "online_join");
+        end_edit();
+        commit_fields();
+        if (!port_ok()) { set_note("PORT MUST BE 1-65535", 1); return 1; }
+        if (join && !fbuf[1][0]) { set_note("TYPE THE HOST ADDRESS TO JOIN", 1); return 1; }
+        snprintf(cfg.link_mode, sizeof cfg.link_mode, "%s", join ? "join" : "host");
+        save_cfg();
+        result = join ? KL_ONLINE_JOIN : KL_ONLINE_HOST; running = 0;
+        return 1;
+    }
+    if (!strcmp(id, "online_start")) { end_edit(); result = KL_ONLINE_START; running = 0; return 1; }
+    if (!strcmp(id, "online_leave")) {
+        end_edit();
+        snprintf(cfg.link_mode, sizeof cfg.link_mode, "off");
+        save_cfg();
+        result = KL_ONLINE_LEAVE; running = 0;
+        return 1;
+    }
+    if (!strcmp(id, "online_copy")) {
+        if (onl.my_address[0]) { SDL_SetClipboardText(onl.my_address); set_note("ADDRESS COPIED", 0); }
+        return 1;
+    }
+    if (!strncmp(id, "kp_", 3) && keypad_field >= 0) {
+        int f = keypad_field;
+        if (id[3] >= '0' && id[3] <= '9' && !id[4]) field_append(f, id[3]);
+        else if (!strcmp(id, "kp_dot")) field_append(f, '.');
+        else if (!strcmp(id, "kp_del")) field_backspace(f);
+        else if (!strcmp(id, "kp_clr")) fbuf[f][0] = 0;
+        else if (!strcmp(id, "kp_ok")) keypad_close(1);
+        else if (!strcmp(id, "kp_cancel")) keypad_close(0);
+        return 1;
+    }
+    return 0;
+}
+
 static void activate(int i) {
     if (i < 0 || i >= nw || !wd[i].enabled) return;
     const char *id = wd[i].id;
@@ -388,6 +558,8 @@ static void activate(int i) {
         start_capture(wd[i].btn);
         return;
     }
+    if (wd[i].type == W_FIELD) { field_activate(wd[i].fld); layout(); return; }
+    if (online_activate(id)) { layout(); return; }
     if (!strncmp(id, "size", 4)) {
         cfg.scale = id[4] - '0'; save_cfg(); apply_video(0);
     } else if (!strcmp(id, "fullscreen")) {
@@ -528,18 +700,32 @@ static void draw_widget(int i) {
         break;
     }
     case W_SLIDER: {
-        int v = k->slider ? cfg.deadzone : cfg.volume, vmax = k->slider ? 32767 : 100;
-        int px = (int)((long long)k->r.w * v / vmax);
+        int v = *slider_ref(k->slider), vmin = slider_min(k->slider), vmax = slider_max(k->slider);
+        int px = (int)((long long)k->r.w * (v - vmin) / (vmax - vmin));
         SDL_Rect track = { k->r.x, k->r.y + 8, k->r.w, 6 };
         fill(track, C_PANEL);
-        frame(track, C_DIM);
+        frame(track, k->enabled ? C_DIM : (SDL_Color){ 70, 70, 90, 255 });
         SDL_Rect fl = { k->r.x, k->r.y + 8, px, 6 };
-        fill(fl, C_ACC);
+        fill(fl, k->enabled ? C_ACC : C_DIM);
         SDL_Rect knob = { k->r.x + px - 4, k->r.y + 2, 8, 18 };
-        fill(knob, C_TEXT);
-        char s[16];
-        if (k->slider) snprintf(s, sizeof s, "%d", cfg.deadzone); else snprintf(s, sizeof s, "%d%%", cfg.volume);
-        text(s, k->r.x + k->r.w + 12, k->r.y + 4, 2, !k->slider && cfg.mute ? C_DIM : C_TEXT);
+        fill(knob, k->enabled ? C_TEXT : C_DIM);
+        char sv[16];
+        if (k->slider == 2 && v < 0) snprintf(sv, sizeof sv, "AUTO");
+        else if (k->slider == 1 || k->slider == 2) snprintf(sv, sizeof sv, "%d", v);
+        else snprintf(sv, sizeof sv, "%d%%", v);
+        text(sv, k->r.x + k->r.w + 12, k->r.y + 4, 2, !k->enabled || (!k->slider && cfg.mute) ? C_DIM : C_TEXT);
+        break;
+    }
+    case W_FIELD: {
+        int ed = editing == k->fld;
+        fill(k->r, ed ? (SDL_Color){ 10, 10, 24, 255 } : C_PANEL);
+        frame(k->r, ed ? C_ACC : (k->enabled ? C_TEXT : C_DIM));
+        const char *b = fbuf[k->fld];
+        int maxc = (k->r.w - 8) / 12 - 1;                       /* one cell is kept for the caret */
+        int n = (int)strlen(b);
+        char line[64];
+        snprintf(line, sizeof line, "%s%s", n > maxc ? b + n - maxc : b, ed && (SDL_GetTicks() / 400) % 2 == 0 ? "_" : "");
+        text(line, k->r.x + 4, k->r.y + 4, 2, !k->enabled ? C_DIM : (k->fld == 2 && !port_ok()) ? C_ERR : C_TEXT);
         break;
     }
     case W_SHAPE: {
@@ -683,12 +869,110 @@ static void draw_edit(void) {
     text("ARROWS: MOVE  ENTER: REMAP  ESC: BACK  RESET: THIS TAB", 12, 313, 1, C_DIM);
 }
 
-static void draw_confirm(void) {                 /* modal dialog over a dimmed screen */
+static const char *slot_state_text(int st_) {
+    switch (st_) {
+    case KLS_CONNECTING: return "JOINING";
+    case KLS_CONNECTED: return "CONNECTED";
+    case KLS_READY: return "READY";
+    case KLS_LOST: return "LOST";
+    default: return "EMPTY";
+    }
+}
+
+static const char *online_state_text(void) {
+    static char buf[48];
+    switch (onl.state) {
+    case KLO_HOSTING: return "WAITING FOR PLAYERS...";
+    case KLO_CONNECTING: return "CONNECTING...";
+    case KLO_CONNECTED: snprintf(buf, sizeof buf, "CONNECTED (%d PLAYERS)", slots_up() > 0 ? slots_up() : 2); return buf;
+    case KLO_PLAYING: return "IN GAME";
+    case KLO_DESYNC: return "DESYNC DETECTED";
+    case KLO_LOST: return "CONNECTION LOST";
+    default: return "NOT CONNECTED";
+    }
+}
+
+static void draw_online(void) {
+    int off = !online_busy();
+    SDL_Color lab = off ? C_TEXT : C_DIM;
+    text("ONLINE (CABLE LINK)", 12, 10, 2, C_ACC);
+    text("NAME", 12, 38, 2, lab);
+    text("PLAYERS", 284, 38, 2, lab);
+    text("ADDRESS", 12, 66, 2, lab);
+    text("PORT", 12, 94, 2, lab);
+    text("DELAY", 170, 94, 2, lab);
+    if (onl.my_address[0]) {
+        char a[48];
+        text("YOUR ADDRESS", 12, 150, 1, C_DIM);
+        clip(onl.my_address, 290, a, sizeof a);
+        text(a, 96, 150, 1, C_OK);
+    }
+    /* slots */
+    SDL_Rect panel = { 12, 170, 456, 92 };
+    fill(panel, C_PANEL);
+    frame(panel, C_DIM);
+    text("SLOT", 20, 173, 1, C_DIM);
+    text("NAME", 112, 173, 1, C_DIM);
+    text("STATE", 264, 173, 1, C_DIM);
+    text("PING", 440, 173, 1, C_DIM);
+    for (int i = 0; i < 4; i++) {
+        int y = 186 + i * 18, sst = onl.slots[i];
+        SDL_Color c = sst == KLS_EMPTY ? C_DIM : sst == KLS_LOST ? C_ERR : (i == onl.self_slot ? C_ACC : C_TEXT);
+        char nm[16];
+        text(i == 0 ? "P1 HOST" : (const char *[]){ "", "P2", "P3", "P4" }[i], 20, y, 2, c);
+        snprintf(nm, sizeof nm, "%.12s", onl.names[i][0] ? onl.names[i] : (sst == KLS_EMPTY ? "-" : "?"));
+        text(nm, 112, y, 2, c);
+        text(slot_state_text(sst), 264, y, 2, sst == KLS_READY ? C_OK : c);
+        if ((sst == KLS_CONNECTED || sst == KLS_READY) && onl.ping_ms[i] >= 0) {
+            char pg[16];
+            snprintf(pg, sizeof pg, "%d MS", onl.ping_ms[i] > 999 ? 999 : onl.ping_ms[i]);
+            SDL_Color pc = onl.ping_ms[i] < 60 ? C_OK : onl.ping_ms[i] < 120 ? C_FOCUS : C_ERR;
+            text(pg, 468 - text_w(pg, 2), y, 2, pc);
+        }
+    }
+    /* state line and hint */
+    char sl[64];
+    snprintf(sl, sizeof sl, "STATE: %s", online_state_text());
+    text(sl, 12, 268, 2, onl.state == KLO_DESYNC || onl.state == KLO_LOST ? C_ERR : (onl.state >= KLO_CONNECTED ? C_OK : C_TEXT));
+    {
+        char hint[96] = "";
+        SDL_Color hc = C_DIM;
+        if (onl.message[0]) { snprintf(hint, sizeof hint, "%s", onl.message); hc = C_ACC; }
+        else if (off && !port_ok()) { snprintf(hint, sizeof hint, "PORT MUST BE 1-65535"); hc = C_ERR; }
+        else if (off && !fbuf[1][0]) snprintf(hint, sizeof hint, "TYPE THE HOST ADDRESS TO JOIN, OR PRESS HOST");
+        else if (onl.state == KLO_HOSTING && slots_up() < 2) snprintf(hint, sizeof hint, "START NEEDS AT LEAST 2 PLAYERS");
+        char h2[96];
+        clip(hint, 450, h2, sizeof h2);
+        if (h2[0]) text(h2, 12, 286, 1, hc);
+    }
+    if (note[0] && SDL_GetTicks() < note_until) { char n2[96]; clip(note, 450, n2, sizeof n2); text(n2, 12, 298, 1, note_err ? C_ERR : C_OK); }
+    text("TAB/ARROWS: MOVE   ENTER: EDIT/SELECT   ESC: BACK", 12, 313, 1, C_DIM);
+}
+
+static void dim_screen(void) {
     SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 190);
     SDL_Rect all = { 0, 0, KL_W, KL_H };
     SDL_RenderFillRect(ren, &all);
     SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
+}
+
+static void draw_keypad(void) {
+    dim_screen();
+    SDL_Rect box = { 96, 70, 288, 188 };
+    fill(box, C_PANEL);
+    frame(box, C_ACC);
+    char l[64];
+    snprintf(l, sizeof l, "%s", keypad_field == 1 ? "ADDRESS" : "PORT");
+    text(l, 108, 78, 1, C_DIM);
+    const char *b = fbuf[keypad_field];
+    int n = (int)strlen(b);
+    snprintf(l, sizeof l, "%s_", n > 20 ? b + n - 20 : b);
+    text(l, 108, 90, 2, C_TEXT);
+}
+
+static void draw_confirm(void) {                 /* modal dialog over a dimmed screen */
+    dim_screen();
     SDL_Rect box = { 70, 104, 340, 110 };
     fill(box, C_PANEL);
     frame(box, C_ACC);
@@ -701,9 +985,10 @@ static void draw_canvas(void) {
     setc(C_BG);
     SDL_RenderClear(ren);
     rec_texts = 1;
-    if (page) draw_edit(); else draw_main();
+    if (page == KL_PAGE_ONLINE) draw_online(); else if (page) draw_edit(); else draw_main();
     rec_texts = 0;      /* texts inside widgets are covered by the widget rectangles */
     if (confirm) draw_confirm();
+    if (keypad_field >= 0) draw_keypad();
     for (int i = 0; i < nw; i++) draw_widget(i);
 }
 
@@ -752,18 +1037,21 @@ static void nav(int dir) {
 }
 
 static void go_back(void) {
+    if (keypad_field >= 0) { keypad_close(0); layout(); return; }
+    if (editing >= 0) { end_edit(); return; }
     if (confirm) { confirm = 0; layout(); focus = 0; return; }
     if (page) { page = 0; capture = -1; focus = 0; layout(); }
 }
 
 static void on_key(SDL_Keycode k, int shift) {
+    if (editing >= 0) { field_key(k, shift); return; }       /* typing in a field */
     if (capture >= 0) {                          /* remapping: the next key is the binding */
         if (page == 1) capture_key(k);
         else if (k == SDLK_ESCAPE) { capture = -1; set_note("CANCELLED", 0); }   /* controller pages ignore other keys */
         return;
     }
     if (k == SDLK_ESCAPE) {
-        if (confirm || page) go_back();
+        if (keypad_field >= 0 || confirm || page) go_back();
         else { result = KL_QUIT; running = 0; }
         return;
     }
@@ -778,13 +1066,14 @@ static void on_key(SDL_Keycode k, int shift) {
 
 static void on_pad_button(int b) {
     if (capture >= 0 && page == 2) { capture_button(b); return; }
+    if (keypad_field >= 0 && b == SDL_CONTROLLER_BUTTON_B) { field_backspace(keypad_field); return; }   /* east = DEL on the keypad */
     if (capture >= 0) return;                    /* keyboard capture: ignore the pad */
     switch (b) {
     case SDL_CONTROLLER_BUTTON_DPAD_UP: nav(0); break;
     case SDL_CONTROLLER_BUTTON_DPAD_DOWN: nav(1); break;
     case SDL_CONTROLLER_BUTTON_DPAD_LEFT: nav(2); break;
     case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: nav(3); break;
-    case SDL_CONTROLLER_BUTTON_A: if (nw) activate(focus); break;       /* south = OK */
+    case SDL_CONTROLLER_BUTTON_A: if (nw) { via_pad = 1; activate(focus); via_pad = 0; } break;       /* south = OK */
     case SDL_CONTROLLER_BUTTON_B: go_back(); break;                      /* east = back (no-op on the main page) */
     default: break;
     }
@@ -807,8 +1096,14 @@ static void handle(SDL_Event *e) {
         result = KL_QUIT; running = 0; break;
     case SDL_KEYDOWN:
         if (!for_us(e->key.windowID)) break;
-        if (!e->key.repeat || e->key.keysym.sym == SDLK_LEFT || e->key.keysym.sym == SDLK_RIGHT)
+        cur_mod = e->key.keysym.mod;
+        if (!e->key.repeat || e->key.keysym.sym == SDLK_LEFT || e->key.keysym.sym == SDLK_RIGHT || e->key.keysym.sym == SDLK_BACKSPACE)
             on_key(e->key.keysym.sym, (e->key.keysym.mod & KMOD_SHIFT) != 0);
+        break;
+    case SDL_TEXTINPUT:
+        if (!for_us(e->text.windowID)) break;
+        if (editing >= 0) for (const char *p = e->text.text; *p; p++) field_append(editing, (unsigned char)*p);
+        else if (keypad_field >= 0) for (const char *p = e->text.text; *p; p++) field_append(keypad_field, (unsigned char)*p);
         break;
     case SDL_MOUSEMOTION: {
         if (!for_us(e->motion.windowID)) break;
@@ -816,8 +1111,8 @@ static void handle(SDL_Event *e) {
         to_logical(e->motion.x, e->motion.y, &lx, &ly);
         hover = hit(lx, ly);
         if (dragging) {
-            int i = find(dragging == 2 ? "deadzone" : "volume");
-            if (i >= 0) set_slider(dragging == 2, lx, &wd[i]);
+            int i = find(dragging == 3 ? "online_delay" : dragging == 2 ? "deadzone" : "volume");
+            if (i >= 0) set_slider(dragging - 1, lx, &wd[i]);
         }
         break;
     }
@@ -827,10 +1122,11 @@ static void handle(SDL_Event *e) {
             int lx, ly;
             to_logical(e->button.x, e->button.y, &lx, &ly);
             if (capture >= 0) { capture = -1; set_note("CANCELLED", 0); }   /* a click elsewhere cancels the capture */
+            if (editing >= 0) end_edit();                                  /* ...and ends a text edit (keeps the text) */
             int i = hit(lx, ly);
             if (i >= 0 && wd[i].enabled) {
                 focus = i;
-                if (wd[i].type == W_SLIDER) { dragging = wd[i].slider ? 2 : 1; set_slider(wd[i].slider, lx, &wd[i]); }
+                if (wd[i].type == W_SLIDER) { dragging = wd[i].slider + 1; set_slider(wd[i].slider, lx, &wd[i]); }
                 else activate(i);
             }
         }
@@ -869,6 +1165,8 @@ static void handle(SDL_Event *e) {
 /* ------------------------------------------------------------------ public API */
 KL_API const char *kl_dropped_path(void) { return dropped[0] ? dropped : NULL; }
 KL_API void kl_set_poll_interval(int ms) { poll_ms = ms < 1 ? 1 : ms; }
+KL_API void kl_set_online_poll(KlOnlinePoll poll) { online_poll = poll; }
+KL_API void kl_set_start_page(int p) { start_page = p == KL_PAGE_ONLINE ? KL_PAGE_ONLINE : KL_PAGE_MAIN; }
 
 KL_API int kl_test_widget(const char *id, int *x, int *y, int *w, int *h) {
     int i = find(id);
@@ -882,13 +1180,16 @@ KL_API int kl_test_widget(const char *id, int *x, int *y, int *w, int *h) {
 KL_API int kl_test_enabled(const char *id) { int i = find(id); return i >= 0 && wd[i].enabled; }
 KL_API const char *kl_test_focus(void) { return nw ? wd[focus].id : ""; }
 KL_API void kl_test_set_focus(const char *id) { int i = find(id); if (i >= 0) focus = i; }
-KL_API const char *kl_test_page(void) { return page == 0 ? "main" : page == 1 ? "keyboard" : "controller"; }
+KL_API const char *kl_test_page(void) { return page == 0 ? "main" : page == 1 ? "keyboard" : page == 2 ? "controller" : "online"; }
 KL_API unsigned kl_test_window_id(void) { return win ? SDL_GetWindowID(win) : 0; }
 KL_API int kl_test_capture(void) { return capture; }
 KL_API const char *kl_test_note(void) { return note[0] && SDL_GetTicks() < note_until ? note : ""; }
 KL_API void kl_test_fake_pad(int present, int ax, int ay) { fake_pad = present; fake_ax = ax; fake_ay = ay; }
 KL_API int kl_test_pad_present(void) { return pad_present(); }
 KL_API int kl_test_confirm(void) { return confirm; }
+KL_API int kl_test_editing(void) { return editing; }
+KL_API int kl_test_keypad(void) { return keypad_field; }
+KL_API const char *kl_test_field(int f) { return f >= 0 && f < 3 ? fbuf[f] : ""; }
 KL_API int kl_test_text_count(void) { return ntexts; }
 KL_API int kl_test_text(int i, int *x, int *y, int *w, int *h) {
     if (i < 0 || i >= ntexts) return 0;
@@ -930,8 +1231,10 @@ KL_API void kl_test_video(int *ww, int *wh, int *fs) {
 KL_API int kl_run(const char *ini_path, KlPoll poll) {
     snprintf(ini, sizeof ini, "%s", ini_path ? ini_path : "kirby.ini");
     cfg_load(ini, &cfg);
+    sync_fields();
     memset(&st, 0, sizeof st);
-    dropped[0] = 0; note[0] = 0; page = 0; focus = 0; hover = -1; dragging = 0; nw = 0; capture = -1; confirm = 0;
+    dropped[0] = 0; note[0] = 0; page = start_page; focus = 0; hover = -1; dragging = 0; nw = 0; capture = -1; confirm = 0;
+    editing = -1; keypad_field = -1; via_pad = 0; want_focus[0] = 0; memset(&onl, 0, sizeof onl);
     fake_pad = -1; pad = NULL;
     result = KL_QUIT; running = 1;
 
@@ -994,12 +1297,24 @@ KL_API int kl_run(const char *ini_path, KlPoll poll) {
             ns.text[sizeof ns.text - 1] = 0;
             ns.rom[sizeof ns.rom - 1] = 0;
             st = ns;
+            if (online_poll) {
+                KlOnline no;
+                memset(&no, 0, sizeof no);
+                for (int q = 0; q < 4; q++) no.ping_ms[q] = -1;
+                no.self_slot = -1;
+                online_poll(&no);
+                no.my_address[sizeof no.my_address - 1] = 0;
+                no.message[sizeof no.message - 1] = 0;
+                for (int q = 0; q < 4; q++) no.names[q][sizeof no.names[q] - 1] = 0;
+                onl = no;
+            }
             layout();
             next_poll = SDL_GetTicks() + (Uint32)poll_ms;
         }
         if (!(SDL_GetWindowFlags(win) & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN))) render();
     }
-    save_cfg();
+    end_edit();
+    commit_fields();
     if (pad) { SDL_GameControllerClose(pad); pad = NULL; }
     SDL_DestroyTexture(canvas); canvas = NULL;
     SDL_DestroyRenderer(ren); ren = NULL;

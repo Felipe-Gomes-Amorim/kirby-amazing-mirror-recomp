@@ -24,6 +24,7 @@ void gba_load_rom(const uint8_t *p, uint32_t n) { rom = p; rom_size = n; }
 static void sram_init(void) __attribute__((constructor));
 static void sram_init(void) { memset(sram, 0xFF, sizeof sram); }
 uint32_t gba_rom_size(void) { return rom_size; }
+const uint8_t *gba_rom_data(void) { return rom; }
 uint8_t *gba_ewram(void) { return ewram; }
 void gba_sram_set(const uint8_t *p) { memcpy(sram, p, sizeof sram); }
 void gba_sram_get(uint8_t *p) { memcpy(p, sram, sizeof sram); }

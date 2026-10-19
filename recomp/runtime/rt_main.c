@@ -183,7 +183,7 @@ int main(int argc, char **argv) {
     int window = 0, scale = 3, bench = 0, selftest = 0, scale_explicit = 0;
     const char *ini_arg = NULL;
     char link_mode[16] = "off", link_host[64] = "127.0.0.1";
-    int link_players = 2, link_port = 47900, link_cli = 0;
+    int link_players = 2, link_port = 47900, link_cli = 0, link_delay = -1, link_cli_mask = 0;
     rt_opt_stop_at_vblank_wait = 1;
     if (gui_defaults) {
         window = 1;
@@ -205,9 +205,18 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--link") && i + 1 < argc) { snprintf(link_mode, sizeof link_mode, "%s", argv[++i]); link_cli = 1; }
         else if (!strcmp(argv[i], "--link-nopace")) rt_link_nopace = 1;   /* testes: sem ritmo de 60 fps */
-        else if (!strcmp(argv[i], "--link-players") && i + 1 < argc) link_players = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--link-port") && i + 1 < argc) link_port = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--link-host") && i + 1 < argc) snprintf(link_host, sizeof link_host, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--link-players") && i + 1 < argc) { link_players = atoi(argv[++i]); link_cli_mask |= 1; }
+        else if (!strcmp(argv[i], "--link-port") && i + 1 < argc) { link_port = atoi(argv[++i]); link_cli_mask |= 2; }
+        else if (!strcmp(argv[i], "--link-host") && i + 1 < argc) { snprintf(link_host, sizeof link_host, "%s", argv[++i]); link_cli_mask |= 4; }
+        else if (!strcmp(argv[i], "--link-delay") && i + 1 < argc) {   /* K quadros de folga do host: 0..8 ou auto */
+            const char *v = argv[++i];
+            link_delay = !strcmp(v, "auto") ? -1 : atoi(v);
+            if (link_delay > 8) link_delay = 8;
+            link_cli_mask |= 8;
+        }
+        else if (!strcmp(argv[i], "--link-bind") && i + 1 < argc) rt_link_set_bind(argv[++i]);
+        else if (!strcmp(argv[i], "--link-sim") && i + 1 < argc) rt_link_sim(argv[++i]);   /* "lat_ms,jitter_ms,perda%" (testes) */
+        else if (!strcmp(argv[i], "--link-status") && i + 1 < argc) rt_link_status_path = argv[++i];
         else if (!strcmp(argv[i], "--selftest-link")) {
             extern int rt_selftest_link(void);
             return rt_selftest_link() ? 1 : 0;
@@ -278,7 +287,17 @@ int main(int argc, char **argv) {
             else strcpy(ini, "kirby.ini");
         }
         rt_cfg_load(ini);
-        if (!link_cli) rt_sio_read_ini(ini, link_mode, &link_players, &link_port, link_host);   /* [link] do kirby.ini */
+        {   /* [link] do kirby.ini; a linha de comando manda em cada chave que ela trouxe */
+            char m2[16]; int p2 = link_players, o2 = link_port, d2 = link_delay; char h2[64];
+            snprintf(m2, sizeof m2, "%s", link_mode); snprintf(h2, sizeof h2, "%s", link_host);
+            rt_sio_read_ini(ini, m2, &p2, &o2, h2, &d2);
+            rt_link_read_bind(ini);
+            if (!link_cli) snprintf(link_mode, sizeof link_mode, "%s", m2);
+            if (!(link_cli_mask & 1)) link_players = p2;
+            if (!(link_cli_mask & 2)) link_port = o2;
+            if (!(link_cli_mask & 4)) snprintf(link_host, sizeof link_host, "%s", h2);
+            if (!(link_cli_mask & 8)) link_delay = d2;
+        }
         {   /* log do jogo ao lado do ini (hot-plug de controles etc.) */
             extern void rt_input_set_log_entry(const char *path);
             char lg[1100];
@@ -294,7 +313,7 @@ int main(int argc, char **argv) {
         if (rt_cfg_get(5)) { extern int rt_mute; rt_mute = 1; }
     }
     rt_cpu = &cpu;
-    { int lr = rt_sio_setup(link_mode, link_players, link_port, link_host);   /* mode=off: nada muda */
+    { int lr = rt_sio_setup(link_mode, link_players, link_port, link_host, link_delay);   /* mode=off: nada muda */
       if (lr < 0) fprintf(stderr, "[link] link unavailable (%d): running without cable\n", lr); }
     if (selftest) {
         extern int rt_selftest_sram(Cpu *);

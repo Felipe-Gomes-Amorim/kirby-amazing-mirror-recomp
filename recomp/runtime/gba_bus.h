@@ -56,6 +56,7 @@ void hw_write(uint32_t addr, int size, uint32_t v);
 /* --- Runtime: imagem da ROM e acesso direto a RAM (so runtime/testes) --- */
 void gba_load_rom(const uint8_t *p, uint32_t n);
 uint32_t gba_rom_size(void);
+const uint8_t *gba_rom_data(void);   /* NULL se nao carregada (SHA-1 do HELLO do link) */
 uint8_t *gba_ewram(void);
 uint8_t *gba_iwram(void);
 /* save SRAM de 32 KiB (espelhada em 0x0E000000..0x0FFFFFFF) */

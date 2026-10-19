@@ -39,6 +39,10 @@ void cfg_defaults(KirbyConfig *c) {
     cfg_reset_controller(c);
     c->launcher_show = 1;
     set_str(c->language, sizeof c->language, "en");
+    set_str(c->link_mode, sizeof c->link_mode, "off");
+    set_str(c->link_host, sizeof c->link_host, "127.0.0.1");
+    c->link_port = 47900; c->link_players = 2; c->link_delay = -1;
+    set_str(c->link_name, sizeof c->link_name, "Player");
 }
 
 static int ieq(const char *a, const char *b) {
@@ -95,6 +99,24 @@ int cfg_validate(KirbyConfig *c) {
         fixes++;
     }
     if (!name_ok(c->language) || strlen(c->language) > 7) { set_str(c->language, sizeof c->language, "en"); fixes++; }
+    c->link_mode[sizeof c->link_mode - 1] = 0;
+    c->link_host[sizeof c->link_host - 1] = 0;
+    c->link_name[sizeof c->link_name - 1] = 0;
+    if (strcmp(c->link_mode, "off") && strcmp(c->link_mode, "host") && strcmp(c->link_mode, "join") && strcmp(c->link_mode, "solo")) {
+        set_str(c->link_mode, sizeof c->link_mode, "off"); fixes++;
+    }
+    if (!c->link_host[0]) { set_str(c->link_host, sizeof c->link_host, "127.0.0.1"); fixes++; }
+    for (const char *h = c->link_host; *h; h++)
+        if ((unsigned char)*h < 33 || (unsigned char)*h > 126 || *h == ';' || *h == '#') { set_str(c->link_host, sizeof c->link_host, "127.0.0.1"); fixes++; break; }
+    fixes += clampi(&c->link_port, 1, 65535, 47900);
+    fixes += clampi(&c->link_players, 2, 4, 2);
+    fixes += clampi(&c->link_delay, -1, 8, -1);
+    {   /* the name goes into an ini value and onto the screen: printable ASCII, no ini syntax characters */
+        int bad = c->link_name[0] == 0;
+        for (const char *q = c->link_name; *q; q++)
+            if ((unsigned char)*q < 32 || (unsigned char)*q > 126 || *q == '=' || *q == ';' || *q == '#' || *q == '[' || *q == ']') bad = 1;
+        if (bad) { set_str(c->link_name, sizeof c->link_name, "Player"); fixes++; }
+    }
     return fixes;
 }
 
@@ -145,6 +167,18 @@ static void apply(KirbyConfig *c, const char *sec, const char *key, const char *
         if (b >= 0) { if (name_ok(val)) set_name(c->pad[b], val); return; }
         if (!strcmp(key, "stick_as_dpad")) { if (parse_int(val, &n)) c->stick_as_dpad = n; return; }
         if (!strcmp(key, "deadzone")) { if (parse_int(val, &n)) c->deadzone = n; return; }
+        return;
+    }
+    if (!strcmp(sec, "link")) {          /* same contract and atoi semantics as rt_sio_read_ini */
+        if (!strcmp(key, "mode")) set_str(c->link_mode, sizeof c->link_mode, val);
+        else if (!strcmp(key, "players")) { int v = (int)strtol(val, NULL, 10); if (v >= 2 && v <= 4) c->link_players = v; }
+        else if (!strcmp(key, "port")) { int v = (int)strtol(val, NULL, 10); if (v >= 1 && v <= 65535) c->link_port = v; }
+        else if (!strcmp(key, "delay")) {                       /* as the runtime: "auto" or 0..8 frames */
+            if (!strcmp(val, "auto")) c->link_delay = -1;
+            else { int v = atoi(val); if (v >= 0 && v <= 8) c->link_delay = v; }
+        }
+        else if (!strcmp(key, "host")) set_str(c->link_host, sizeof c->link_host, val);
+        else if (!strcmp(key, "name")) set_str(c->link_name, sizeof c->link_name, val);
         return;
     }
     if (!strcmp(sec, "launcher")) {
@@ -230,6 +264,19 @@ int cfg_save(const char *ini_path, const KirbyConfig *in) {
                "show=%d\r\n"
                "language=%s\r\n",
             c.launcher_show, c.language);
+    char dly[16];
+    if (c.link_delay < 0) snprintf(dly, sizeof dly, "auto"); else snprintf(dly, sizeof dly, "%d", c.link_delay);
+    fprintf(f, "\r\n[link]\r\n"
+               "; cable link (online). mode: off | host | join; the launcher writes it when you press HOST or JOIN\r\n"
+               "mode=%s\r\n"
+               "; host: address to join (IP or name); port: 1..65535\r\n"
+               "host=%s\r\n"
+               "port=%d\r\n"
+               "; players: 2..4 (when hosting); delay: auto or 0..8 frames of host slack; name: shown in the lobby\r\n"
+               "players=%d\r\n"
+               "delay=%s\r\n"
+               "name=%s\r\n",
+            c.link_mode, c.link_host, c.link_port, c.link_players, dly, c.link_name);
     int rc = ferror(f) ? -1 : 0;
     if (fclose(f) != 0) rc = -1;
     return rc;
@@ -249,7 +296,9 @@ void cfg_path_beside(const char *file_path, char *out, size_t cap) {
 int cfg_equal(const KirbyConfig *a, const KirbyConfig *b) {
     if (a->scale != b->scale || a->mute != b->mute || a->fullscreen != b->fullscreen || a->vsync != b->vsync ||
         a->scaling != b->scaling || a->volume != b->volume || a->stick_as_dpad != b->stick_as_dpad ||
-        a->deadzone != b->deadzone || a->launcher_show != b->launcher_show || strcmp(a->language, b->language))
+        a->deadzone != b->deadzone || a->launcher_show != b->launcher_show || strcmp(a->language, b->language) ||
+        strcmp(a->link_mode, b->link_mode) || strcmp(a->link_host, b->link_host) || a->link_port != b->link_port ||
+        a->link_players != b->link_players || a->link_delay != b->link_delay || strcmp(a->link_name, b->link_name))
         return 0;
     for (int i = 0; i < CFG_BTN_COUNT; i++)
         if (strcmp(a->key[i], b->key[i]) || strcmp(a->pad[i], b->pad[i])) return 0;

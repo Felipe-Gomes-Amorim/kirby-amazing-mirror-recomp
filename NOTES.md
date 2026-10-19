@@ -1198,7 +1198,7 @@ others, later children still answer; leaving after its turn is clean); **master 
 no late delivery); start while busy; child cannot start; register rules; baud 9600 timing; IRQ off; unit not in
 multi-play; SD vs plugging; instance isolation.
 
-**E. ONLINE section: UI PLAN ONLY (not implemented).** The main page has no free row, so ONLINE is a page like KEYBOARD:
+**E. ONLINE section: UI PLAN (IMPLEMENTED in item 18 below; the plan text is kept for reference).** The main page has no free row, so ONLINE is a page like KEYBOARD:
 a button `ONLINE...` appears in the header slot of `SELECT ROM...` (298,34,170,22) whenever a verified ROM is loaded
 (that slot is empty then); focus order after SELECT ROM. Page layout (480x320 canvas, 5x7 font, same widgets):
 ```
@@ -1251,6 +1251,57 @@ Poppy's 'Minimo que o hw/ precisa emular' items marked [V]. Result of each (test
   matches. Negative control: at 9600 or 57600 baud 4 slots take longer than 17476 cycles, the exchange is still busy at the
   overflow and the handler would read 0xFFFF / the previous exchange - so the game needs 115200 baud (the 0x2003 literal).
 - **Not changed:** the ONLINE launcher screen draft (item 16E) - nothing in this check affected it. Nothing implemented in the UI.
+
+### 18. ONLINE page of the launcher + `[link]` in kirby.ini (Gwen)
+
+**Implemented** in `hw/launcher_ui.[ch]` and `hw/config_ini.[ch]`; the DLL source list is unchanged. Text is English.
+
+- **Page:** button `ONLINE...` in the header slot of `SELECT ROM...` (shown while a verified ROM is loaded). Fields `NAME`, `ADDRESS`,
+  `PORT`; `PLAYERS` 2/3/4 (radios); `DELAY` slider (`AUTO`, 0..8); buttons `HOST`, `JOIN`, `START`, `LEAVE`, `COPY` (host address to the
+  clipboard), `BACK`; a list of the 4 slots (`P1 HOST`, `P2`..`P4`) with name, state (`EMPTY/JOINING/CONNECTED/READY/LOST`) and ping
+  (green < 60 ms, yellow < 120, red above; shown only for connected/ready slots); a `STATE:` line and a hint line.
+- **Enable rules:** while `state == KLO_OFFLINE` the fields are editable and HOST (port valid) / JOIN (port valid and address non-empty)
+  are on; with any other state the fields are locked and only LEAVE (and COPY if `my_address` is set) works; START only when
+  `state == KLO_HOSTING` and at least 2 slots are connected/ready. An invalid port (not 1..65535) is shown in red with a hint.
+- **Input:** mouse click / Tab / arrows / Enter on a field starts typing (`SDL_StartTextInput`, `SDL_TEXTINPUT`; Backspace; Ctrl+V pastes;
+  Enter/Esc/Tab/Up/Down/click elsewhere end the edit and keep the text; allowed characters: name `A-Za-z0-9 _-.`, address
+  `A-Za-z0-9.-:_`, port digits, max 15/45/5). With the **controller**, A on ADDRESS/PORT opens a modal on-screen **keypad**
+  (1-9, 0, `.` (address only), DEL, CLR, OK, CANCEL; B (east) = backspace; the Esc key/BACK cancels and restores the old text); the
+  name cannot be typed with a pad (a note says so). Each edit is saved into kirby.ini right away.
+- **Return codes of `kl_run`:** `KL_ONLINE_HOST = 6`, `KL_ONLINE_JOIN = 7`, `KL_ONLINE_LEAVE = 8`, `KL_ONLINE_START = 9`. Before returning,
+  the UI has already saved the fields and `[link] mode` (`host` / `join` / `off` for LEAVE; START leaves the mode alone). The launcher
+  does what is needed, then calls `kl_set_start_page(KL_PAGE_ONLINE)` + `kl_run` again so the screen reopens on the ONLINE page
+  (`KL_PAGE_MAIN` = default, goes back to the main page).
+- **Second poll (live data):** `kl_set_online_poll(KlOnlinePoll)`, called on the same cadence as the status poll (~10x/s, UI thread,
+  `kl_set_poll_interval`); the UI zeroes the struct (pings = -1, `self_slot` = -1) before each call; `NULL` = always offline:
+
+```c
+typedef struct {
+    int state;               /* KLO_OFFLINE 0, HOSTING 1, CONNECTING 2, CONNECTED 3, PLAYING 4, DESYNC 5, LOST 6 */
+    int slots[4];            /* KLS_EMPTY 0, CONNECTING 1, CONNECTED 2, READY 3, LOST 4 (P1 is the host) */
+    int ping_ms[4];          /* < 0 = unknown */
+    char names[4][16];
+    int self_slot;           /* 0..3 or -1 */
+    char my_address[48];     /* host: "192.168.1.5:47900" (enables COPY) */
+    char message[96];        /* optional line (errors/hints) shown under the state; '' = the UI's own hint */
+} KlOnline;
+```
+- **`[link]` contract in kirby.ini** (same keys as `rt_sio_read_ini`): `mode=off|host|join|solo`, `host=` (IP/name, default `127.0.0.1`),
+  `port=` (1..65535, 47900), `players=` (2..4, 2), `delay=auto|0..8` (default `auto` = -1, the runtime's frames of host slack),
+  `name=` (<= 15 printable characters, `Player`; read by config_ini only - the runtime does not read it yet).
+  `KirbyConfig` has `link_mode/link_host/link_port/link_players/link_delay/link_name` (at the end of the struct).
+- **Parity test** (`hw/tests/run_link.ps1` -> `test_link_ini`): `extract_rt_ini.py` pulls the REAL `rt_sio_read_ini` out of
+  `recomp/runtime/rt_sio.c` (fails if it is renamed/changes signature) and ~35 inis (case, spaces, comments, duplicates, other sections,
+  out-of-range, `3x`, `auto`...) must give the same mode/players/port/host/delay in both readers. Intentional differences: an unknown
+  mode string is `off` in config_ini (the runtime keeps the text and logs an error); an empty `host=` is the default in config_ini; a
+  host with a space/illegal char is rejected by config_ini; config_ini skips a UTF-8 BOM. NOTE for Nasus: the runtime changed
+  `rt_sio_read_ini` to six arguments (`delay`) while this was being written; the extractor follows the new signature.
+- **Tests** (`hw/tests/run_ui.ps1` -> `test_kirby_ui_online`): mouse + keyboard typing, illegal characters, empty/70000 port disables
+  HOST/JOIN, Tab/Enter/Esc/Down ending an edit, the saved `[link]`, the controller keypad (digits, dot, CLR, DEL via B, OK, CANCEL
+  restores, port keypad has no dot, name has none, Esc closes only the keypad), codes 6/7/8/9, locked fields, START needs 2 players,
+  COPY, no poll, and geometry over the 7 states with long names/messages/addresses (widgets, texts and the slider value never overlap
+  or leave the canvas; the keypad too). The existing UI tests were adjusted: a ROM now adds `online` as the first widget.
+- **Not done / for Riven:** wire the codes in `launcher/flow.py`, fill `KlOnline` from the lobby, restart `kl_run` on the ONLINE page.
 
 - Cuidado para o runtime: `hw_irq_pending` ja aplica IME e IE&IF; o runtime so decide o despacho.
   O registro BIOS_IF (0x03007FF8) e IWRAM, fica a cargo do runtime ao tratar VBlankIntrWait.
@@ -1857,6 +1908,26 @@ cache global do zig, +alguns s).
 **Trocas por quadro vs pacote de 24 B por quadro (para a P2/rede escolher o formato):** decidi **trocas (halfwords) agrupadas por quadro**, nao um pacote de 24 B. Motivo: ate chegar ao gLink o jogo usa handshakes de multiboot (0x6200, 0x8101+n, 0x8F51, 0x70AE, E4E4, 1 troca por quadro) que nao tem formato de pacote; o gLink so comeca depois. Mensagens por quadro (400 B hoje, fixas, comprimiveis): host->filho `M_FRAME` = ate 32 trocas (deslocamento u32 + 4 halfwords) + mascara de presentes; filho->host `M_DONE` = ate 32 halfwords (SEND no inicio de cada troca). Em regime gLink sao 16 trocas = **32 B por jogador por quadro** (16 halfwords) mais 16 deslocamentos; os deslocamentos sao periodicos (Timer3 17476 ciclos) e podem virar delta u16 ou ser omitidos. Para a rede: o lockstep puro exige 1 RTT por quadro; para latencia > ~16 ms o caminho e deixar o host adiantar K quadros (atraso de entrada, como o proprio jogo ja faz com os 16 quadros de espera) - nao implementado.
 **Fechamento do join:** a causa era a reconexao: depois que o host saia, o filho tentava `connect` a cada 64 polls e cada tentativa recusada em localhost custa ~1 s no Windows (parecia travado, `timeout` matava). Agora o filho nao reconecta; quando o host cai, o filho segue sem cabo (`[link] host disconnected`) e sai normalmente (teste: host 900 quadros, join 1800 -> join sai com rc=0 em ~11 s).
 **Sem mudanca de comportamento fora do link:** mode=off md5 do quadro final (3000 quadros) igual (0455812b...); `--selftest-link` OK (hub e TCP no modo antigo); suite (159 testes com RECOMP_SLOW=1) verde.
+
+### Cabo link P2b: rede (LAN/internet), atraso de entrada K, medicao, dessincronia, seguranca (Nasus)
+**Resumo:** o lockstep agora aguenta latencia de rede. O host pode rodar ate **K quadros a frente** do filho; K=0 e a referencia (hash identico ao P2a: `3f70b1ec58b17557`, mesmo roteiro). O fluxo de trocas depende so de K, **nunca do relogio nem da rede**: com K=2 o hash do host e `57fb962b2ca52a64` com ou sem latencia/jitter/perda simulados. Suite (174 testes, RECOMP_SLOW=1) verde; mode=off md5 igual (`0455812b...`).
+**1. Atraso de entrada K** (`[link] delay=auto|0..8`, `--link-delay`; o valor do HOST vale para a sessao). Regra: o host so comeca o quadro f+1 depois de `DONE(f-K)` do filho. O SEND do filho chega ao host por indice de troca: a troca j do host usa o SEND da troca `j-D` do filho, com D=20 em fase lenta (deteccao multiboot, 1 troca/quadro) e D=20+17K em fase rapida (gLink, ~16 trocas/quadro; fase decidida pelo numero de trocas do quadro anterior, calculado so pelo host), nunca alem do que todo filho ja terminou (`lim`, tambem so das contagens do host) e nunca voltando (repete o ultimo valor). Por isso nada depende do tempo de chegada dos pacotes. Auto: 5 PINGs na entrada; RTT < 12 ms -> K=0; senao `ceil((RTT-12)/16,7)+1`, **limitado a 2**.
+- **O que o jogo tolera (medido, SUB-GAMES > Speed Eaters, 3800 quadros):** K=0, 1 e 2 funcionam (pacotes validos dos dois lados, `0x02038580 == 0`, `0x03002554 == 0x8393` no host e `0x8303` no filho nos quadros 3000 e 3790). **K=3 e 4 derrubam o gLink** (~65 quadros apos o gLink ligar as trocas param; nao ha mais pacotes validos). Leitura: o atraso FILHO->HOST em quadros e ~(K+1)+0,25 (D=20+17K trocas = 3,4 quadros em K=2, 4,4 em K=3) e o motor do gLink do KatAM (espera de ~16 quadros do LinkFrameSync, limite de sincronia do gLink) desiste entre ~3,5 e ~4,5 quadros de atraso efetivo. Por isso `LINK_K_SAFE = 2`: o auto nunca passa disso; K>2 explicito so com aviso no log. Acima disso o host **espera** (jogo mais lento, nao quebra).
+- **Ping maximo suportado (rede simulada, K=2, sem janela, quadros/s do host):** ida 5 ms (RTT 10) 96 q/s; ida 15 ms (RTT 30) 85 q/s; ida 30 ms (RTT 60) 46 q/s (0,77x tempo real). Modelo: periodo do quadro ~ `(RTT + ~4 ms) / (K+1)`; velocidade cheia (60 q/s) enquanto **RTT <= ~45 ms** com K=2; acima o jogo roda mais devagar (RTT 100 ms ~ 30 q/s) mas sem Communication Error. Internet entre cidades (>60 ms) fica lenta: precisaria de outro desenho (prever o filho), fora de escopo.
+
+**2. Mensagens compactas (protocolo v2, `[tipo u8][tam u16][carga]`):** `FRAME` (host->filho): u16 quadro, mascara+flag de hash, n, [u64 hash a cada 60 quadros], depois por troca 1 byte (slots presentes, "mesmo delta", "mesmos valores") + delta de ciclos em varint (omitido se igual ao anterior; o Timer3 e periodico) + so os halfwords presentes. `DONE` (filho->host): u16 quadro, flags, n, bitmap "igual ao SEND anterior" e so os halfwords diferentes. **Medido em jogo (gLink, 1020 quadros, 2 jogadores): host->filho 81,5 B/quadro, filho->host 23,5 B/quadro (cabecalho de 3 B incluso) = ~105 B/quadro = ~6,3 KB/s a 60 q/s (~50 kbit/s)**; na fase de deteccao (1 troca/quadro) ~10 B/quadro. Antes: 400 B fixos por mensagem. Ganho futuro possivel: omitir o halfword do proprio filho no FRAME.
+
+**3. Medicao:** PING/PONG do host a cada 30 quadros, por filho (atendido tambem durante a emulacao pelo `poll`, entao nao inclui o tempo do quadro). Log a cada 600 quadros (`[link] host K=2 frame 1200: rtt ..., waited in N frames ..., tx B/s rx B/s`). **JSON para o launcher:** `--link-status ARQ` (ou `KIRBY_LINK_STATUS`), regravado de forma atomica a cada 60 quadros: `state` (starting|lockstep|free|dropped), `role` (host|join), `players`, `mask`, `delay`, `frame`, `rtt_ms[4]`, `rtt_avg_ms[4]`, `rtt_max_ms[4]` (indice = jogador), `wait_frames`, `wait_ms`, `wait_max_ms` (quadros em que esperou o outro lado), `frames_behind` (filho: quadros do host ja recebidos e nao executados), `tx_bytes`, `rx_bytes`, `*_per_s`, `*_per_frame`, `underflows`, `desync`, `desync_frame`. Estrutura C equivalente: `LinkStats` / `rt_sio_stats()`.
+
+**4. Robustez:** nada bloqueia sem limite: as esperas do host (`DONE`) e do filho (`FRAME`) tem timeout `KIRBY_LINK_TIMEOUT_MS` (8000) e, durante a espera, chamam `rt_link_idle` (em `rt_window.c`: `win_poll`; a janela segue respondendo e fechar a janela sai da espera). Filho cai -> o host o remove (`[link] player 2 disconnected`) e passa a dar 0xFFFF no slot dele (SD cai); host cai -> o filho segue sem cabo (`host disconnected`) e termina normalmente (sem reconexao: a reconexao em loop era o "join pendurado"). Mensagem malformada ou maior que 1024 B derruba so aquele par. **Dessincronia:** a cada 60 quadros o host manda o hash FNV do fluxo de trocas ate aquele quadro; o filho compara com o dele; divergindo, log `[link] DESYNC: ...` nos dois lados e `desync=true` no JSON (evento para o launcher). Nao comparo CRC de IWRAM/EWRAM: os dois consoles tem memoria diferente por construcao (ID do jogador, buffers do cabo), o que daria falso alarme; o fluxo de halfwords e o canal pelo qual qualquer dessincronia real passa, e o jogo ainda tem o proprio checksum de estado (erro 8). Teste: `KIRBY_LINK_FAULT=quadro` (no filho) falsifica 1 bit do hash.
+
+**5. Rede simulada:** `--link-sim lat_ms,jitter_ms,perda%` (ou `KIRBY_LINK_SIM`) atrasa cada mensagem enviada (entrega em ordem, como TCP; perda = atraso de retransmissao 200 ms + 3x lat; semente fixa). `tests/test_link_net.py`: K=2 com 25 ms +-10 ms e 3% de perda tem o mesmo hash do host que sem simulacao, sem erro de comunicacao, o log do filho e prefixo do log do host, JSON coerente; desync injetado e detectado; HELLO invalido recusado.
+
+**6. Config e linha de comando:** `[link] mode=off|host|join`, `host=`, `port=`, `players=`, `delay=auto|0..8`, `bind=` (host: endereco de escuta, padrao 127.0.0.1; **0.0.0.0 para a LAN**) no kirby.ini (lido por `rt_sio_read_ini`; a linha de comando manda em cada chave que trouxer): `--link host|join|off`, `--link-host`, `--link-port`, `--link-players`, `--link-delay`, `--link-bind`, `--link-status`, `--link-sim`, `--link-nopace`. **Gwen:** para o parser compartilhado (`config_ini.c`) basta aceitar/preservar a secao `[link]` e as chaves acima (`delay` e `bind` sao novas).
+
+**7. Seguranca basica:** o host so aceita quem manda `HELLO` valido em ate 3 s: magic `KBRL`, versao de protocolo (2) e **SHA-1 da ROM carregada** (calculado em memoria; nenhuma ROM trafega). Recusa com `REJECT` (ROM diferente / versao / sala cheia / sessao ja iniciada) e fecha qualquer outra coisa (lixo). Depois do inicio da sessao o listener fecha. Nao ha criptografia nem autenticacao: so ha protecao contra cliente errado, nao contra quem escuta a rede (usar VPN ou IP direto de confianca).
+
+**Limites conhecidos:** TCP puro (sem NAT traversal nem relay); K automatico limitado a 2 pelo proprio jogo; com RTT > ~45 ms o host espera (jogo mais lento); host e filho precisam da mesma ROM; as esperas usam select (acorda na hora na rede real; na simulacao giram com yield porque o select de 1 ms vira 15 ms no Windows).
 
 ## Som (M4A) e save (SRAM) (Riven)
 Fonte: desmontagem a mao dos enderecos abaixo (capstone) + ram_code.csv da Poppy. E o motor
@@ -2542,3 +2613,50 @@ Leitura: ack `0x0F` = jogadores de quem o hello foi ouvido; `0x10<<p` = confirma
 **Decodificador**: `tools/link_trace.py` le o log do `--peek` (`python tools/link_trace.py host.log join.log`) e imprime so as mudancas (fases do lobby, tipo 0x20, tipo 3, status); `--peek-arg` da a lista de 30 enderecos; limite do runtime: `--snap` com <= 128 quadros por execucao. Teste: `tests.test_link_protocol` (30 testes, ~20 s) inclui decodificador offline e **duas instancias reais ate o co-op** (`TestTwoInstancesCoop`, usa uma porta livre em 127.0.0.1; logs em arquivo, nao pipe: com pipe os dois processos travam por buffer cheio).
 
 **Pendencias antigas**: (a) **profundidade alvo `LS+0x2A0+p` e o erro 5 tem a mesma origem**: `0x08030D4C` (chamada so de 0x0801AA04, 0x08020140, 0x08032AD4, 0x08032DE4 — lobby/sessao, nunca do `LinkFrameSync`) procura no anel de entradas do jogador p a entrada de quadro `LS.frame - 5`; se nao acha -> erro 5; se acha grava `(cabeca - posicao) & 0xF` em `LS+0x2A0+p`, e e esse valor >= 2 que liga a espera do `LinkFrameSync` (erro 7). Em jogo normal ninguem chama `0x08030D4C`, por isso a profundidade fica 0 e a queda de jogador da erro 6. (b) Nao reproduzi o erro 5 em execucao: precisa chegar a um dos 4 chamadores (pausa/retomada da sessao). (c) A flag `0x2B` de `0x03000490` e o unico "OK?" do host: sem a tecla A do host o co-op nunca comeca (o join sozinho nao basta).
+
+
+### 14. P1d: testes de rede, 4 jogadores e QA manual em 2 PCs (Poppy, 2026-10-19)
+**Bancada**: `tests/netharness.py` (`Cluster` sobe host + N-1 joins reais em 127.0.0.1, logs em arquivo, `--peek`, hash e `KIRBY_SIO_LOG` por instancia; `TcpProxy` entre um join e o host injeta, em TCP REAL e conhecendo o protocolo v2 da Nasus: latencia, jitter, perda de mensagem, travamento (`stall`), corte (`cut`), buraco-negro (`blackhole`) e **corrupcao de 1 bit num FRAME** (MITM)) e `tests/test_link_network.py` (23 testes; independentes do `--link-sim`/`tests/test_link_net.py` da Nasus, que usam Speed Eaters: os meus usam o co-op). Rapidos (~30 s): 2 e 4 jogadores. Lentos (`RECOMP_SLOW=1`, ~15 min): K, latencia, perda/corte, HELLO, desync. `run_retry` repete se um processo sai com rc=1 sem relatorio (reconstruir o `rt_boot.exe` em outro chat mata os processos em execucao e o Windows devolve 1: aconteceu 5 vezes). Comparacao de fluxos: o do filho tem que ser PREFIXO do do host (`exchange_prefix_ok`), porque com K>0 o host sai antes de o filho consumir os ultimos quadros (hashes finais podem diferir sem desync).
+
+**Resultados medidos (exe de 19/10 com P2b: protocolo v2, K por `--link-delay`)**
+| item | resultado |
+|---|---|
+| 2 jogadores, roteiro da secao 13 | co-op (`0x0203AD10=2`, erro 0), hash host == join (K=0), pacotes validos > 1000 dos dois, ~14 s / 3000 quadros |
+| **4 jogadores** (host + 3 joins, MESMO roteiro, K=0 ou 1) | os 4 no co-op (`0x0203AD30=4`), hash igual, validos > 1000 de cada slot, status host `0x8F9F` / filhos `0x8F0F`; ~21 s |
+| K = 0, 1, 2 (2 jogadores) | co-op, fluxo consistente |
+| K = 3, 4 (2 jogadores) | **co-op nao comeca** (link desligado); o log avisa `K=3 is above 2`; confirma a Nasus |
+| **3 e 4 jogadores com K=2** | **ACHADO NOVO: tambem NAO chega** (mesmo em loopback, sem rede); **K=1 funciona**. O limite K<=2 vale so para 2 jogadores; com 3-4 e K<=1. Pedido: o `auto` (limitado a 2) deve limitar a 1 quando `players >= 3` (velocidade cheia ate RTT ~29 ms nesse caso; periodo ~ (RTT+4)/(K+1)) |
+| hash do host x rede | K=2: o hash do host e o MESMO sem proxy e com latencia 8 ms +- 8 ms de jitter (o fluxo depende so de K) |
+| latencia (TCP real, K=2, `--link-nopace`), RTT -> ms/quadro | 20 -> 13,5; 60 -> 27,6; 120 -> 49,5; 250 -> 96,3. O modelo `(RTT+4)/3` confere. **Nenhum erro em nenhum ping**: tempo real (16,7 ms/quadro) ate RTT ~45 ms; a 250 ms roda a ~10 q/s. Co-op completo com RTT 20 e 250 ms: chega e termina consistente |
+| jitter 30 ms +- 30 | sem erro, dentro do modelo |
+| `auto` | RTT ~0 -> K=0; RTT 61 ms -> K=2 (limite); log `RTT x ms -> input delay K=n (auto)` |
+| filho morto / host morto / conexao cortada | sem travamento: `player 2 disconnected` / `host disconnected (playing without cable)`, rc 0 |
+| rede em buraco-negro | as esperas tem timeout (`KIRBY_LINK_TIMEOUT_MS`, 8 s por padrao): os dois terminam sozinhos |
+| rede congelada 3 s e volta | tolera, sem desconectar, fluxo consistente |
+| 1 mensagem perdida (so no proxy; TCP real nao perde) | derruba a sessao com mensagem clara (`frame order error` no filho, `player 2 disconnected` no host); seguem sem cabo, sem travar. A perda nao e recuperada: aceitavel em TCP, requisito de qualquer transporte futuro (UDP) |
+| **conexao estranha antes do join** (fecha sem HELLO / 464 B de lixo / meia mensagem / tamanho absurdo) | **corrigido no P2b** (era meu achado: o host contava a vaga, fechava o listener e seguia sozinho): `rejected a connection (no valid HELLO)` sem ocupar a vaga; o join de verdade entra e chega ao co-op |
+| versao errada / ROM com 1 byte diferente / 3o join em sala de 2 | recusados (`rejected a connection (protocol version 3, want 2)` / `(different ROM)`; o join mostra `the host rejected this connection (reason n)` e roda sem cabo); o 3o join: `could not join ... running without cable` |
+| desync: `KIRBY_LINK_FAULT=1200` no filho | `[link] DESYNC` nos dois lados, ponto de controle a cada 60 quadros |
+| **desync real: 1 bit invertido num FRAME em transito** | detectado nos dois lados no ponto de controle seguinte (`DESYNC ... at frame 2040`); os fluxos de trocas divergem de verdade (a partir da troca 5015); o jogo **continua rodando** (so avisa): a UI deve oferecer "sair da sessao" |
+| execucoes limpas | nenhum `DESYNC` falso (latencia 5 ms +- 5) |
+Nao testavel hoje: perda recuperavel (UDP), reconexao do filho, host migrando.
+
+**4 jogadores - roteiro e o que mudar nos prompts/launcher**
+- Roteiro: o MESMO da secao 13 para os 4 (`python tools/link_trace.py --coop-keys host|join`): host `...A@1700+8,A@2000+8`, os 3 joins `...,A@2000+8`. Execucao: `--link host --link-players 4 --link-delay 1` e 3x `--link join` com ~1 s de intervalo (o ID do jogador e a ordem de chegada; o host fecha o listener quando a sala enche).
+- Indicadores de chegada: `0x0203AD30 = 4`, `0x0203AD10 = 2`, status do host `0x8F9F` (bits 8-11 = mascara `F`), filhos `0x8F0F`, erro 0.
+- Prompts/launcher: (1) a tela Online tem PLAYERS 2-4: passar `--link-players N` e, com N >= 3, **K maximo 1** (achado acima; o DELAY auto precisa respeitar); (2) o host deve mostrar "esperando N-1 jogadores" e orientar a apertar A no "OK?" so quando todos entraram (o jogo tambem espera ~90 quadros); (3) joins de PCs diferentes chegam em ordem nao deterministica e o ID (cor do Kirby) depende dela: mostrar "voce e o P2/P3/P4"; (4) com varios joins o custo e o do PIOR RTT; (5) se um join cair durante a escolha de pak/partida o jogo segue sem ele (sem erro): avisar na UI; (6) ninguem entra depois do inicio (listener fechado, `session already started`); (7) mostrar o aviso `DESYNC` e dar a opcao de sair.
+
+**Roteiro manual de QA - 2 PCs reais (LAN e internet).** Pre-requisitos: dois Windows com o mesmo `KirbyRecomp` (mesma versao) e a mesma ROM (o host recusa SHA-1 diferente). `host` = PC A (P1), `join` = PC B (P2). Anote hora e resultado de cada passo; falhas de rede valem mais que falhas de jogo.
+1. **Preparo**: nos dois, abrir o launcher, Select ROM, `Play` uma vez para criar `kirby.ini`/`kirby.log`; fechar. Anotar versao, SHA-1 da ROM, IP local (`ipconfig`) e, para internet, o IP publico do host.
+2. **LAN**: no host, permitir `kirby.exe` no firewall (rede privada) ou liberar TCP `47900`; `bind=0.0.0.0` (o padrao 127.0.0.1 so aceita o proprio PC). PC A: Online > Host, jogadores 2, porta 47900. PC B: Online > Join, IP do host. Esperado: A "aguardando 1 jogador" e depois "jogador 2 conectado"; B "conectado como jogador 2 de 2"; log `RTT x ms -> input delay K=n (auto)`.
+3. **Menu ate o co-op** (secao 13): titulo (START) -> FILE 1 (A **duas vezes**) -> START GAME (A) -> popup (DOWN, A = MULTI PLAYER). Esperar a tela TRANSMITTING; no host aparece **OK?** e no join **P2**. Host: A. Os dois: GAME PAK SELECTION, A em cada um. Esperado: contagem e a fase com os dois Kirbys; **cada PC controla o seu** (P1 rosa, P2 laranja no telefone do HUD).
+4. **10 min de jogo**: os dois Kirbys iguais nas duas telas (mesma posicao/inimigos, sem "elastico"), sem tela de erro, audio sem corte. Testes: P2 anda para a direita e P1 espera; P1 engole um inimigo; passar de porta; pausa (START) em um lado; segurar uma tecla por 30 s.
+5. **Latencia real**: `ping -n 20 IP` antes e depois (min/med/max). Esperado (K=2): velocidade cheia ate RTT ~45 ms (2 jogadores; ~29 ms com K=1); acima, camera lenta ~ (RTT+4)/(K+1) ms por quadro mas **sem erro**. Registrar o RTT em que o jogo deixa de ser agradavel.
+6. **Cortes**: (a) fechar o jogo do join (X) no meio: o host segue sozinho em segundos (`player 2 disconnected`); (b) fechar o host: o join segue sem cabo (`host disconnected`); (c) tirar o wi-fi do join por 5 s e religar: anotar (derruba? pausa e volta?); (d) bloquear o jogo no firewall (regra de saida) durante a partida: nenhum processo pode ficar preso mais que ~8 s; (e) hibernar um PC por 30 s.
+7. **Recusa**: IP/porta errados (mensagem em segundos, launcher nao trava); terceiro join em sala de 2 (recusado); join com **ROM diferente** (`different ROM`); versao diferente do programa (`protocol version`). Anotar o texto que a UI mostra.
+8. **Internet**: no roteador do host, encaminhar TCP `47900` para o IP do PC A (ou UPnP). De fora (dados moveis/outra rede): `Test-NetConnection IP_PUBLICO -Port 47900` deve dar `True`. Repetir 2-7. Anotar CGNAT (se o IP do roteador nao e o publico, nao funciona sem VPN/relay) e antivirus que pergunte.
+9. **3-4 jogadores** (se houver PCs): host com N jogadores e **K=1**; joins um a um; conferir IDs; repetir 3-4; derrubar um join no meio.
+10. **Colher logs** (em CADA PC, mesmo se tudo funcionou): `kirby.log` (linhas `[link]`), o JSON de `--link-status ARQ` (RTT, quadros em espera, bytes, desync), a saida do `--bench` se rodou por linha de comando (`LINK exchange hash: <hash> over N exchanges, F frames`: com K=0 os dois PCs imprimem o mesmo hash; com K>0 compare os logs de trocas via `KIRBY_SIO_LOG`: o do filho e prefixo do do host), prints de erros, `ping`, hora e o que se fazia. Enviar tudo com a versao e o SHA-1 da ROM.
+**Aprovacao**: 10 min de co-op sem erro nem divergencia visivel; nenhum `DESYNC`; desconexao nao trava processo; mensagens claras para IP/porta/ROM/versao errados. **Bloqueiam release**: travamento de processo, "Communication Error" em rede boa, divergencia (Kirbys em lugares diferentes), conexao estranha derrubando a sala.
+
+**Erros 5 e 7 (pendencias antigas)**: nenhum caminho novo: o erro 5 so nasce em `0x08030D4C` (lobby/sessao, nao do co-op normal) e o 7 exige profundidade alvo >= 2, que so essa funcao escreve.

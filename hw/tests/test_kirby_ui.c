@@ -262,7 +262,7 @@ static void scen_a(KlStatus *o, int s) {
         break;
     }
     case 8:
-        CHECK(!strcmp(kl_test_focus(), "size1"), "Tab wraps around (no SELECT ROM button => first is 1X)");
+        CHECK(!strcmp(kl_test_focus(), "online"), "Tab wraps around (no SELECT ROM button => first is ONLINE...)");
         key(SDLK_TAB, 1);                                  /* Shift+Tab goes back to quit */
         break;
     case 9:

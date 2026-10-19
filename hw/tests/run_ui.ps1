@@ -44,4 +44,11 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host "== test_kirby_ui_save (kirby_ui.dll)"
 & "$out\test_kirby_ui_save.exe" $out
 if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE }
+# 6) ONLINE page: text fields, keypad, return codes, live poll, layout checks
+& $gcc @flags -o "$out\test_kirby_ui_online.exe" "$root\hw\tests\test_kirby_ui_online.c" "$root\hw\config_ini.c" `
+    "-L$out" -lkirby_ui "-L$Sdl\lib" -lSDL2
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Write-Host "== test_kirby_ui_online (kirby_ui.dll)"
+& "$out\test_kirby_ui_online.exe" $out
+if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE }
 exit $rc

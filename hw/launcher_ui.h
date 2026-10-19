@@ -18,6 +18,18 @@
  *                            ("OVERWRITE CURRENT SAVE? A BACKUP IS KEPT" YES / NO) - the launcher must back
  *                            up the current save before overwriting it and validate the size (32768 bytes).
  *
+ *   ONLINE page (button ONLINE... in the header, shown instead of SELECT ROM... while a verified ROM is loaded):
+ *   fields NAME / ADDRESS / PORT, PLAYERS 2-4, DELAY 0-100, buttons HOST / JOIN / START / LEAVE, a list of the 4 slots
+ *   with state and ping and a state line. The values are saved to kirby.ini [link] (mode/host/port/players/delay/name).
+ *   Return codes (the launcher acts, then calls kl_run again; call kl_set_start_page(KL_PAGE_ONLINE) first so the
+ *   screen reopens on the ONLINE page):
+ *     KL_ONLINE_HOST  = 6   start hosting with [link] players/port/delay/name ([link] mode is now host)
+ *     KL_ONLINE_JOIN  = 7   join [link] host:port ([link] mode is now join)
+ *     KL_ONLINE_LEAVE = 8   leave / stop hosting ([link] mode is now off)
+ *     KL_ONLINE_START = 9   host only: start the game with the players that are connected
+ *   The live data (slots, ping, messages) comes from a second poll set with kl_set_online_poll(), called with
+ *   the normal poll (~10x/s, UI thread).
+ *
  * The window follows the video options: size = 240*scale x 160*scale (never below 480x320, the logical
  * canvas of the UI), "Fullscreen" applies to the launcher too, and "Scaling" picks how the canvas is
  * mapped to the window: integer (whole-number zoom, black bars), fit (aspect preserved) or stretch
@@ -45,10 +57,38 @@ typedef struct {
 
 typedef void (*KlPoll)(KlStatus *out);   /* called ~10x/s from the UI thread */
 
-enum { KL_QUIT = 0, KL_PLAY = 1, KL_PICK_ROM = 2, KL_OPEN_SAVE_DIR = 3, KL_EXPORT_SAVE = 4, KL_IMPORT_SAVE = 5 };
+enum { KL_QUIT = 0, KL_PLAY = 1, KL_PICK_ROM = 2, KL_OPEN_SAVE_DIR = 3, KL_EXPORT_SAVE = 4, KL_IMPORT_SAVE = 5,
+       KL_ONLINE_HOST = 6, KL_ONLINE_JOIN = 7, KL_ONLINE_LEAVE = 8, KL_ONLINE_START = 9 };
+
+/* ---- ONLINE page: live data from the launcher ---- */
+enum {   /* KlOnline.state */
+    KLO_OFFLINE = 0,        /* not connected: HOST / JOIN enabled, fields editable */
+    KLO_HOSTING = 1,        /* hosting, waiting for players (START enabled with >= 2 connected) */
+    KLO_CONNECTING = 2,     /* joining in progress */
+    KLO_CONNECTED = 3,      /* joined a host */
+    KLO_PLAYING = 4,        /* a game is running */
+    KLO_DESYNC = 5,         /* desync detected */
+    KLO_LOST = 6            /* connection lost (LEAVE to reset) */
+};
+enum { KLS_EMPTY = 0, KLS_CONNECTING = 1, KLS_CONNECTED = 2, KLS_READY = 3, KLS_LOST = 4 };   /* KlOnline.slots[i] */
+
+typedef struct {
+    int state;                /* KLO_* */
+    int slots[4];             /* KLS_* for P1..P4 (P1 is the host) */
+    int ping_ms[4];           /* round trip in ms; < 0 = unknown (shown only for connected/ready slots) */
+    char names[4][16];        /* player names ('' = unknown) */
+    int self_slot;            /* this player's slot 0..3, -1 = unknown (highlighted in the list) */
+    char my_address[48];      /* host: address the others should use, e.g. "192.168.1.5:47900" (COPY button) */
+    char message[96];         /* optional line under the state (errors, hints); '' = the UI shows its own hint */
+} KlOnline;
+typedef void (*KlOnlinePoll)(KlOnline *out);   /* the UI zeroes *out before each call */
+
+enum { KL_PAGE_MAIN = 0, KL_PAGE_ONLINE = 3 };
 
 KL_API int kl_run(const char *ini_path, KlPoll poll);
 KL_API const char *kl_dropped_path(void);        /* path dropped on the window (valid until the next kl_run) */
+KL_API void kl_set_online_poll(KlOnlinePoll poll);   /* NULL = no live data (everything shows as offline/empty) */
+KL_API void kl_set_start_page(int page);          /* KL_PAGE_MAIN (default) or KL_PAGE_ONLINE; applies to the next kl_run calls */
 
 /* ---- test hooks (headless tests drive the UI with simulated events) ---- */
 KL_API void kl_set_poll_interval(int ms);         /* default 100 */
@@ -64,6 +104,9 @@ KL_API int kl_test_capture(void);                 /* CFG_BTN_* being remapped, -
 KL_API const char *kl_test_note(void);            /* current warning/confirmation line ('' = none) */
 KL_API void kl_test_fake_pad(int present, int axis_x, int axis_y);   /* -1 = use the real controller */
 KL_API int kl_test_pad_present(void);
+KL_API int kl_test_editing(void);                 /* text field being typed in: 0 name, 1 address, 2 port, -1 none */
+KL_API int kl_test_keypad(void);                  /* field edited with the on-screen keypad (0..2), -1 = closed */
+KL_API const char *kl_test_field(int f);          /* current text of field f (0 name, 1 address, 2 port) */
 KL_API int kl_test_confirm(void);                 /* 1 while the import confirmation is open */
 KL_API int kl_test_text_count(void);              /* free texts drawn on the last frame (not inside buttons) */
 KL_API int kl_test_text(int i, int *x, int *y, int *w, int *h);   /* bounding box of free text i */

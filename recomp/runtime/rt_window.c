@@ -248,7 +248,18 @@ paced_done:
     if (prev_hook) prev_hook(frame); /* roteiro --keys/--snap */
 }
 
+#ifdef RT_WINDOW
+static int link_idle(void) {   /* esperas do link (rede lenta): a janela nao fica "sem resposta" */
+    if (!use_window) return 1;
+    if (!win_poll()) { rt_cpu->stop = RT_STOP_FRAMES; return 0; }
+    return 1;
+}
+#endif
+
 void rt_window_install(int window, int scale, int pace) {
+#ifdef RT_WINDOW
+    { extern int (*rt_link_idle)(void); rt_link_idle = link_idle; }
+#endif
     use_window = window;
     { extern int rt_link_nopace; paced = pace && !rt_link_nopace; }
     t_start = rt_now_us();

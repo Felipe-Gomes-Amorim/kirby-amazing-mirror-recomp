@@ -28,7 +28,7 @@ SEND, RECV, STATUS, FLAGS, LINKON, SESSION, NPLAYERS = 0x030036B0, 0x03002490, 0
 DETECT, DETECT_MODE, ERR = 0x03000490, 0x0300050C, 0x02038580
 
 PEEK_ADDRS = ([SEND + 4 * i for i in range(5)] + [RECV + 4 * i for i in range(20)] +
-              [STATUS, FLAGS, LINKON, SESSION, NPLAYERS])           # 30 palavras (limite do --peek: 32)
+              [STATUS, FLAGS, LINKON, SESSION, NPLAYERS, ERR])    # 31 palavras (limite do --peek: 32)
 
 # Roteiro de teclas (formato --keys do rt_boot) que leva DUAS instancias (--link host / --link join) do titulo ate a
 # sessao cooperativa "ADVENTURE WITH 4 KIRBYS! > MULTI PLAYER". Verificado: 5/5 execucoes identicas (md5 do quadro 3000).

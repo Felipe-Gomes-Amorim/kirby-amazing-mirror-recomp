@@ -100,7 +100,7 @@ static void dump_frame(const char *name) {
 
 /* ---------------------------------------------------------------- layout checks */
 static const char *const MAIN_IDS[] = {
-    "selectrom", "size1", "size2", "size3", "size4", "size5", "size6", "fullscreen", "scale_integer", "scale_fit",
+    "selectrom", "online", "size1", "size2", "size3", "size4", "size5", "size6", "fullscreen", "scale_integer", "scale_fit",
     "scale_stretch", "volume", "mute", "save_open", "save_export", "save_import", "keyboard", "controller", "reset",
     "play", "quit" };
 #define NMAIN ((int)(sizeof MAIN_IDS / sizeof MAIN_IDS[0]))
@@ -180,6 +180,7 @@ static void scen_enabled(KlStatus *o, int s) {
         CHECK(!kl_test_enabled("save_open") && !kl_test_enabled("save_export") && !kl_test_enabled("save_import"),
               "SAVE buttons are disabled with no ROM");
         CHECK(count_color(0xFFE6E6F0u, 84, 236, 224, 258) == 0, "disabled button is drawn greyed out (no bright pixels)");
+        kl_test_set_focus("size1");                       /* (focus on ONLINE vanished with the ROM) */
         click("save_import");
         key(SDLK_RETURN);
         break;
