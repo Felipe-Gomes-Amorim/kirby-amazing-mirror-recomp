@@ -35,9 +35,9 @@ foreach ($n in 'host', 'join') {
 }
 function Q($s) { '"' + $s + '"' }
 $common = @('--link-port', $Port, '--link-required', '--link-delay', $Delay)
-$hostArgs = @((Q $Rom), '--sav', (Q (Join-Path $dir 'host.sav')), '--ini', (Q (Join-Path $dir 'host.ini')),
+$hostArgs = @((Q $Rom), '--gui', '--sav', (Q (Join-Path $dir 'host.sav')), '--ini', (Q (Join-Path $dir 'host.ini')),
     '--link', 'host', '--link-players', 2, '--link-status', (Q (Join-Path $dir 'host.json'))) + $common
-$joinArgs = @((Q $Rom), '--sav', (Q (Join-Path $dir 'join.sav')), '--ini', (Q (Join-Path $dir 'join.ini')),
+$joinArgs = @((Q $Rom), '--gui', '--sav', (Q (Join-Path $dir 'join.sav')), '--ini', (Q (Join-Path $dir 'join.ini')),
     '--link', 'join', '--link-host', '127.0.0.1', '--link-status', (Q (Join-Path $dir 'join.json')), '--mute') + $common
 
 Write-Host "exe : $($exe.FullName)"

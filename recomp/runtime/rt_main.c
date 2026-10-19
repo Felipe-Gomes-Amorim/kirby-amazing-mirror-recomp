@@ -160,6 +160,8 @@ int main(int argc, char **argv) {
         first = 2;
     }
     int gui_defaults = argc <= 2;   /* so a ROM (ou nada): modo jogo, janela escala 3 */
+    for (int i = first; i < argc; i++)   /* --gui: o launcher passa opcoes (--link ...) e ainda quer o modo jogo */
+        if (!strcmp(argv[i], "--gui")) gui_defaults = 1;
     if (!rom_path) {
         if (!find_rom(found, sizeof found)) {
             fatal_msg("ROM not found.\nDrag the .gba file onto kirby.exe, or put "
@@ -192,7 +194,8 @@ int main(int argc, char **argv) {
     }
     hw_set_keys(0x03FF);
     for (int i = first; i < argc; i++) {
-        if (!strcmp(argv[i], "--no-stop")) rt_opt_stop_at_vblank_wait = 0;
+        if (!strcmp(argv[i], "--gui")) { /* ja tratado acima */ }
+        else if (!strcmp(argv[i], "--no-stop")) rt_opt_stop_at_vblank_wait = 0;
         else if (!strcmp(argv[i], "--window")) {
             window = 1;
             if (i + 1 < argc && argv[i + 1][0] >= '1' && argv[i + 1][0] <= '9') { scale = atoi(argv[++i]); scale_explicit = 1; }

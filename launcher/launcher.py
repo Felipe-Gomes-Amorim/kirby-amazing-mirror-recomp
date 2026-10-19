@@ -514,7 +514,7 @@ class LauncherEnv:
         self.backup_now()                              # snapshot of the save before the game can touch it
         log('starting ' + exe)
         # --link off: a plain Play never hosts/joins, whatever a stale [link] mode in kirby.ini says
-        return subprocess.run([exe, self.rom, '--link', 'off'], cwd=os.path.dirname(exe)).returncode
+        return subprocess.run([exe, self.rom, '--gui', '--link', 'off'], cwd=os.path.dirname(exe)).returncode
 
     # ---- online (launcher/flow.py OnlineSession; NOTES.md "Online: ligacao no launcher") ---------------------
     def online_paths(self):
@@ -561,7 +561,7 @@ class LauncherEnv:
         if not exe:
             return None
         self.backup_now()
-        args = [exe, self.rom, '--link', role, '--link-port', str(p['port']), '--link-status', status, '--link-required']
+        args = [exe, self.rom, '--gui', '--link', role, '--link-port', str(p['port']), '--link-status', status, '--link-required']
         if role == 'host':
             args += ['--link-players', str(p['players']), '--link-delay', str(p['delay']),
                      '--link-bind', '0.0.0.0', '--link-start-file', flag]
