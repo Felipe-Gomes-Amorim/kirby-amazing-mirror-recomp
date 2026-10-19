@@ -206,7 +206,7 @@ static void scen_fields(int s) {
         kl_test_set_focus("online_delay");
         break;
     case 24:
-        key(SDLK_RIGHT); key(SDLK_RIGHT); key(SDLK_RIGHT);          /* auto -> 0 -> 1 -> 2 */
+        key(SDLK_RIGHT); key(SDLK_RIGHT); key(SDLK_RIGHT);          /* auto -> 0 -> 1 -> stops at 1 (4 players: max K is 1) */
         break;
     case 25:
         click("online_name");
@@ -432,7 +432,7 @@ int main(int argc, char **argv) {
     CHECK(rc == KL_ONLINE_HOST, "HOST returns KL_ONLINE_HOST (6)");
     cfg_load(ini, &c);
     CHECK(!strcmp(c.link_mode, "host") && !strcmp(c.link_host, "192.168.1.5") && c.link_port == 5123 &&
-          c.link_players == 4 && c.link_delay == 2 && !strcmp(c.link_name, "Pink Puff"),
+          c.link_players == 4 && c.link_delay == 1 && !strcmp(c.link_name, "Pink Puff"),
           "HOST saved mode/host/port/players/delay/name into [link]");
 
     reset_online();

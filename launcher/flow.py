@@ -20,7 +20,12 @@ import time
 STATE_NONE, STATE_PREPARING, STATE_FAST, STATE_READY, STATE_ERROR = 0, 1, 2, 3, 4
 KL_QUIT, KL_PLAY, KL_PICK_ROM = 0, 1, 2
 KL_OPEN_SAVE_DIR, KL_EXPORT_SAVE, KL_IMPORT_SAVE = 3, 4, 5
+KL_ONLINE_HOST, KL_ONLINE_JOIN, KL_ONLINE_LEAVE, KL_ONLINE_START = 6, 7, 8, 9
+KL_PAGE_MAIN, KL_PAGE_ONLINE = 0, 3
+KLO_OFFLINE, KLO_HOSTING, KLO_CONNECTING, KLO_CONNECTED, KLO_PLAYING, KLO_DESYNC, KLO_LOST = range(7)
+KLS_EMPTY, KLS_CONNECTING, KLS_CONNECTED, KLS_READY, KLS_LOST = range(5)
 EXIT_BACK_TO_LAUNCHER = 77       # kirby.exe exits with this when the user presses F1
+EXIT_NO_LINK = 78                # kirby.exe --link-required exits with this when it could not set up the cable
 
 # (marker printed by tools/build_all.py, weight in percent)
 BUILD_STEPS = [('1/5', 5), ('2/5', 2), ('3/5', 2), ('4/5', 5), ('5/5', 86)]
@@ -41,6 +46,16 @@ class KlStatusC(ctypes.Structure):
 
 
 KlPoll = ctypes.CFUNCTYPE(None, ctypes.POINTER(KlStatusC))
+
+
+class KlOnlineC(ctypes.Structure):
+    """Mirror of KlOnline in hw/launcher_ui.h."""
+    _fields_ = [('state', ctypes.c_int), ('slots', ctypes.c_int * 4), ('ping_ms', ctypes.c_int * 4),
+                ('names', (ctypes.c_char * 16) * 4), ('self_slot', ctypes.c_int),
+                ('my_address', ctypes.c_char * 48), ('message', ctypes.c_char * 96)]
+
+
+KlOnlinePoll = ctypes.CFUNCTYPE(None, ctypes.POINTER(KlOnlineC))
 
 
 def read_ini_value(path, section, key, default=None):
@@ -73,6 +88,230 @@ def read_scaling(ini_path):
     if legacy == '1':
         return 'integer'
     return 'fit'
+
+
+def set_ini_value(path, section, key, value):
+    """Set one key of kirby.ini in place (creates the key/section when missing; atomic replace). Never raises."""
+    try:
+        try:
+            with open(path, encoding='utf-8-sig', errors='replace') as f:
+                lines = f.read().splitlines()
+        except OSError:
+            lines = []
+        cur, sec_at, done = None, None, False
+        for i, line in enumerate(lines):
+            t = line.split(';', 1)[0].split('#', 1)[0].strip()
+            if t.startswith('[') and t.endswith(']'):
+                if cur == section.lower() and not done:
+                    lines.insert(i, '%s=%s' % (key, value))
+                    done = True
+                    break
+                cur = t[1:-1].strip().lower()
+                if cur == section.lower():
+                    sec_at = i
+            elif cur == section.lower() and '=' in t and t.split('=', 1)[0].strip().lower() == key.lower():
+                lines[i] = '%s=%s' % (key, value)
+                done = True
+                break
+        if not done:
+            if sec_at is None:
+                lines += ['', '[%s]' % section]
+            lines.append('%s=%s' % (key, value))
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
+            f.write('\n'.join(lines) + '\n')
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def read_link_status(path):
+    """The JSON that `kirby.exe --link-status FILE` keeps up to date; {} when missing or half written."""
+    import json
+    try:
+        with open(path, encoding='utf-8') as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+class OnlineSession:
+    """One online session = one `kirby.exe --link host|join` process, seen through its status JSON.
+    Pure logic (the process, the files and the address come from `env`), unit-tested with a fake env.
+
+    env.online_paths() -> (status_json, start_flag)      fresh files for this session
+    env.online_launch(role, params, status, start_flag) -> process-like (poll(), terminate()) or None
+    env.online_request_start(start_flag)                 host: stop waiting for more players
+    env.online_address(port) -> 'ip:port'
+    env.online_failure_hint() -> last [link] line of kirby.log ('' if none)
+    """
+    CONNECT_TIMEOUT = 15.0
+
+    def __init__(self, env, clock=time.time):
+        self.env, self.clock = env, clock
+        self.lock = threading.Lock()
+        self.phase = 'idle'                       # idle | preparing | running | ended
+        self.role, self.params = None, {}
+        self.proc = None
+        self.status_path = self.start_path = None
+        self.message, self.seen, self.t0 = '', 0, 0.0
+        self.address = ''
+        self._js, self._js_t = {}, 0.0
+
+    def active(self):
+        return self.phase in ('preparing', 'running')
+
+    def begin(self, role, params):
+        with self.lock:
+            if self.active():
+                return
+            self.role, self.params = role, dict(params)
+            self.phase, self.message, self.seen, self.t0 = 'preparing', '', 0, self.clock()
+            self.address = self.env.online_address(params['port']) if role == 'host' else ''
+            self._js, self._js_t = {}, 0.0
+        threading.Thread(target=self._launch, daemon=True).start()
+
+    def _launch(self):
+        proc, err = None, ''
+        try:
+            self.status_path, self.start_path = self.env.online_paths()
+            proc = self.env.online_launch(self.role, self.params, self.status_path, self.start_path)
+        except Exception as e:                           # never let the worker die silently
+            self.env.log('online launch failed: %r' % (e,))
+            err = 'Could not start the game. See launcher.log'
+        with self.lock:
+            if self.phase != 'preparing':                # the user left while we were preparing
+                if proc is not None:
+                    self._kill(proc)
+                return
+            if proc is None:
+                self.phase, self.message = 'ended', err or 'Could not prepare the game. See launcher.log'
+            else:
+                self.proc, self.phase, self.t0 = proc, 'running', self.clock()
+
+    @staticmethod
+    def _kill(proc):
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+    def leave(self):
+        with self.lock:
+            if self.proc is not None:
+                self._kill(self.proc)
+            self.proc, self.phase, self.message = None, 'idle', ''
+
+    def start_game(self):
+        if self.phase == 'running' and self.role == 'host' and self.start_path:
+            self.env.online_request_start(self.start_path)
+
+    def _status(self):
+        if self.clock() - self._js_t >= 0.25:
+            self._js, self._js_t = read_link_status(self.status_path) if self.status_path else {}, self.clock()
+        return self._js
+
+    def _reap(self):
+        rc = self.proc.poll()
+        if rc is None:
+            return
+        self.proc, self.phase = None, 'ended'
+        if rc == EXIT_NO_LINK:
+            hint = self.env.online_failure_hint()
+            self.message = ('Could not connect: ' + hint) if hint else 'Could not connect. Check the address and the port.'
+        elif rc in (0, EXIT_BACK_TO_LAUNCHER):
+            self.message = 'The session ended.'
+        else:
+            self.message = 'The game closed unexpectedly (code %d). See kirby.log' % rc
+
+    def snapshot(self):
+        """dict(state, slots[4], ping[4], names[4], self_slot, address, message) for the UI poll."""
+        with self.lock:
+            if self.phase == 'running':
+                self._reap()
+            if self.phase == 'running' and self.role == 'join':
+                st = self._status().get('state')
+                if st in (None, 'connecting') and self.clock() - self.t0 > self.CONNECT_TIMEOUT:
+                    self._kill(self.proc)
+                    self.proc, self.phase = None, 'ended'
+                    self.message = 'Could not reach %s:%s. Check the address, the port and that the host is waiting.' % (
+                        self.params.get('host', '?'), self.params.get('port', '?'))
+            out = dict(state=KLO_OFFLINE, slots=[KLS_EMPTY] * 4, ping=[-1] * 4, names=[''] * 4, self_slot=-1,
+                       address='', message=self.message)
+            if self.phase == 'idle' or self.phase == 'ended':
+                return out
+            host = self.role == 'host'
+            out['address'] = self.address
+            if self.phase == 'preparing':
+                out['state'] = KLO_HOSTING if host else KLO_CONNECTING
+                out['message'] = 'Preparing the game...'
+                out['self_slot'] = 0 if host else -1
+                return out
+            js = self._status()
+            st = js.get('state')
+            mask = int(js.get('mask', 0) or 0) | (1 if host else 0)
+            self.seen |= mask
+            self_slot = 0 if host else int(js.get('player', -1) if js.get('player', -1) is not None else -1)
+            playing = st in ('lockstep', 'free')
+            for i in range(4):
+                if mask >> i & 1:
+                    out['slots'][i] = KLS_READY if playing else KLS_CONNECTED
+                elif self.seen >> i & 1:
+                    out['slots'][i] = KLS_LOST
+            if not host and not mask:
+                out['slots'][0] = KLS_CONNECTING
+            rtt = js.get('rtt_ms') or []
+            for i in range(1, min(4, len(rtt))):
+                try:
+                    if mask >> i & 1 and i != self_slot and float(rtt[i]) > 0:
+                        out['ping'][i] = int(round(float(rtt[i])))
+                except (TypeError, ValueError):
+                    pass
+            if not host and self_slot != 0:                  # a child measures nothing: show the host's RTT if known
+                best = [float(r) for r in rtt if isinstance(r, (int, float)) and r > 0]
+                if best:
+                    out['ping'][0] = int(round(max(best)))
+            out['self_slot'] = self_slot if 0 <= self_slot < 4 else -1
+            if 0 <= out['self_slot'] < 4:
+                out['names'][out['self_slot']] = str(self.params.get('name', ''))[:15]
+            if js.get('desync'):
+                out['state'], out['message'] = KLO_DESYNC, 'The two games differ (desync). Press LEAVE and start again.'
+            elif st == 'dropped':
+                out['state'], out['message'] = KLO_LOST, 'The connection was lost. Press LEAVE.'
+            elif playing:
+                out['state'] = KLO_PLAYING
+                out['message'] = ('In the game: START GAME > MULTI PLAYER (host confirms OK?). Delay: %s frame(s).'
+                                  % js.get('delay', '?'))
+            elif host:
+                out['state'] = KLO_HOSTING
+                out['message'] = 'Give your friends the address above. START begins with who is connected.'
+            elif st in ('waiting', 'starting'):
+                out['state'] = KLO_CONNECTED
+                out['message'] = 'Connected. Waiting for the host to start.'
+            else:
+                out['state'] = KLO_CONNECTING
+                out['message'] = 'Connecting to %s:%s ...' % (self.params.get('host', '?'), self.params.get('port', '?'))
+            return out
+
+
+def online_params(ini_path):
+    """[link] section of kirby.ini as the launcher needs it (same defaults as the runtime and the UI)."""
+    def num(key, default, lo, hi):
+        try:
+            v = int(read_ini_value(ini_path, 'link', key, default))
+        except (TypeError, ValueError):
+            return default
+        return v if lo <= v <= hi else default
+    delay = (read_ini_value(ini_path, 'link', 'delay', 'auto') or 'auto').strip().lower()
+    if delay != 'auto':
+        try:
+            delay = str(max(0, min(8, int(delay))))
+        except ValueError:
+            delay = 'auto'
+    return dict(host=(read_ini_value(ini_path, 'link', 'host', '127.0.0.1') or '127.0.0.1').strip(),
+                port=num('port', 47900, 1, 65535), players=num('players', 2, 2, 4), delay=delay,
+                name=(read_ini_value(ini_path, 'link', 'name', 'Player') or 'Player').strip()[:15])
 
 
 class BuildMonitor:
@@ -199,8 +438,26 @@ class Controller:
         if not show and not shift_held and self.playable():
             return self._play()
         poll = self._make_poll()
+        self.online = OnlineSession(self.env)
+        if hasattr(ui, 'set_online_poll'):
+            ui.set_online_poll(self._make_online_poll())
+        try:
+            return self._loop(ui, ini_path, poll)
+        finally:
+            self.online.leave()                                # closing the launcher ends the session
+            set_ini_value(ini_path, 'link', 'mode', 'off')      # a stray mode=host must not outlive the launcher
+
+    def _loop(self, ui, ini_path, poll):
+        page = KL_PAGE_MAIN
         while True:
+            if hasattr(ui, 'set_start_page'):
+                ui.set_start_page(page)
+            page = KL_PAGE_MAIN
             r = ui.run(ini_path, poll)
+            if r in (KL_ONLINE_HOST, KL_ONLINE_JOIN, KL_ONLINE_LEAVE, KL_ONLINE_START):
+                page = KL_PAGE_ONLINE                           # reopen on the ONLINE page after the action
+                self._online_action(r, ini_path)
+                continue
             if r == KL_QUIT:
                 return 0
             if r == KL_PICK_ROM:
@@ -217,7 +474,7 @@ class Controller:
                     self.env.log('%s failed: %r' % (action, e))
                 continue
             if r == KL_PLAY:
-                if not self.playable():
+                if not self.playable() or self.online.active():
                     continue                              # Play is disabled in the UI; be safe anyway
                 code = self._play()
                 if code == EXIT_BACK_TO_LAUNCHER:
@@ -230,6 +487,37 @@ class Controller:
         if not exe:
             return 2
         return self.env.run_game(exe)
+
+    def _online_action(self, code, ini_path):
+        """HOST / JOIN / LEAVE / START from the ONLINE page. The UI already saved the fields into [link]."""
+        try:
+            if code == KL_ONLINE_LEAVE:
+                self.online.leave()
+            elif code == KL_ONLINE_START:
+                self.online.start_game()
+            elif not self.playable():
+                self.online.message = 'The game is still being prepared. Try again in a moment.'
+            else:
+                self.online.begin('host' if code == KL_ONLINE_HOST else 'join', online_params(ini_path))
+        except Exception as e:                               # an online failure must never take the launcher down
+            self.env.log('online action %d failed: %r' % (code, e))
+        set_ini_value(ini_path, 'link', 'mode', 'off')       # the session got its settings on the command line
+
+    def _make_online_poll(self):
+        def poll(out):
+            snap = self.online.snapshot()
+            o = out.contents
+            o.state = snap['state']
+            for i in range(4):
+                o.slots[i] = snap['slots'][i]
+                o.ping_ms[i] = snap['ping'][i]
+                o.names[i] = snap['names'][i].encode('ascii', 'replace')[:15]
+            o.self_slot = snap['self_slot']
+            o.my_address = snap['address'].encode('ascii', 'replace')[:47]
+            o.message = snap['message'].encode('ascii', 'replace')[:95]
+        cb = KlOnlinePoll(poll)
+        self._online_poll_ref = cb
+        return cb
 
     def _make_poll(self):
         def poll(out):
@@ -252,6 +540,14 @@ class FakeUI:
         self.script, self.log, self.max_polls = list(script or []), log or (lambda m: None), max_polls
         self.interval = interval
         self.seen = []
+        self.pages = []                                   # start pages requested before each run
+        self.online_poll = None
+
+    def set_start_page(self, page):
+        self.pages.append(page)
+
+    def set_online_poll(self, cb):
+        self.online_poll = cb
 
     def run(self, ini_path, poll):
         st = KlStatusC()
@@ -271,7 +567,8 @@ class FakeUI:
                     continue
                 self.script.pop(0)
                 return {'play': KL_PLAY, 'quit': KL_QUIT, 'pick': KL_PICK_ROM,
-                        'wait-ready': KL_PLAY, 'wait-fast': KL_PLAY}.get(want, KL_QUIT)
+                        'wait-ready': KL_PLAY, 'wait-fast': KL_PLAY, 'host': KL_ONLINE_HOST,
+                        'join': KL_ONLINE_JOIN, 'leave': KL_ONLINE_LEAVE, 'start': KL_ONLINE_START}.get(want, KL_QUIT)
             if st.state in (STATE_FAST, STATE_READY):
                 return KL_PLAY
             n += 1

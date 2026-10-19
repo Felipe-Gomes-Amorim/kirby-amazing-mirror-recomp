@@ -495,7 +495,64 @@ class LauncherEnv:
     def run_game(self, exe):
         self.backup_now()                              # snapshot of the save before the game can touch it
         log('starting ' + exe)
-        return subprocess.run([exe, self.rom], cwd=os.path.dirname(exe)).returncode
+        # --link off: a plain Play never hosts/joins, whatever a stale [link] mode in kirby.ini says
+        return subprocess.run([exe, self.rom, '--link', 'off'], cwd=os.path.dirname(exe)).returncode
+
+    # ---- online (launcher/flow.py OnlineSession; NOTES.md "Online: ligacao no launcher") ---------------------
+    def online_paths(self):
+        d = os.path.join(BASE, 'online')
+        os.makedirs(d, exist_ok=True)
+        status, flag = os.path.join(d, 'link_status.json'), os.path.join(d, 'start.flag')
+        for p in (status, status + '.tmp', flag):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        return status, flag
+
+    def online_address(self, port):
+        """The address friends should type: this PC's LAN IP (UDP connect sends nothing) and the port."""
+        import socket
+        ip = '127.0.0.1'
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(('10.255.255.255', 1))
+            ip = s.getsockname()[0]
+            s.close()
+        except OSError:
+            pass
+        return '%s:%s' % (ip, port)
+
+    def online_request_start(self, flag):
+        with open(flag, 'w') as f:
+            f.write('1')
+
+    def online_failure_hint(self):
+        """Last [link] line of kirby.log (it sits next to the ROM), shortened for the status line."""
+        try:
+            with open(os.path.join(os.path.dirname(self.rom), 'kirby.log'), encoding='utf-8', errors='replace') as f:
+                lines = [l.strip() for l in f.readlines()[-60:] if '[link]' in l]
+            return lines[-1].split('[link]', 1)[1].strip()[:80] if lines else ''
+        except OSError:
+            return ''
+
+    def online_launch(self, role, p, status, flag):
+        """Start `kirby.exe --link host|join` (the interpreter build: every player runs the same code, which the
+        lockstep needs). Returns the Popen, or None when the game could not be prepared."""
+        exe = build_interp(self.rom, self.out_dir, _ProgressAdapter(lambda pct, txt: None))
+        if not exe:
+            return None
+        self.backup_now()
+        args = [exe, self.rom, '--link', role, '--link-port', str(p['port']), '--link-status', status, '--link-required']
+        if role == 'host':
+            args += ['--link-players', str(p['players']), '--link-delay', str(p['delay']),
+                     '--link-bind', '0.0.0.0', '--link-start-file', flag]
+        else:
+            args += ['--link-host', p['host']]
+        env = dict(os.environ)
+        env['KIRBY_LINK_WAIT_S'] = '300'               # a host waits for friends for up to 5 minutes
+        log('starting online (%s): %s' % (role, ' '.join(args[2:])))
+        return subprocess.Popen(args, cwd=os.path.dirname(exe), env=env)
 
     def pick_new_rom(self):
         rom = pick_rom()
@@ -532,6 +589,16 @@ class KlUI:
 
     def run(self, ini_path, poll):
         return self.dll.kl_run(ini_path.encode('utf-8'), poll)
+
+    def set_online_poll(self, cb):
+        if hasattr(self.dll, 'kl_set_online_poll'):
+            self.dll.kl_set_online_poll.argtypes = [self.flow.KlOnlinePoll]
+            self.dll.kl_set_online_poll(cb)
+
+    def set_start_page(self, page):
+        if hasattr(self.dll, 'kl_set_start_page'):
+            self.dll.kl_set_start_page.argtypes = [ctypes.c_int]
+            self.dll.kl_set_start_page(int(page))
 
 
 def shift_held():

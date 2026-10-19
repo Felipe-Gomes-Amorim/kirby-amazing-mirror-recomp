@@ -370,7 +370,8 @@ static void set_note(const char *s, int err) {
 
 static int *slider_ref(int kind) { return kind == 1 ? &cfg.deadzone : kind == 2 ? &cfg.link_delay : &cfg.volume; }
 static int slider_min(int kind) { return kind == 2 ? -1 : 0; }           /* link delay: -1 = auto */
-static int slider_max(int kind) { return kind == 1 ? 32767 : kind == 2 ? 8 : 100; }
+/* link delay: the game tolerates K<=2 with 2 players and K<=1 with 3-4 (NOTES 'Cabo link P2c') */
+static int slider_max(int kind) { return kind == 1 ? 32767 : kind == 2 ? (cfg.link_players >= 3 ? 1 : 2) : 100; }
 static int slider_step(int kind) { return kind == 1 ? 1000 : kind == 2 ? 1 : 5; }
 
 static void set_slider(int kind, int lx, const Widget *k) {
@@ -514,7 +515,11 @@ static void keypad_close(int keep) {
 static int online_activate(const char *id) {
     if (!strcmp(id, "online")) { page = KL_PAGE_ONLINE; capture = -1; focus = 0; sync_fields(); return 1; }
     if (!strcmp(id, "online_back")) { end_edit(); commit_fields(); page = 0; focus = 0; return 1; }
-    if (!strncmp(id, "online_p", 8) && id[8] >= '2' && id[8] <= '4') { cfg.link_players = id[8] - '0'; save_cfg(); return 1; }
+    if (!strncmp(id, "online_p", 8) && id[8] >= '2' && id[8] <= '4') {
+        cfg.link_players = id[8] - '0';
+        if (cfg.link_delay > slider_max(2)) cfg.link_delay = slider_max(2);
+        save_cfg(); return 1;
+    }
     if (!strcmp(id, "online_host") || !strcmp(id, "online_join")) {
         int join = !strcmp(id, "online_join");
         end_edit();

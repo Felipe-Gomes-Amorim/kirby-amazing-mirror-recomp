@@ -94,6 +94,7 @@ extern Sio *rt_sio_cur;
 int rt_sio_setup(const char *mode, int players, int port, const char *host, int delay);   /* 0 ok, <0 erro; delay -1 = auto */
 void rt_sio_read_ini(const char *path, char *mode, int *players, int *port, char *host, int *delay);
 int rt_sio_stats(LinkStats *out);             /* 1 = ha link ativo */
+extern const char *rt_link_start_file;        /* --link-start-file: o host deixa de esperar quando o arquivo existe */
 extern const char *rt_link_status_path;       /* --link-status: JSON atualizado a cada 60 quadros */
 uint16_t rt_sio_irq_pending(void);            /* 0x0080 se IRQ serial habilitado e pendente */
 void rt_sio_report(void);

@@ -208,8 +208,8 @@ static void link_status_write(Sio *s) {
     FILE *f = fopen(tmp, "wb");
     if (!f) return;
     double fr = st.frame ? (double)st.frame : 1;
-    fprintf(f, "{\n \"state\": \"%s\", \"role\": \"%s\", \"players\": %d, \"mask\": %u, \"delay\": %d, \"delay_max\": %d, \"frame\": %u,\n",
-            st.state, st.role ? "join" : "host", st.players, st.mask, st.delay, st.delay_max, st.frame);
+    fprintf(f, "{\n \"state\": \"%s\", \"role\": \"%s\", \"players\": %d, \"mask\": %u, \"player\": %d, \"delay\": %d, \"delay_max\": %d, \"frame\": %u,\n",
+            st.state, st.role ? "join" : "host", st.players, st.mask, s->tp->player_id, st.delay, st.delay_max, st.frame);
     fprintf(f, " \"rtt_ms\": [%.2f, %.2f, %.2f, %.2f], \"rtt_avg_ms\": [%.2f, %.2f, %.2f, %.2f], \"rtt_max_ms\": [%.2f, %.2f, %.2f, %.2f],\n",
             st.rtt_ms[0], st.rtt_ms[1], st.rtt_ms[2], st.rtt_ms[3], st.rtt_avg_ms[0], st.rtt_avg_ms[1], st.rtt_avg_ms[2], st.rtt_avg_ms[3],
             st.rtt_max_ms[0], st.rtt_max_ms[1], st.rtt_max_ms[2], st.rtt_max_ms[3]);
@@ -1321,6 +1321,36 @@ static int connect_now(Local *l, int ms) {
     return 0;
 }
 
+/* Status do launcher ANTES do primeiro quadro (a espera pelos jogadores acontece sem janela): JSON reduzido,
+ * mesmas chaves de link_status_write; `player` = indice deste jogador (-1 = ainda desconhecido). */
+const char *rt_link_start_file;     /* --link-start-file: se existir, o host deixa de esperar (>= 2 presentes) */
+static void wait_status(Local *l, const char *state, int player) {
+    const char *path = rt_link_status_path ? rt_link_status_path : getenv("KIRBY_LINK_STATUS");
+    if (!path || !*path) return;
+    char tmp[1100];
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return;
+    fprintf(f, "{ \"state\": \"%s\", \"role\": \"%s\", \"players\": %d, \"mask\": %u, \"player\": %d, \"delay\": %d, "
+               "\"delay_max\": %d, \"frame\": 0, \"rtt_ms\": [0, 0, 0, 0], \"desync\": false }\n",
+            state, l->host ? "host" : "join", l->players, (unsigned)l->mask, player,
+            l->K, link_k_max(l->players));
+    fclose(f);
+#ifdef _WIN32
+    MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING);
+#else
+    rename(tmp, path);
+#endif
+}
+static int start_file_present(Local *l) {
+    if (!rt_link_start_file || !*rt_link_start_file) return 0;
+    if (__builtin_popcount((unsigned)l->mask) < 2) return 0;
+    FILE *f = fopen(rt_link_start_file, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
 int link_local_lockstep(LinkTransport **tp, int wait_s, int delay) {
     LinkTransport *t = *tp;
     if (!t || strcmp(t->name, "local")) return 0;
@@ -1330,13 +1360,16 @@ int link_local_lockstep(LinkTransport **tp, int wait_s, int delay) {
         uint32_t full = (1u << l->players) - 1;
         l->lock = 1;
         rt_log("[link] lockstep: waiting for %d player(s)...", l->players - 1);
-        double last_idle = t0;
+        double last_idle = t0, last_st = 0;
         while ((l->mask & full) != full && rt_now_us() - t0 < limit) {
             host_accept(l);
+            if (rt_now_us() - last_st > 250000.0) { last_st = rt_now_us(); wait_status(l, "waiting", 0); }
+            if (start_file_present(l)) { rt_log("[link] start requested: starting with mask %X", l->mask); break; }
             if ((l->mask & full) != full) wait_fd(l->listener, 0, 30);
             if (rt_now_us() - last_idle > 50000.0) { last_idle = rt_now_us(); if (!idle()) break; }
         }
-        if ((l->mask & full) != full) rt_log("[link] timeout: starting with mask %X", l->mask);
+        if ((l->mask & full) != full && !start_file_present(l)) rt_log("[link] timeout: starting with mask %X", l->mask);
+        wait_status(l, "starting", 0);
         /* RTT de cada filho (5 pings) -> K automatico */
         double worst = 0;
         for (int i = 1; i < l->players; i++) {
@@ -1379,6 +1412,7 @@ int link_local_lockstep(LinkTransport **tp, int wait_s, int delay) {
         sock_close(l->listener);   /* quem chegar depois nao entra: o quadro dele nao bateria com o do host */
         l->listener = SOCK_BAD;
     } else {
+        wait_status(l, "connecting", -1);
         while (l->peers[0].fd == SOCK_BAD && !l->rejected && rt_now_us() - t0 < limit) {
             if (connect_now(l, 250) != 0) { if (!idle()) break; }
         }
@@ -1405,6 +1439,16 @@ int link_local_lockstep(LinkTransport **tp, int wait_s, int delay) {
         t->player_id = m.p[0]; l->players = t->players = m.p[1]; l->mask = m.p[2];
         l->lock = 1;
         rt_log("[link] connected as player %d of %d (lockstep)", m.p[0] + 1, m.p[1]);
+        wait_status(l, "waiting", m.p[0]);
+        /* o host pode ainda estar esperando outros jogadores (ate `limit`): o primeiro dado dele (INFO) so chega
+         * quando ele comeca. Sem isto o filho desistia dos 8 s de timeout do quadro 0. Nao consome nada. */
+        while (!sim_active() && rt_now_us() - t0 < limit) {
+            fd_set fs;
+            struct timeval tv = {0, 200000};
+            FD_ZERO(&fs); FD_SET(l->peers[0].fd, &fs);
+            if (select((int)l->peers[0].fd + 1, &fs, NULL, NULL, &tv) != 0) break;
+            if (!idle()) break;
+        }
     }
     t->lockstep = 1;
     t->frame_end = local_frame_end;

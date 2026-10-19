@@ -183,7 +183,7 @@ int main(int argc, char **argv) {
     int window = 0, scale = 3, bench = 0, selftest = 0, scale_explicit = 0;
     const char *ini_arg = NULL;
     char link_mode[16] = "off", link_host[64] = "127.0.0.1";
-    int link_players = 2, link_port = 47900, link_cli = 0, link_delay = -1, link_cli_mask = 0;
+    int link_required = 0, link_players = 2, link_port = 47900, link_cli = 0, link_delay = -1, link_cli_mask = 0;
     rt_opt_stop_at_vblank_wait = 1;
     if (gui_defaults) {
         window = 1;
@@ -217,6 +217,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--link-bind") && i + 1 < argc) rt_link_set_bind(argv[++i]);
         else if (!strcmp(argv[i], "--link-sim") && i + 1 < argc) rt_link_sim(argv[++i]);   /* "lat_ms,jitter_ms,perda%" (testes) */
         else if (!strcmp(argv[i], "--link-status") && i + 1 < argc) rt_link_status_path = argv[++i];
+        else if (!strcmp(argv[i], "--link-start-file") && i + 1 < argc) rt_link_start_file = argv[++i];   /* launcher: "START" do host */
+        else if (!strcmp(argv[i], "--link-required")) link_required = 1;   /* sem cabo = sai com 78 (o launcher avisa) */
         else if (!strcmp(argv[i], "--selftest-link")) {
             extern int rt_selftest_link(void);
             return rt_selftest_link() ? 1 : 0;
@@ -314,7 +316,8 @@ int main(int argc, char **argv) {
     }
     rt_cpu = &cpu;
     { int lr = rt_sio_setup(link_mode, link_players, link_port, link_host, link_delay);   /* mode=off: nada muda */
-      if (lr < 0) fprintf(stderr, "[link] link unavailable (%d): running without cable\n", lr); }
+      if (lr < 0) fprintf(stderr, "[link] link unavailable (%d): %s\n", lr, link_required ? "exiting" : "running without cable");
+      if (lr < 0 && link_required) return 78; }
     if (selftest) {
         extern int rt_selftest_sram(Cpu *);
         extern int rt_selftest_interp(Cpu *);
