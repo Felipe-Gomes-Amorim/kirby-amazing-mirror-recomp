@@ -304,13 +304,25 @@ def pid_alive(pid):
         return False
 
 
-def build_interp(rom, out_dir, ui=None):
+def build_interp(rom, out_dir, ui=None, stamp=None):
     """Interpreter-only kirby.exe: runtime + SDL + interpreter, none of the game compiled (seconds).
     Runs as a child process while the progress window keeps pumping events (otherwise Windows flags the
-    window as "not responding")."""
+    window as "not responding"). `stamp` (source_stamp) marks which sources built it: an exe left by an
+    older version is rebuilt instead of reused (it would lack newer runtime options)."""
     exe = os.path.join(out_dir, 'interp', 'kirby.exe')
+    mark = os.path.join(out_dir, 'interp', 'build.stamp')
     if os.path.exists(exe):
-        return exe
+        try:
+            fresh = stamp is None or open(mark).read() == stamp
+        except OSError:
+            fresh = False
+        if fresh:
+            return exe
+        log('interpreter build is from another version; rebuilding it')
+        try:
+            os.remove(exe)
+        except OSError:
+            pass
     cmd = [sys.executable, '-m', 'recomp.program', '--rom', rom, '--out', out_dir, '--interp-only']
     t0 = time.time()
     p = subprocess.Popen(cmd, cwd=WORK, env=tool_env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -328,6 +340,12 @@ def build_interp(rom, out_dir, ui=None):
     if p.returncode or not os.path.exists(exe):
         log(''.join(out)[-800:].replace(chr(10), ' | '))
         return None
+    if stamp is not None:
+        try:
+            with open(mark, 'w') as f:
+                f.write(stamp)
+        except OSError:
+            pass
     return exe
 
 
@@ -383,7 +401,7 @@ def play_while_building(rom, out_dir, stamp, flags):
     Returns an exit code, or None to fall back to the blocking build."""
     ui = UI()
     ui.update(5, 'Preparing fast mode...')
-    exe_i = build_interp(rom, out_dir, ui)
+    exe_i = build_interp(rom, out_dir, ui, stamp)
     ui.update(100, 'Starting the game...')
     ui.close()
     if not exe_i:
@@ -427,7 +445,7 @@ class LauncherEnv:
         return self.monitor.done()
 
     def ensure_fast_exe(self, progress):
-        return build_interp(self.rom, self.out_dir, _ProgressAdapter(progress))
+        return build_interp(self.rom, self.out_dir, _ProgressAdapter(progress), self.stamp)
 
     def start_background_build(self):
         return start_background_build(self.rom, self.out_dir, self.stamp)
@@ -539,7 +557,7 @@ class LauncherEnv:
     def online_launch(self, role, p, status, flag):
         """Start `kirby.exe --link host|join` (the interpreter build: every player runs the same code, which the
         lockstep needs). Returns the Popen, or None when the game could not be prepared."""
-        exe = build_interp(self.rom, self.out_dir, _ProgressAdapter(lambda pct, txt: None))
+        exe = build_interp(self.rom, self.out_dir, _ProgressAdapter(lambda pct, txt: None), self.stamp)
         if not exe:
             return None
         self.backup_now()
