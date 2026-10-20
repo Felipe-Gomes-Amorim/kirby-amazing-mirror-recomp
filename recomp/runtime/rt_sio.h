@@ -35,6 +35,11 @@ typedef struct LinkStats {
     double seconds;
     uint64_t underflows;
     int desync; uint32_t desync_frame;
+    double rtt_p50_ms[4], rtt_p95_ms[4], rtt_p99_ms[4];   /* janela movel de ~1000 amostras de PING por jogador */
+    uint64_t stall_gt33, stall_gt100, stall_gt250, stalls_total;   /* esperas do host (filho: do quadro do host) acima de 33/100/250 ms e de 1 quadro (16,7 ms) */
+    uint32_t frames_total;
+    char transport[8];         /* tcp | udp | mixed */
+    uint64_t udp_retx, udp_dup_rx;   /* UDP: datagramas reenviados por timer / duplicatas recebidas */
 } LinkStats;
 
 typedef struct LinkTransport LinkTransport;
@@ -73,6 +78,7 @@ LinkTransport *link_local_join(const char *host, int port);
 /* liga o lockstep por quadro no transporte local; host: espera os `players` entrarem, join: conecta
  * (ambos ate `wait_s` segundos). 0 = ok, <0 = nao conectou (o transporte e fechado) */
 int link_local_lockstep(LinkTransport **t, int wait_s, int delay);   /* delay = K (0..8) ou -1 = automatico (mede o RTT) */
+void rt_link_set_transport(const char *v);   /* tcp (padrao) | udp | auto (filho tenta UDP 3 s e cai para TCP; host escuta nos dois) */
 void rt_link_set_bind(const char *addr);      /* host: endereco de escuta (padrao 127.0.0.1; 0.0.0.0 abre para a LAN) */
 void rt_link_read_bind(const char *ini_path); /* [link] bind= do kirby.ini (nao sobrepoe --link-bind / KIRBY_LINK_BIND) */
 void rt_link_sim(const char *spec);           /* "latencia_ms,jitter_ms,perda_%": rede simulada (testes) */

@@ -47,6 +47,14 @@ def link_lines(r, *needles):
 
 
 class Base(unittest.TestCase):
+    TRANSPORT = 'tcp'
+
+    def setUp(self):
+        H.DEFAULT_TRANSPORT = self.TRANSPORT
+
+    def tearDown(self):
+        H.DEFAULT_TRANSPORT = 'tcp'
+
     def assert_consistent(self, res):
         """Todos terminaram, tem relatorio, e o fluxo de trocas de cada filho e PREFIXO do host (com K quadros de folga o
         host sai antes de o filho consumir os ultimos; sem K os hashes sao iguais)."""
@@ -98,8 +106,9 @@ class TestBaseline(Base):
 class TestDelayK(Base):
     FRAMES = 4501
 
-    def run_k(self, k, **kw):
-        return run_retry(lambda: Cluster(2, self.FRAMES, snaps=[4500], extra=['--link-delay', str(k)], **kw))
+    def run_k(self, k, force=False, **kw):
+        env = {'KIRBY_LINK_FORCE_K': '1'} if force else {}          # sem FORCE_K o runtime limita K ao maximo do jogo (link_k_max)
+        return run_retry(lambda: Cluster(2, self.FRAMES, snaps=[4500], extra=['--link-delay', str(k)], env=env, **kw))
 
     def test_k_0_1_2_reach_coop(self):
         for k in (0, 1, 2):
@@ -111,22 +120,36 @@ class TestDelayK(Base):
         desiste: o co-op nunca comeca (0x0203AD10 != 2, link desligado). O runtime avisa no log."""
         for k in (3, 4):
             with self.subTest(K=k):
-                res = self.run_k(k)
+                res = self.run_k(k, force=True)
                 for r in res:
                     self.assertEqual(r.rc, 0)
                     self.assertNotEqual(r.state(4500)[0], 2, 'K=%d nao deveria chegar ao co-op' % k)
-                self.assertTrue(link_lines(res[0], 'above 2'), res[0].link_lines()[:4])
+                self.assertTrue(link_lines(res[0], 'is above 2', 'FORCE_K'), res[0].link_lines()[:4])
+
+    def test_k_above_max_is_clamped_without_force(self):
+        """Sem KIRBY_LINK_FORCE_K o runtime NAO deixa passar do maximo do jogo (2 com 2 jogadores): K=3/4 viram 2 e o
+        co-op chega; 3-4 jogadores pedindo K=2 viram 1 e chegam."""
+        for k in (3, 4):
+            with self.subTest(players=2, K=k):
+                res = self.run_k(k)
+                self.assert_coop(res, 4500, 2)
+                self.assertTrue(link_lines(res[0], 'using 2'), res[0].link_lines()[:4])
+        for n in (3, 4):
+            with self.subTest(players=n, K=2):
+                res = run_retry(lambda: Cluster(n, COOP + 1, extra=['--link-delay', '2']))
+                self.assert_coop(res, COOP, n)
+                self.assertTrue(link_lines(res[0], 'using 1'), res[0].link_lines()[:4])
 
     def test_three_and_four_players_tolerate_only_k1(self):
         """ACHADO: o limite K<=2 vale SO para 2 jogadores. Com 3 ou 4 o gLink do KatAM desiste ja em K=2 (mesmo em
-        loopback, sem rede): 0x0203AD10 != 2 e link desligado; K=1 funciona. O `auto` do runtime (limite 2) precisa
-        usar 1 quando players >= 3."""
+        loopback, sem rede): 0x0203AD10 != 2 e link desligado; K=1 funciona. O runtime agora limita (link_k_max); aqui
+        forcamos com KIRBY_LINK_FORCE_K para caracterizar o jogo."""
         for n in (3, 4):
             with self.subTest(players=n, K=1):
                 res = run_retry(lambda: Cluster(n, COOP + 1, extra=['--link-delay', '1']))
                 self.assert_coop(res, COOP, n)
             with self.subTest(players=n, K=2):
-                res = run_retry(lambda: Cluster(n, COOP + 1, extra=['--link-delay', '2']))
+                res = run_retry(lambda: Cluster(n, COOP + 1, extra=['--link-delay', '2'], env={'KIRBY_LINK_FORCE_K': '1'}))
                 for r in res:
                     self.assertEqual(r.rc, 0)
                     self.assertNotEqual(r.state(COOP)[0], 2, '%d jogadores com K=2 nao deveria chegar ao co-op' % n)
@@ -387,6 +410,26 @@ class TestDesync(Base):
                         timeout=300)
         for r in res:
             self.assertFalse(link_lines(r, 'DESYNC'), r.link_lines()[:5])
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Mesmos cenarios com transport=udp (quando o rt_boot.exe tiver --link-transport; P2d da Nasus)
+# ---------------------------------------------------------------------------------------------------------------
+need_udp = unittest.skipUnless(H.AVAILABLE and H.udp_supported(), 'rt_boot.exe ainda sem --link-transport udp (P2d)')
+
+
+def _udp_variant(cls, skip=()):
+    ns = {'TRANSPORT': 'udp', '__doc__': (cls.__doc__ or '') + ' [UDP]'}
+    for name in skip:
+        ns[name] = unittest.skip('especifico de TCP (perda/corrupcao por mensagem do proxy TCP)')(lambda self: None)
+    return need_udp(type(cls.__name__ + 'UDP', (cls,), ns))
+
+
+TestBaselineUDP = _udp_variant(TestBaseline)
+TestDisconnectUDP = _udp_variant(TestDisconnect, skip=('test_lost_message_ends_session_but_not_process',))
+TestHelloUDP = _udp_variant(TestHello, skip=('test_stray_connections_do_not_block_real_join',))
+TestDesyncUDP = _udp_variant(TestDesync, skip=('test_real_corruption_in_transit_is_detected',))
+TestLatencyUDP = _udp_variant(TestLatency)
 
 
 if __name__ == '__main__':

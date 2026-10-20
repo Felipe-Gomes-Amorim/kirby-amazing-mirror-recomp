@@ -72,6 +72,8 @@ enum {   /* KlOnline.state */
 };
 enum { KLS_EMPTY = 0, KLS_CONNECTING = 1, KLS_CONNECTED = 2, KLS_READY = 3, KLS_LOST = 4 };   /* KlOnline.slots[i] */
 
+enum { KLQ_UNKNOWN = 0, KLQ_GOOD = 1, KLQ_FAIR = 2, KLQ_POOR = 3 };   /* KlOnline.quality */
+
 typedef struct {
     int state;                /* KLO_* */
     int slots[4];             /* KLS_* for P1..P4 (P1 is the host) */
@@ -80,6 +82,11 @@ typedef struct {
     int self_slot;            /* this player's slot 0..3, -1 = unknown (highlighted in the list) */
     char my_address[48];      /* host: address the others should use, e.g. "192.168.1.5:47900" (COPY button) */
     char message[96];         /* optional line under the state (errors, hints); '' = the UI shows its own hint */
+    /* ---- added later, at the end (older launchers that zero the struct keep working) ---- */
+    int quality;              /* KLQ_*: connection quality while PLAYING */
+    int stalls_100ms;         /* pauses > 100 ms during this session */
+    int ping_p95_ms;          /* round trip p95 in ms (< 0 or 0 with quality 0 = unknown) */
+    char addresses[4][48];    /* HOSTING: up to 4 addresses of this PC ("ip:port"), '' ends the list; empty list -> my_address */
 } KlOnline;
 typedef void (*KlOnlinePoll)(KlOnline *out);   /* the UI zeroes *out before each call */
 
@@ -107,6 +114,7 @@ KL_API int kl_test_pad_present(void);
 KL_API int kl_test_editing(void);                 /* text field being typed in: 0 name, 1 address, 2 port, -1 none */
 KL_API int kl_test_keypad(void);                  /* field edited with the on-screen keypad (0..2), -1 = closed */
 KL_API const char *kl_test_field(int f);          /* current text of field f (0 name, 1 address, 2 port) */
+KL_API int kl_test_addr_sel(void);                /* selected address in the HOSTING list (0..3) */
 KL_API int kl_test_confirm(void);                 /* 1 while the import confirmation is open */
 KL_API int kl_test_text_count(void);              /* free texts drawn on the last frame (not inside buttons) */
 KL_API int kl_test_text(int i, int *x, int *y, int *w, int *h);   /* bounding box of free text i */

@@ -43,6 +43,7 @@ void cfg_defaults(KirbyConfig *c) {
     set_str(c->link_host, sizeof c->link_host, "127.0.0.1");
     c->link_port = 47900; c->link_players = 2; c->link_delay = -1;
     set_str(c->link_name, sizeof c->link_name, "Player");
+    set_str(c->link_transport, sizeof c->link_transport, "auto");
 }
 
 static int ieq(const char *a, const char *b) {
@@ -102,6 +103,10 @@ int cfg_validate(KirbyConfig *c) {
     c->link_mode[sizeof c->link_mode - 1] = 0;
     c->link_host[sizeof c->link_host - 1] = 0;
     c->link_name[sizeof c->link_name - 1] = 0;
+    c->link_transport[sizeof c->link_transport - 1] = 0;
+    if (strcmp(c->link_transport, "auto") && strcmp(c->link_transport, "udp") && strcmp(c->link_transport, "tcp")) {
+        set_str(c->link_transport, sizeof c->link_transport, "auto"); fixes++;
+    }
     if (strcmp(c->link_mode, "off") && strcmp(c->link_mode, "host") && strcmp(c->link_mode, "join") && strcmp(c->link_mode, "solo")) {
         set_str(c->link_mode, sizeof c->link_mode, "off"); fixes++;
     }
@@ -179,6 +184,7 @@ static void apply(KirbyConfig *c, const char *sec, const char *key, const char *
         }
         else if (!strcmp(key, "host")) set_str(c->link_host, sizeof c->link_host, val);
         else if (!strcmp(key, "name")) set_str(c->link_name, sizeof c->link_name, val);
+        else if (!strcmp(key, "transport")) set_str(c->link_transport, sizeof c->link_transport, val);
         return;
     }
     if (!strcmp(sec, "launcher")) {
@@ -275,8 +281,10 @@ int cfg_save(const char *ini_path, const KirbyConfig *in) {
                "; players: 2..4 (when hosting); delay: auto or 0..8 frames of host slack; name: shown in the lobby\r\n"
                "players=%d\r\n"
                "delay=%s\r\n"
-               "name=%s\r\n",
-            c.link_mode, c.link_host, c.link_port, c.link_players, dly, c.link_name);
+               "name=%s\r\n"
+               "; transport: auto (UDP, falls back to TCP) | udp | tcp\r\n"
+               "transport=%s\r\n",
+            c.link_mode, c.link_host, c.link_port, c.link_players, dly, c.link_name, c.link_transport);
     int rc = ferror(f) ? -1 : 0;
     if (fclose(f) != 0) rc = -1;
     return rc;
@@ -298,7 +306,8 @@ int cfg_equal(const KirbyConfig *a, const KirbyConfig *b) {
         a->scaling != b->scaling || a->volume != b->volume || a->stick_as_dpad != b->stick_as_dpad ||
         a->deadzone != b->deadzone || a->launcher_show != b->launcher_show || strcmp(a->language, b->language) ||
         strcmp(a->link_mode, b->link_mode) || strcmp(a->link_host, b->link_host) || a->link_port != b->link_port ||
-        a->link_players != b->link_players || a->link_delay != b->link_delay || strcmp(a->link_name, b->link_name))
+        a->link_players != b->link_players || a->link_delay != b->link_delay || strcmp(a->link_name, b->link_name) ||
+        strcmp(a->link_transport, b->link_transport))
         return 0;
     for (int i = 0; i < CFG_BTN_COUNT; i++)
         if (strcmp(a->key[i], b->key[i]) || strcmp(a->pad[i], b->pad[i])) return 0;

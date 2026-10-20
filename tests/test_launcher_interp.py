@@ -102,6 +102,10 @@ class GameArgsTests(unittest.TestCase):
             self.assertIn('--gui', cmd)
             self.assertEqual(cmd[cmd.index('--link') + 1], role)
             self.assertIn('--link-required', cmd)
+            self.assertEqual(cmd[cmd.index('--link-transport') + 1], 'auto')
+        self.env.online_launch('join', dict(p, transport='tcp'), 'status.json', 'start.flag')
+        cmd = self.calls[-1]
+        self.assertEqual(cmd[cmd.index('--link-transport') + 1], 'tcp')
 
 
 if __name__ == '__main__':

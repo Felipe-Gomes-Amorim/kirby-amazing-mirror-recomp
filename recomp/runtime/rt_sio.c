@@ -197,10 +197,11 @@ static void link_status_write(Sio *s) {
     if (!s->tp || !s->tp->stats || !s->tp->stats(s->tp, &st)) return;
     st.frame = s->frame;
     if (s->frame % 600 == 0)
-        rt_log("[link] %s K=%d frame %u: rtt %.1f ms (max %.1f), waited in %llu frames (%.1f ms total), tx %.0f B/s rx %.0f B/s%s",
-               st.role ? "child" : "host", st.delay, st.frame, st.rtt_ms[1], st.rtt_max_ms[1], (unsigned long long)st.wait_frames,
-               st.wait_ms, st.seconds > 0 ? st.tx_bytes / st.seconds : 0, st.seconds > 0 ? st.rx_bytes / st.seconds : 0,
-               st.desync ? " DESYNC" : "");
+        rt_log("[link] %s K=%d %s frame %u: rtt %.1f ms p50/p95/p99 %.1f/%.1f/%.1f (max %.1f), waited in %llu frames (%.1f ms total), stalls >33/>100/>250 ms: %llu/%llu/%llu, tx %.0f B/s rx %.0f B/s%s",
+               st.role ? "child" : "host", st.delay, st.transport, st.frame, st.rtt_ms[1], st.rtt_p50_ms[1], st.rtt_p95_ms[1], st.rtt_p99_ms[1],
+               st.rtt_max_ms[1], (unsigned long long)st.wait_frames, st.wait_ms, (unsigned long long)st.stall_gt33,
+               (unsigned long long)st.stall_gt100, (unsigned long long)st.stall_gt250, st.seconds > 0 ? st.tx_bytes / st.seconds : 0,
+               st.seconds > 0 ? st.rx_bytes / st.seconds : 0, st.desync ? " DESYNC" : "");
     const char *path = rt_link_status_path ? rt_link_status_path : getenv("KIRBY_LINK_STATUS");
     if (!path || !*path) return;
     char tmp[1100];
@@ -213,8 +214,14 @@ static void link_status_write(Sio *s) {
     fprintf(f, " \"rtt_ms\": [%.2f, %.2f, %.2f, %.2f], \"rtt_avg_ms\": [%.2f, %.2f, %.2f, %.2f], \"rtt_max_ms\": [%.2f, %.2f, %.2f, %.2f],\n",
             st.rtt_ms[0], st.rtt_ms[1], st.rtt_ms[2], st.rtt_ms[3], st.rtt_avg_ms[0], st.rtt_avg_ms[1], st.rtt_avg_ms[2], st.rtt_avg_ms[3],
             st.rtt_max_ms[0], st.rtt_max_ms[1], st.rtt_max_ms[2], st.rtt_max_ms[3]);
+    fprintf(f, " \"rtt_p50_ms\": [%.2f, %.2f, %.2f, %.2f], \"rtt_p95_ms\": [%.2f, %.2f, %.2f, %.2f], \"rtt_p99_ms\": [%.2f, %.2f, %.2f, %.2f],\n",
+            st.rtt_p50_ms[0], st.rtt_p50_ms[1], st.rtt_p50_ms[2], st.rtt_p50_ms[3], st.rtt_p95_ms[0], st.rtt_p95_ms[1], st.rtt_p95_ms[2], st.rtt_p95_ms[3],
+            st.rtt_p99_ms[0], st.rtt_p99_ms[1], st.rtt_p99_ms[2], st.rtt_p99_ms[3]);
     fprintf(f, " \"wait_frames\": %llu, \"wait_ms\": %.1f, \"wait_max_ms\": %.1f, \"frames_behind\": %u,\n",
             (unsigned long long)st.wait_frames, st.wait_ms, st.wait_max_ms, st.frames_behind);
+    fprintf(f, " \"stall_gt33\": %llu, \"stall_gt100\": %llu, \"stall_gt250\": %llu, \"stalls_total\": %llu, \"frames_total\": %u, \"transport\": \"%s\", \"udp_retx\": %llu, \"udp_dup_rx\": %llu,\n",
+            (unsigned long long)st.stall_gt33, (unsigned long long)st.stall_gt100, (unsigned long long)st.stall_gt250,
+            (unsigned long long)st.stalls_total, st.frames_total, st.transport, (unsigned long long)st.udp_retx, (unsigned long long)st.udp_dup_rx);
     fprintf(f, " \"tx_bytes\": %llu, \"rx_bytes\": %llu, \"tx_bytes_per_s\": %.0f, \"rx_bytes_per_s\": %.0f, \"tx_bytes_per_frame\": %.1f, \"rx_bytes_per_frame\": %.1f,\n",
             (unsigned long long)st.tx_bytes, (unsigned long long)st.rx_bytes, st.seconds > 0 ? st.tx_bytes / st.seconds : 0,
             st.seconds > 0 ? st.rx_bytes / st.seconds : 0, st.tx_bytes / fr, st.rx_bytes / fr);
@@ -462,8 +469,13 @@ enum { R_BAD = 1, R_VERSION = 2, R_ROM = 3, R_FULL = 4, R_STARTED = 5 };
 
 typedef struct { uint8_t type; uint16_t len; uint8_t p[MSG_MAX]; } Msg;
 typedef struct { double due; int len; uint8_t d[MSG_MAX + 3]; } SimMsg;
+struct UdpPeer;
+struct Local;
 typedef struct Peer {
     sock_t fd;
+    int udp;                  /* 1 = par UDP (fd = socket compartilhado do Local) */
+    struct UdpPeer *u;
+    struct Local *L;
     uint8_t buf[MSG_MAX + 3];
     int have;
     SimMsg *sq; int sqh, sqn; double last_due;   /* fila da simulacao de rede (so com --link-sim) */
@@ -479,6 +491,8 @@ typedef struct FrameIn {   /* filho: quadro do host recebido e ainda nao executa
 
 typedef struct Local {
     int host, port, players, lock, K, started;
+    int xport;                /* 0 = tcp, 1 = udp, 2 = auto */
+    sock_t usock;             /* socket UDP (host: escuta; filho: o do par) */
     int D;                    /* atraso do SEND dos filhos, em trocas */
     int Kmax;                 /* K maximo para o numero de jogadores */
     int timeout_ms;           /* espera maxima por um par em lockstep */
@@ -513,6 +527,7 @@ typedef struct Local {
     /* medicao */
     LinkStats st;
     double rtt_sum[4]; uint64_t rtt_n[4];
+    double rtt_win[4][1024];  /* janela movel para p50/p95/p99 */
     double t_start;
 } Local;
 
@@ -520,6 +535,7 @@ double rt_now_us(void);
 int (*rt_link_idle)(void);    /* chamado durante esperas longas: atende a janela (0 = usuario fechou) */
 static double sim_lat, sim_jit, sim_loss;
 static int sim_on = -1;
+static double sim_reorder, sim_dup;   /* so UDP: % de datagramas atrasados fora de ordem / duplicados; sim_loss em UDP = perda REAL */
 static uint64_t sim_rng = 0x9E3779B97F4A7C15ull;
 
 static int net_started;
@@ -555,10 +571,13 @@ static void wait_fd(sock_t fd, int want_write, int ms) {
 
 static int sim_active(void);
 static void sim_pump(Peer *p);
+static int udp_send(Peer *p, int type, const void *payload, int len);
+static int udp_recv(Peer *p, Msg *m);
+static void udp_sim_pump(Peer *p);
 /* espera dados do par ate `ms`. Na rede de verdade o select acorda na hora; na simulacao a fila de saida de
  * CADA lado so anda se alguem a atende, e o select de 1 ms vira 15 ms no Windows: gira com yield. */
 static void wait_peer(Peer *p, int ms) {
-    if (!sim_active() && !p->sqn) { wait_fd(p->fd, 0, ms); return; }
+    if (!sim_active() && !p->sqn) { wait_fd(p->fd, 0, ms); return; }   /* (UDP sem simulacao: sqn do TCP e 0) */
     double t0 = rt_now_us();
     do {
         sim_pump(p);
@@ -575,9 +594,11 @@ static void wait_peer(Peer *p, int ms) {
 
 /* ---- simulacao de rede (teste): latencia, jitter e perda (perda de TCP = atraso de retransmissao) ---- */
 void rt_link_sim(const char *spec) {
-    double a = 0, b = 0, c = 0;
-    if (spec && sscanf(spec, "%lf,%lf,%lf", &a, &b, &c) >= 1) { sim_lat = a; sim_jit = b; sim_loss = c; sim_on = a > 0 || b > 0 || c > 0; }
-    else sim_on = 0;
+    double a = 0, b = 0, c = 0, d = 0, e = 0;
+    if (spec && sscanf(spec, "%lf,%lf,%lf,%lf,%lf", &a, &b, &c, &d, &e) >= 1) {
+        sim_lat = a; sim_jit = b; sim_loss = c; sim_reorder = d; sim_dup = e;
+        sim_on = a > 0 || b > 0 || c > 0 || d > 0 || e > 0;
+    } else sim_on = 0;
 }
 static double sim_rand(void) {   /* 0..1, semente fixa */
     sim_rng ^= sim_rng << 13; sim_rng ^= sim_rng >> 7; sim_rng ^= sim_rng << 17;
@@ -601,6 +622,7 @@ static int raw_send(sock_t fd, const uint8_t *b, int n) {
 }
 
 static void sim_pump(Peer *p) {
+    if (p->udp) { udp_sim_pump(p); return; }
     while (p->sqn > 0) {
         SimMsg *m = &p->sq[p->sqh];
         if (rt_now_us() < m->due) break;
@@ -611,6 +633,7 @@ static void sim_pump(Peer *p) {
 
 static int peer_send(Peer *p, int type, const void *payload, int len) {
     uint8_t b[MSG_MAX + 3];
+    if (p->udp) return udp_send(p, type, payload, len);
     if (len > MSG_MAX) return -1;
     b[0] = (uint8_t)type; b[1] = (uint8_t)(len & 0xFF); b[2] = (uint8_t)(len >> 8);
     if (len) memcpy(b + 3, payload, (size_t)len);
@@ -633,6 +656,7 @@ static int peer_send(Peer *p, int type, const void *payload, int len) {
 
 /* 1 = mensagem completa; 0 = nada; -1 = desconectou ou violou o protocolo */
 static int recv_msg(Peer *p, Msg *m) {
+    if (p->udp) return udp_recv(p, m);
     for (;;) {
         int need = p->have < 3 ? 3 : 3 + (p->buf[1] | (p->buf[2] << 8));
         if (p->have >= 3 && need - 3 > MSG_MAX) return -1;
@@ -822,8 +846,11 @@ static int dec_done(Local *l, int child, const Msg *m, uint16_t *out, int *ns, u
 /* ---- util ---- */
 static uint32_t local_mask(LinkTransport *t) { return ((Local *)t->priv)->mask | (1u << t->player_id); }
 
+static void udp_bye(Peer *p);
+static void udp_mark_dead(Peer *p);
 static void local_drop(Local *l, int i) {
-    if (l->peers[i].fd != SOCK_BAD) sock_close(l->peers[i].fd);
+    if (l->peers[i].udp) { if (l->peers[i].fd != SOCK_BAD) udp_bye(&l->peers[i]); udp_mark_dead(&l->peers[i]); }
+    else if (l->peers[i].fd != SOCK_BAD) sock_close(l->peers[i].fd);
     l->peers[i].fd = SOCK_BAD; l->peers[i].have = 0; l->peers[i].sqn = 0;
     if (l->host) {
         l->mask &= ~(1u << i); l->latest[i] = LINK_ABSENT;
@@ -840,9 +867,287 @@ static int idle(void) { return rt_link_idle ? rt_link_idle() : 1; }
 static void note_rtt(Local *l, int i, double ms) {
     LinkStats *s = &l->st;
     s->rtt_ms[i] = ms;
+    l->rtt_win[i][l->rtt_n[i] & 1023] = ms;
     l->rtt_sum[i] += ms; l->rtt_n[i]++;
     s->rtt_avg_ms[i] = l->rtt_sum[i] / (double)l->rtt_n[i];
     if (ms > s->rtt_max_ms[i]) s->rtt_max_ms[i] = ms;
+}
+
+
+/* =============================================================== UDP: confiabilidade por redundancia
+ * Datagrama DATA: [0xA1][sessao u32][ack u32 = maior seq recebida em ordem][n u8] n x [seq u32][tipo u8][tam u16][carga].
+ * Cada datagrama leva TODAS as mensagens ainda nao confirmadas (ate 12 / ~1180 B): a perda de um datagrama e coberta pelo
+ * seguinte sem esperar retransmissao; duplicatas sao descartadas e o que chega fora de ordem e reordenado (janela 32).
+ * Reenvio por timer so como rede de seguranca (200 ms). Handshake: HELLO [0xA0][HELLO] a cada 200 ms; recusa
+ * [0xA2][motivo]; saida [0xA3][sessao]. Mensagens do protocolo (HELLO/WELCOME/FRAME/DONE/PING...) sao as mesmas do TCP. */
+#define UMSG_MAX 600
+#define UDG_MAX 1300
+#define UDG_PAYLOAD 1180
+#define UDG_MSGS 12
+enum { D_HELLO = 0xA0, D_DATA = 0xA1, D_REJECT = 0xA2, D_BYE = 0xA3 };
+typedef struct UMsg { uint32_t seq; uint8_t type; uint16_t len; uint8_t p[UMSG_MAX]; } UMsg;
+typedef struct UDg { double due; int len; uint8_t d[UDG_MAX]; } UDg;
+struct UdpPeer {
+    struct sockaddr_in addr;
+    uint32_t sess;
+    uint32_t tx_seq;
+    UMsg un[64]; int un_n;                 /* enviadas e nao confirmadas, em ordem */
+    uint32_t rx_next;                      /* proxima seq esperada (comeca em 1) */
+    UMsg ooo[32]; uint8_t ooo_has[32];
+    UMsg rdy[64]; int rdy_h, rdy_n;        /* entregues, na ordem */
+    double last_rx, last_tx;
+    int need_ack, dead, established;
+    UDg *sq; int sqn;                      /* simulacao de rede: ordenada por `due` */
+    uint64_t retx, dup_rx;
+};
+
+static void udp_sendto(Local *l, const struct sockaddr_in *to, const uint8_t *d, int n) {
+    sendto(l->usock, (const char *)d, n, 0, (const struct sockaddr *)to, (int)sizeof *to);
+}
+
+static void udp_out(Peer *p, const uint8_t *d, int n) {
+    struct UdpPeer *u = p->u;
+    Local *l = p->L;
+    p->tx += (uint64_t)n;
+    u->last_tx = rt_now_us();
+    if (!sim_active()) { udp_sendto(l, &u->addr, d, n); return; }
+    if (sim_rand() * 100.0 < sim_loss) return;                          /* perda REAL do datagrama */
+    int copies = 1 + (sim_rand() * 100.0 < sim_dup ? 1 : 0);            /* duplicacao */
+    for (int c = 0; c < copies; c++) {
+        double lat = sim_lat + (sim_rand() * 2 - 1) * sim_jit;
+        if (lat < 0) lat = 0;
+        if (sim_rand() * 100.0 < sim_reorder) lat += sim_rand() * (2 * (sim_lat + sim_jit) + 30);   /* chega depois dos seguintes */
+        if (!u->sq) u->sq = (UDg *)calloc(256, sizeof(UDg));
+        if (u->sqn >= 256) return;
+        double due = rt_now_us() + lat * 1000.0;
+        int pos = u->sqn;
+        while (pos > 0 && u->sq[pos - 1].due > due) { u->sq[pos] = u->sq[pos - 1]; pos--; }
+        u->sq[pos].due = due; u->sq[pos].len = n; memcpy(u->sq[pos].d, d, (size_t)n);
+        u->sqn++;
+    }
+}
+
+static void udp_sim_pump(Peer *p) {
+    struct UdpPeer *u = p->u;
+    if (!u) return;
+    while (u->sqn > 0 && rt_now_us() >= u->sq[0].due) {
+        udp_sendto(p->L, &u->addr, u->sq[0].d, u->sq[0].len);
+        memmove(&u->sq[0], &u->sq[1], sizeof(UDg) * (size_t)(u->sqn - 1));
+        u->sqn--;
+    }
+}
+
+/* monta e envia um DATA com tudo que falta confirmar */
+static void udp_xmit(Peer *p) {
+    struct UdpPeer *u = p->u;
+    uint8_t d[UDG_MAX];
+    int k = 10, n = 0;
+    uint32_t ack = u->rx_next - 1;
+    d[0] = D_DATA;
+    memcpy(d + 1, &u->sess, 4);
+    memcpy(d + 5, &ack, 4);
+    for (int i = 0; i < u->un_n && n < UDG_MSGS; i++) {
+        UMsg *m = &u->un[i];
+        if (k + 7 + m->len > UDG_PAYLOAD) break;
+        memcpy(d + k, &m->seq, 4); d[k + 4] = m->type; d[k + 5] = (uint8_t)(m->len & 0xFF); d[k + 6] = (uint8_t)(m->len >> 8);
+        memcpy(d + k + 7, m->p, m->len);
+        k += 7 + m->len;
+        n++;
+    }
+    d[9] = (uint8_t)n;
+    u->need_ack = 0;
+    udp_out(p, d, k);
+}
+
+static int udp_send(Peer *p, int type, const void *payload, int len) {
+    struct UdpPeer *u = p->u;
+    if (!u || u->dead || len > UMSG_MAX || u->un_n >= 64) return -1;
+    UMsg *m = &u->un[u->un_n++];
+    m->seq = ++u->tx_seq; m->type = (uint8_t)type; m->len = (uint16_t)len;
+    if (len) memcpy(m->p, payload, (size_t)len);
+    udp_xmit(p);
+    return 0;
+}
+
+static void u_deliver(struct UdpPeer *u, int type, const uint8_t *pl, int len) {
+    if (u->rdy_n >= 64) { u->dead = 1; return; }
+    UMsg *m = &u->rdy[(u->rdy_h + u->rdy_n) & 63];
+    m->type = (uint8_t)type; m->len = (uint16_t)len;
+    memcpy(m->p, pl, (size_t)len);
+    u->rdy_n++;
+}
+
+static void u_process(Peer *p, const uint8_t *b, int n) {
+    struct UdpPeer *u = p->u;
+    if (n < 10) return;
+    uint32_t ack;
+    memcpy(&ack, b + 5, 4);
+    int cnt = 0;
+    while (cnt < u->un_n && u->un[cnt].seq <= ack) cnt++;
+    if (cnt) { memmove(u->un, u->un + cnt, sizeof(UMsg) * (size_t)(u->un_n - cnt)); u->un_n -= cnt; }
+    int k = 10, m = b[9];
+    for (int i = 0; i < m; i++) {
+        if (k + 7 > n) break;
+        uint32_t seq;
+        memcpy(&seq, b + k, 4);
+        int type = b[k + 4], len = b[k + 5] | (b[k + 6] << 8);
+        k += 7;
+        if (len > UMSG_MAX || k + len > n) break;
+        if (seq < u->rx_next) u->dup_rx++;
+        else if (seq == u->rx_next) {
+            u_deliver(u, type, b + k, len);
+            u->rx_next++;
+            while (u->ooo_has[u->rx_next & 31]) {
+                UMsg *o = &u->ooo[u->rx_next & 31];
+                u_deliver(u, o->type, o->p, o->len);
+                u->ooo_has[u->rx_next & 31] = 0;
+                u->rx_next++;
+            }
+        } else if (seq < u->rx_next + 32) {
+            int s = (int)(seq & 31);
+            if (!u->ooo_has[s]) { u->ooo[s].type = (uint8_t)type; u->ooo[s].len = (uint16_t)len; memcpy(u->ooo[s].p, b + k, (size_t)len); u->ooo_has[s] = 1; }
+        }
+        k += len;
+    }
+    u->need_ack = 1; u->established = 1; u->last_rx = rt_now_us();
+}
+
+static void udp_service(Peer *p) {
+    struct UdpPeer *u = p->u;
+    if (!u || u->dead) return;
+    double now = rt_now_us();
+    if (u->need_ack && now - u->last_tx > 10000.0) udp_xmit(p);
+    else if (u->un_n && now - u->last_tx > 200000.0) { u->retx++; udp_xmit(p); }
+    else if (u->established && now - u->last_tx > 1e6) udp_xmit(p);   /* keepalive */
+    if (u->established && now - u->last_rx > p->L->timeout_ms * 1000.0) {
+        rt_log("[link] no datagram from the peer for %d ms", p->L->timeout_ms);
+        u->dead = 1;
+    }
+}
+
+static void udp_bye(Peer *p) {
+    struct UdpPeer *u = p->u;
+    if (!u || u->dead || !u->sess) return;
+    uint8_t d[5] = {D_BYE};
+    memcpy(d + 1, &u->sess, 4);
+    udp_sendto(p->L, &u->addr, d, 5);
+    udp_sendto(p->L, &u->addr, d, 5);
+}
+
+static void udp_mark_dead(Peer *p) { if (p->u) p->u->dead = 1; }
+
+static void udp_free(Peer *p) {
+    if (p->u) { free(p->u->sq); free(p->u); p->u = NULL; }
+    p->udp = 0;
+}
+
+/* host: HELLO de um endereco novo ou repetido */
+static void udp_hello(Local *l, const struct sockaddr_in *from, int known, const uint8_t *h, int len) {
+    if (known >= 0) {   /* repetido: o WELCOME pode ter se perdido */
+        Peer *p = &l->peers[known];
+        if (!p->u->established) udp_xmit(p);
+        return;
+    }
+    uint32_t magic = 0;
+    uint8_t rej = 0;
+    if (len != HELLO_LEN) return;
+    memcpy(&magic, h, 4);
+    if (magic != PROTO_MAGIC) return;   /* lixo: sem resposta */
+    if (h[4] != PROTO_VER) { rt_log("[link] rejected a connection (protocol version %d, want %d)", h[4], PROTO_VER); rej = R_VERSION; }
+    else if (memcmp(h + 6, l->sha, 20)) { rt_log("[link] rejected a connection (different ROM)"); rej = R_ROM; }
+    else if (l->started) { rt_log("[link] rejected a connection (session already started)"); rej = R_STARTED; }
+    int id = 1;
+    while (id < l->players && l->peers[id].fd != SOCK_BAD) id++;
+    if (!rej && id >= l->players) { rt_log("[link] rejected a connection (room full)"); rej = R_FULL; }
+    if (rej) { uint8_t d[2] = {D_REJECT, rej}; udp_sendto(l, from, d, 2); return; }
+    Peer *p = &l->peers[id];
+    udp_free(p);
+    memset(p, 0, sizeof *p);
+    p->fd = l->usock; p->udp = 1; p->L = l;
+    p->u = (struct UdpPeer *)calloc(1, sizeof *p->u);
+    p->u->addr = *from;
+    p->u->sess = (uint32_t)((uint64_t)rt_now_us() * 2654435761ull) ^ ((uint32_t)id * 0x9E3779B1u) ^ (uint32_t)rand();
+    if (!p->u->sess) p->u->sess = 1;
+    p->u->rx_next = 1;
+    p->u->last_rx = rt_now_us();
+    l->mask |= 1u << id;
+    l->latest[id] = l->lock ? 0 : LINK_ABSENT;
+    l->acked[id] = l->round;
+    l->done_cnt[id] = 0;
+    uint8_t w[3] = {(uint8_t)id, (uint8_t)l->players, (uint8_t)l->mask};
+    udp_send(p, M_WELCOME, w, 3);
+    rt_log("[link] player %d connected (udp)", id + 1);
+}
+
+/* le todos os datagramas pendentes e distribui por par (endereco:porta) */
+static void udp_poll(Local *l) {
+    if (l->usock == SOCK_BAD) return;
+    for (int it = 0; it < 128; it++) {
+        uint8_t b[1500];
+        struct sockaddr_in from;
+#ifdef _WIN32
+        int fl = (int)sizeof from;
+#else
+        socklen_t fl = sizeof from;
+#endif
+        int n = (int)recvfrom(l->usock, (char *)b, sizeof b, 0, (struct sockaddr *)&from, &fl);
+        if (n < 0) {
+#ifdef _WIN32
+            if (WSAGetLastError() == WSAECONNRESET) continue;   /* ICMP "porta fechada" de um envio anterior */
+#endif
+            break;
+        }
+        if (n < 2) continue;
+        int i = -1;
+        for (int k = l->host ? 1 : 0; k < (l->host ? 4 : 1); k++)
+            if (l->peers[k].udp && l->peers[k].u && l->peers[k].fd != SOCK_BAD && l->peers[k].u->addr.sin_addr.s_addr == from.sin_addr.s_addr &&
+                l->peers[k].u->addr.sin_port == from.sin_port) { i = k; break; }
+        int kind = b[0];
+        if (kind == D_HELLO) { if (l->host) udp_hello(l, &from, i, b + 1, n - 1); continue; }
+        if (i < 0) continue;   /* de quem nao e par: ignora */
+        Peer *p = &l->peers[i];
+        struct UdpPeer *u = p->u;
+        if (kind == D_REJECT) { if (!l->host && n >= 2) { l->rejected = b[1]; u->dead = 1; } continue; }
+        if (n < 5) continue;
+        uint32_t sess;
+        memcpy(&sess, b + 1, 4);
+        if (kind == D_BYE) { if (sess == u->sess) u->dead = 1; continue; }
+        if (kind != D_DATA) continue;
+        if (!l->host && u->sess == 0) u->sess = sess;   /* o filho adota a sessao do primeiro DATA do host */
+        if (sess != u->sess) continue;
+        p->rx += (uint64_t)n;
+        u_process(p, b, n);
+    }
+    for (int k = 0; k < 4; k++) {
+        Peer *p = &l->peers[k];
+        if (p->udp && p->u && p->fd != SOCK_BAD) { udp_sim_pump(p); udp_service(p); }
+    }
+}
+
+static int udp_recv(Peer *p, Msg *m) {
+    struct UdpPeer *u = p->u;
+    if (!u) return -1;
+    udp_poll(p->L);
+    if (u->rdy_n) {
+        UMsg *r = &u->rdy[u->rdy_h];
+        m->type = r->type; m->len = r->len;
+        memcpy(m->p, r->p, r->len);
+        u->rdy_h = (u->rdy_h + 1) & 63; u->rdy_n--;
+        return 1;
+    }
+    return u->dead ? -1 : 0;
+}
+
+static int udp_socket(void) {
+    sock_t s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s == SOCK_BAD) return (int)SOCK_BAD;
+#ifdef _WIN32
+    BOOL off = FALSE;
+    DWORD ret = 0;
+    WSAIoctl(s, _WSAIOW(IOC_VENDOR, 12), &off, sizeof off, NULL, 0, &ret, NULL, NULL);   /* sem WSAECONNRESET */
+#endif
+    set_nonblock(s);
+    return (int)s;
 }
 
 static void local_publish(LinkTransport *t, uint16_t v) {
@@ -871,6 +1176,7 @@ static void reject(Peer *p, int why) {
 }
 
 static void host_accept(Local *l) {
+    if (l->usock != SOCK_BAD) udp_poll(l);
     if (l->listener == SOCK_BAD) return;
     for (;;) {
         sock_t c = accept(l->listener, NULL, NULL);
@@ -1102,6 +1408,10 @@ static int local_poll(LinkTransport *t, LinkEvent *ev) {
 static void note_wait(Local *l, double t0) {
     double ms = (rt_now_us() - t0) / 1000.0;
     if (ms > 0.5) { l->st.wait_frames++; l->st.wait_ms += ms; if (ms > l->st.wait_max_ms) l->st.wait_max_ms = ms; }
+    if (ms > 16.7) l->st.stalls_total++;
+    if (ms > 33) l->st.stall_gt33++;
+    if (ms > 100) l->st.stall_gt100++;
+    if (ms > 250) l->st.stall_gt250++;
 }
 
 static void local_frame_end(LinkTransport *t, uint32_t frame, const uint16_t *sends, int ns, const LinkRound *r, int n, uint64_t xhash) {
@@ -1132,7 +1442,7 @@ static void local_frame_end(LinkTransport *t, uint32_t frame, const uint16_t *se
     l->ncum[frame & 63] = l->jr;
     l->Dcur = l->fr_rounds >= 8 ? l->D : 20;   /* fase rapida (gLink, ~16 trocas/quadro) x lenta (deteccao, 1/quadro) */
     l->fr_rounds = 0;
-    if (frame % 30 == 0) send_pings(l);
+    if (frame % 10 == 0) send_pings(l);
     /* o quadro f+1 so comeca depois de todo filho terminar o quadro f-K (K=0: o proprio f) */
     for (int i = 1; i < l->players; i++) {
         double t0 = rt_now_us(), last_idle = t0;
@@ -1197,6 +1507,25 @@ static int local_stats(LinkTransport *t, LinkStats *out) {
     for (int i = 0; i < 4; i++) { s->tx[i] = l->peers[i].tx; s->rx[i] = l->peers[i].rx; s->tx_bytes += l->peers[i].tx; s->rx_bytes += l->peers[i].rx; }
     s->seconds = (rt_now_us() - l->t_start) / 1e6;
     s->underflows = l->underflows;
+    for (int i = 0; i < 4; i++) {   /* p50/p95/p99 da janela de RTT */
+        uint64_t n = l->rtt_n[i] < 1024 ? l->rtt_n[i] : 1024;
+        if (!n) continue;
+        double a[1024];
+        memcpy(a, l->rtt_win[i], sizeof(double) * (size_t)n);
+        for (uint64_t x = 1; x < n; x++) { double v = a[x]; int64_t y = (int64_t)x - 1; while (y >= 0 && a[y] > v) { a[y + 1] = a[y]; y--; } a[y + 1] = v; }
+        s->rtt_p50_ms[i] = a[n * 50 / 100]; s->rtt_p95_ms[i] = a[n * 95 / 100 >= n ? n - 1 : n * 95 / 100]; s->rtt_p99_ms[i] = a[n * 99 / 100 >= n ? n - 1 : n * 99 / 100];
+    }
+    {
+        int nu = 0, nt = 0;
+        uint64_t rx = 0, dp = 0;
+        for (int i = 0; i < 4; i++) {
+            if (l->peers[i].u) { rx += l->peers[i].u->retx; dp += l->peers[i].u->dup_rx; }
+            if (l->peers[i].fd != SOCK_BAD || l->peers[i].u) { if (l->peers[i].udp || l->peers[i].u) nu++; else nt++; }
+        }
+        snprintf(s->transport, sizeof s->transport, nu && nt ? "mixed" : nu ? "udp" : "tcp");
+        s->udp_retx = rx; s->udp_dup_rx = dp;
+    }
+    s->frames_total = s->frame;
     if (!l->lock) snprintf(s->state, sizeof s->state, "free");
     else if (!strcmp(s->state, "starting") || !s->state[0]) snprintf(s->state, sizeof s->state, "lockstep");
     *out = *s;
@@ -1211,10 +1540,12 @@ static void local_close(LinkTransport *t) {
         rt_log("[link] master waited for child acks %llu times, %llu hit the 50 ms limit",
                (unsigned long long)l->ack_waits, (unsigned long long)l->ack_timeouts);
     for (int i = 0; i < 4; i++) {
-        if (l->peers[i].fd != SOCK_BAD) sock_close(l->peers[i].fd);
+        if (l->peers[i].udp) { if (l->peers[i].fd != SOCK_BAD) udp_bye(&l->peers[i]); udp_free(&l->peers[i]); }
+        else if (l->peers[i].fd != SOCK_BAD) sock_close(l->peers[i].fd);
         if (l->pend[i].fd != SOCK_BAD) sock_close(l->pend[i].fd);
         free(l->peers[i].sq);
     }
+    if (l->usock != SOCK_BAD) sock_close(l->usock);
     if (l->host && l->listener != SOCK_BAD) sock_close(l->listener);
     free(l);
     free(t);
@@ -1231,10 +1562,18 @@ static LinkTransport *local_new(Local *l, int id) {
     snprintf(l->st.state, sizeof l->st.state, "starting");
     rom_sha1(l->sha);
     for (int i = 0; i < 4; i++) { l->peers[i].fd = SOCK_BAD; l->pend[i].fd = SOCK_BAD; l->latest[i] = LINK_ABSENT; }
+    if (l->usock == 0) l->usock = SOCK_BAD;
     for (int s = 0; s < 4; s++) l->prev_v[s] = LINK_ABSENT;
     for (int i = 0; i < 4; i++) l->last_idx[i] = -1;
     l->Dcur = 20;
     return t;
+}
+
+static int xport_cfg, xport_cli;   /* 0 = tcp (padrao), 1 = udp, 2 = auto */
+void rt_link_set_transport(const char *v) {
+    if (!v) return;
+    xport_cfg = !strcmp(v, "udp") ? 1 : !strcmp(v, "auto") ? 2 : 0;
+    xport_cli = 1;
 }
 
 LinkTransport *link_local_host(int players, int port) {
@@ -1242,9 +1581,8 @@ LinkTransport *link_local_host(int players, int port) {
     Local *l = (Local *)calloc(1, sizeof *l);
     l->host = 1; l->players = players < 2 ? 2 : players > 4 ? 4 : players; l->port = port;
     l->mask = 1;
-    l->listener = socket(AF_INET, SOCK_STREAM, 0);
-    int one = 1;
-    setsockopt(l->listener, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof one);
+    l->xport = xport_cfg;
+    l->listener = SOCK_BAD; l->usock = SOCK_BAD;
     struct sockaddr_in a;
     memset(&a, 0, sizeof a);
     a.sin_family = AF_INET; a.sin_port = htons((uint16_t)port);
@@ -1252,26 +1590,94 @@ LinkTransport *link_local_host(int players, int port) {
         const char *b = getenv("KIRBY_LINK_BIND");
         inet_pton(AF_INET, b && *b ? b : "127.0.0.1", &a.sin_addr);
     }
-    if (bind(l->listener, (struct sockaddr *)&a, sizeof a) != 0 || listen(l->listener, 4) != 0) {
-        rt_log("[link] cannot listen on port %d", port);
-        sock_close(l->listener);
-        free(l);
-        return NULL;
+    if (l->xport != 1) {
+        l->listener = socket(AF_INET, SOCK_STREAM, 0);
+        int one = 1;
+        setsockopt(l->listener, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof one);
+        if (bind(l->listener, (struct sockaddr *)&a, sizeof a) != 0 || listen(l->listener, 4) != 0) {
+            rt_log("[link] cannot listen on port %d (tcp)", port);
+            sock_close(l->listener);
+            free(l);
+            return NULL;
+        }
+        set_nonblock(l->listener);
     }
-    set_nonblock(l->listener);
+    if (l->xport != 0) {
+        l->usock = (sock_t)udp_socket();
+        if (l->usock == SOCK_BAD || bind(l->usock, (struct sockaddr *)&a, sizeof a) != 0) {
+            rt_log("[link] cannot listen on port %d (udp)", port);
+            if (l->listener != SOCK_BAD) sock_close(l->listener);
+            if (l->usock != SOCK_BAD) sock_close(l->usock);
+            free(l);
+            return NULL;
+        }
+    }
     LinkTransport *t = local_new(l, 0);
-    rt_log("[link] hosting %d players on port %d", l->players, port);
+    rt_log("[link] hosting %d players on port %d (%s)", l->players, port, l->xport == 0 ? "tcp" : l->xport == 1 ? "udp" : "tcp+udp");
     return t;
+}
+
+static int resolve_host(const char *addr, struct sockaddr_in *a) {
+    if (inet_pton(AF_INET, addr, &a->sin_addr) == 1) return 0;
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET; hints.ai_socktype = SOCK_DGRAM;
+    if (getaddrinfo(addr, NULL, &hints, &res) != 0 || !res) return -1;
+    a->sin_addr = ((struct sockaddr_in *)res->ai_addr)->sin_addr;
+    freeaddrinfo(res);
+    return 0;
+}
+
+/* filho: cria o socket UDP e o "par" (o host) */
+static int join_udp_setup(Local *l) {
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET; a.sin_port = htons((uint16_t)l->port);
+    if (resolve_host(l->addr, &a) != 0) return -1;
+    l->usock = (sock_t)udp_socket();
+    if (l->usock == SOCK_BAD) return -1;
+    Peer *p = &l->peers[0];
+    memset(p, 0, sizeof *p);
+    p->fd = l->usock; p->udp = 1; p->L = l;
+    p->u = (struct UdpPeer *)calloc(1, sizeof *p->u);
+    p->u->addr = a;
+    p->u->rx_next = 1;
+    p->u->last_rx = rt_now_us();
+    l->rejected = 0;
+    return 0;
+}
+
+/* HELLO a cada 200 ms ate chegar o primeiro DATA do host (o WELCOME). 0 = ok */
+static int udp_connect(Local *l, double limit_us) {
+    double t0 = rt_now_us(), last = 0;
+    struct UdpPeer *u = l->peers[0].u;
+    while (rt_now_us() - t0 < limit_us) {
+        double now = rt_now_us();
+        if (now - last > 200000.0) {
+            uint8_t d[1 + HELLO_LEN];
+            last = now;
+            d[0] = D_HELLO;
+            build_hello(l, d + 1);
+            udp_sendto(l, &u->addr, d, (int)sizeof d);
+        }
+        udp_poll(l);
+        if (u->rdy_n) return 0;
+        if (l->rejected) return -2;
+        if (!idle()) return -1;
+        wait_fd(l->usock, 0, 20);
+    }
+    return -1;
 }
 
 LinkTransport *link_local_join(const char *host, int port) {
     net_init();
     Local *l = (Local *)calloc(1, sizeof *l);
     l->host = 0; l->players = 2; l->port = port;
+    l->xport = xport_cfg;
     snprintf(l->addr, sizeof l->addr, "%s", host && *host ? host : "127.0.0.1");
-    l->listener = SOCK_BAD;
+    l->listener = SOCK_BAD; l->usock = SOCK_BAD;
     LinkTransport *t = local_new(l, 1);
-    rt_log("[link] joining %s:%d", l->addr, port);
+    rt_log("[link] joining %s:%d (%s)", l->addr, port, l->xport == 0 ? "tcp" : l->xport == 1 ? "udp" : "udp, falling back to tcp");
     return t;
 }
 
@@ -1365,7 +1771,7 @@ int link_local_lockstep(LinkTransport **tp, int wait_s, int delay) {
             host_accept(l);
             if (rt_now_us() - last_st > 250000.0) { last_st = rt_now_us(); wait_status(l, "waiting", 0); }
             if (start_file_present(l)) { rt_log("[link] start requested: starting with mask %X", l->mask); break; }
-            if ((l->mask & full) != full) wait_fd(l->listener, 0, 30);
+            if ((l->mask & full) != full) wait_fd(l->listener != SOCK_BAD ? l->listener : l->usock, 0, 30);
             if (rt_now_us() - last_idle > 50000.0) { last_idle = rt_now_us(); if (!idle()) break; }
         }
         if ((l->mask & full) != full && !start_file_present(l)) rt_log("[link] timeout: starting with mask %X", l->mask);
@@ -1409,10 +1815,24 @@ int link_local_lockstep(LinkTransport **tp, int wait_s, int delay) {
         for (int i = 1; i < l->players; i++)
             if (l->peers[i].fd != SOCK_BAD) { uint8_t b[2] = {(uint8_t)l->K, (uint8_t)l->Kmax}; peer_send(&l->peers[i], M_INFO, b, 2); }
         l->started = 1;
-        sock_close(l->listener);   /* quem chegar depois nao entra: o quadro dele nao bateria com o do host */
-        l->listener = SOCK_BAD;
+        if (l->listener != SOCK_BAD) sock_close(l->listener);   /* quem chegar depois nao entra: o quadro dele nao bateria com o do host */
+        l->listener = SOCK_BAD;   /* (o socket UDP fica: leva os dados; novos HELLO recebem REJECT 'session already started') */
     } else {
         wait_status(l, "connecting", -1);
+        if (l->xport != 0) {   /* UDP: handshake com retry; em modo auto cai para TCP se nao responder em 3 s */
+            int ur = join_udp_setup(l) == 0 ? udp_connect(l, l->xport == 2 ? 3e6 : limit) : -1;
+            if (ur != 0) {
+                if (l->xport == 2 && !l->rejected) {
+                    rt_log("[link] no answer over udp in 3 s: falling back to tcp");
+                    udp_free(&l->peers[0]);
+                    if (l->usock != SOCK_BAD) sock_close(l->usock);
+                    l->usock = SOCK_BAD;
+                    memset(&l->peers[0], 0, sizeof l->peers[0]);
+                    l->peers[0].fd = SOCK_BAD;
+                    l->xport = 0;
+                }
+            }
+        }
         while (l->peers[0].fd == SOCK_BAD && !l->rejected && rt_now_us() - t0 < limit) {
             if (connect_now(l, 250) != 0) { if (!idle()) break; }
         }
@@ -1431,6 +1851,9 @@ int link_local_lockstep(LinkTransport **tp, int wait_s, int delay) {
             if (rc == 1 && m.type == M_REJECT) rt_log("[link] the host rejected this connection (reason %d: %s)", m.len ? m.p[0] : 0,
                 m.len && m.p[0] == R_ROM ? "different ROM" : m.len && m.p[0] == R_VERSION ? "different protocol version" :
                 m.len && m.p[0] == R_FULL ? "room full" : m.len && m.p[0] == R_STARTED ? "session already started" : "bad HELLO");
+            else if (l->rejected) rt_log("[link] the host rejected this connection (reason %d: %s)", l->rejected,
+                l->rejected == R_ROM ? "different ROM" : l->rejected == R_VERSION ? "different protocol version" :
+                l->rejected == R_FULL ? "room full" : l->rejected == R_STARTED ? "session already started" : "bad HELLO");
             else rt_log("[link] could not join %s:%d (host not found or not accepting)", l->addr, l->port);
             t->close(t);
             *tp = NULL;
@@ -1442,7 +1865,12 @@ int link_local_lockstep(LinkTransport **tp, int wait_s, int delay) {
         wait_status(l, "waiting", m.p[0]);
         /* o host pode ainda estar esperando outros jogadores (ate `limit`): o primeiro dado dele (INFO) so chega
          * quando ele comeca. Sem isto o filho desistia dos 8 s de timeout do quadro 0. Nao consome nada. */
-        while (!sim_active() && rt_now_us() - t0 < limit) {
+        while (l->peers[0].udp && !l->peers[0].u->rdy_n && !l->peers[0].u->dead && rt_now_us() - t0 < limit) {
+            udp_poll(l);
+            if (!idle()) break;
+            wait_fd(l->usock, 0, 50);
+        }
+        while (!l->peers[0].udp && !sim_active() && rt_now_us() - t0 < limit) {
             fd_set fs;
             struct timeval tv = {0, 200000};
             FD_ZERO(&fs); FD_SET(l->peers[0].fd, &fs);
@@ -1520,6 +1948,7 @@ void rt_link_read_bind(const char *path) {
         char *k = trim_(s), *v = trim_(eq + 1);
         for (char *p = k; *p; p++) *p = (char)tolower((unsigned char)*p);
         if (!strcmp(k, "bind") && *v && !getenv("KIRBY_LINK_BIND")) rt_link_set_bind(v);
+        if (!strcmp(k, "transport") && *v && !xport_cli) { rt_link_set_transport(v); xport_cli = 0; }
     }
     fclose(f);
 }
@@ -1565,4 +1994,15 @@ void rt_sio_report(void) {
            rt_sio_cur->tp ? rt_sio_cur->tp->name : "none", rt_sio_cur->tp && rt_sio_cur->tp->lockstep ? ", lockstep" : "");
     printf("LINK exchange hash: %016llx over %llu exchanges, %u frames\n", (unsigned long long)s->xhash,
            (unsigned long long)s->xcount, s->frame);
+    {   /* resumo da sessao no kirby.log */
+        LinkStats st;
+        if (rt_sio_stats(&st) && st.frame > 0)
+            rt_log("[link] session summary (%s, %s, K=%d): %u frames, rtt p50/p95/p99 %.1f/%.1f/%.1f ms (max %.1f), host waits >33 ms: %llu, "
+                   ">100 ms: %llu, >250 ms: %llu (waits >1 frame: %llu of %u frames, longest %.0f ms), %.1f KB sent, %.1f KB received%s",
+                   st.role ? "join" : "host", st.transport, st.delay, st.frame, st.rtt_p50_ms[1], st.rtt_p95_ms[1], st.rtt_p99_ms[1], st.rtt_max_ms[1],
+                   (unsigned long long)st.stall_gt33, (unsigned long long)st.stall_gt100, (unsigned long long)st.stall_gt250,
+                   (unsigned long long)st.stalls_total, st.frame, st.wait_max_ms, st.tx_bytes / 1024.0, st.rx_bytes / 1024.0,
+                   st.desync ? ", DESYNC detected" : "");
+    }
+    if (s->tp && s->tp->close) { s->tp->close(s->tp); s->tp = NULL; }   /* UDP: manda BYE ao par; TCP: fecha os sockets */
 }

@@ -39,6 +39,8 @@ def find_exe():
 
 
 EXE = find_exe()
+DEFAULT_TRANSPORT = 'tcp'              # os testes UDP trocam isto em setUp (test_link_network.Base)
+TRANSPORT_FLAG = '--link-transport'      # nome proposto no ROLES.md; ajuste quando a Nasus publicar (P2d)
 AVAILABLE = bool(EXE and os.path.exists(ROM))
 
 
@@ -50,10 +52,54 @@ def exe_has(text):
         return text.encode() in f.read()
 
 
+def udp_supported():
+    return exe_has(TRANSPORT_FLAG) or exe_has('KIRBY_LINK_TRANSPORT')
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(('127.0.0.1', 0))
         return s.getsockname()[1]
+
+
+
+class Bursts:
+    """Rajadas de perda: a cada `every_s` s (+-20%) a rede some por `length_ms` ms (Wi-Fi ruim: roaming, interferencia).
+    Comeca `start_after_s` depois do primeiro trafego (para nao pegar a fase de menu)."""
+
+    def __init__(self, every_s, length_ms, seed=11, start_after_s=0.0):
+        self.every, self.length = every_s, length_ms / 1000.0
+        self.rng = random.Random(seed)
+        self.t0 = None
+        self.start_after = start_after_s
+        self.next = None
+        self.count = 0
+
+    def end_of_burst(self, now):
+        """Se `now` esta dentro de uma rajada devolve o instante em que ela acaba; senao None."""
+        if self.t0 is None:
+            self.t0 = now
+            self.next = now + self.start_after + self.every * (0.8 + 0.4 * self.rng.random())
+        while now >= self.next + self.length:
+            self.next += self.every * (0.8 + 0.4 * self.rng.random())
+        if self.next <= now < self.next + self.length:
+            if getattr(self, '_counted', None) != self.next:
+                self._counted = self.next
+                self.count += 1
+            return self.next + self.length
+        return None
+
+
+def gap_stats(times, thresholds=(0.033, 0.100, 0.250)):
+    """Paradas no fluxo host->filho: quantos intervalos entre entregas consecutivas passaram de cada limite (s), maior
+    intervalo e entregas/s. `times` = instantes de entrega no proxy."""
+    t = sorted(times)
+    gaps = [b - a for a, b in zip(t, t[1:])]
+    out = {'n': len(t), 'max_gap_ms': round(max(gaps) * 1000, 1) if gaps else 0.0}
+    for th in thresholds:
+        out['gt%d' % round(th * 1000)] = sum(1 for g in gaps if g > th)
+    out['per_s'] = round(len(t) / (t[-1] - t[0]), 1) if len(t) > 1 and t[-1] > t[0] else 0.0
+    return out
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -65,7 +111,8 @@ class TcpProxy:
     1 bit na carga do N-esimo FRAME (tipo 7) host->join (MITM: dessincronizacao REAL na rede);
     stall(s) congela o trafego por s segundos; cut() fecha as duas pontas; blackhole() para de repassar sem fechar."""
 
-    def __init__(self, host_port, latency_ms=0.0, jitter_ms=0.0, loss_pct=0.0, seed=1, listen_port=None, corrupt_frame=None):
+    def __init__(self, host_port, latency_ms=0.0, jitter_ms=0.0, loss_pct=0.0, seed=1, listen_port=None, corrupt_frame=None,
+                 loss_model='drop', rto_ms=200.0, burst=None):
         self.host_port = host_port
         self.latency = latency_ms / 1000.0
         self.jitter = jitter_ms / 1000.0
@@ -73,6 +120,10 @@ class TcpProxy:
         self.rng = random.Random(seed)
         self.port = listen_port or free_port()
         self.corrupt_frame = corrupt_frame
+        self.loss_model = loss_model          # 'drop' = mensagem some (mata a sessao); 'retransmit' = TCP real: atraso de RTO, ordem mantida
+        self.rto = rto_ms / 1000.0
+        self.bursts = Bursts(*burst) if burst else None
+        self.delivered = {True: [], False: []}   # instantes de entrega: True = host->join
         self.frames_seen = 0
         self.corrupted = False
         self.stalled_until = 0.0
@@ -120,7 +171,7 @@ class TcpProxy:
         while not self._stop:
             try:
                 c, _ = self._lsock.accept()
-            except socket.timeout:
+            except (socket.timeout, ConnectionResetError):      # Windows: ICMP 'porta fechada' vira ConnectionResetError
                 continue
             except OSError:
                 return
@@ -159,6 +210,7 @@ class TcpProxy:
                 try:
                     dst.sendall(data)
                     self.forwarded += 1
+                    self.delivered[from_host].append(time.time())
                 except OSError:
                     break
             try:
@@ -191,12 +243,188 @@ class TcpProxy:
                         m[len(m) - 8] ^= 0x04                  # 1 bit dentro das trocas do quadro
                         msg = bytes(m)
                         self.corrupted = True
-                if self.loss and self.rng.random() < self.loss:
-                    self.dropped += 1
-                    continue
+                now = time.time()
                 d = self.latency + (self.rng.random() * self.jitter if self.jitter else 0.0)
-                q.put((time.time() + d, msg))
+                lost = bool(self.loss and self.rng.random() < self.loss)
+                if self.bursts:
+                    end = self.bursts.end_of_burst(now)
+                    if end is not None:
+                        lost = True
+                        if self.loss_model == 'retransmit':
+                            d = max(d, end - now)
+                if lost:
+                    self.dropped += 1
+                    if self.loss_model == 'drop':
+                        continue
+                    d += self.rto                          # TCP: retransmissao depois do RTO; as seguintes esperam (ordem)
+                q.put((now + d, msg))
         q.put(done)
+
+
+
+class UdpProxy:
+    """Proxy UDP entre UM join e o host, sem conhecer o formato dos datagramas. Defeitos (cada sentido): latency_ms,
+    jitter_ms, loss_pct (aleatoria), burst=(a_cada_s, ms) (perda total em rajadas), reorder_pct (o datagrama recebe ate
+    reorder_ms de atraso extra e pode ser ultrapassado), dup_pct (entrega 2x). Controles: stall(s) segura e libera
+    depois; outage(s) descarta tudo por s segundos; cut() descarta para sempre (blackhole). Para segurança:
+    corrupt_pct inverte 1 bit aleatorio de cada datagrama sorteado (nos dois sentidos).
+    capture (primeiros `keep` datagramas join->host), replay(i), inject(data) = datagrama avulso ao host."""
+
+    def __init__(self, host_port, latency_ms=0.0, jitter_ms=0.0, loss_pct=0.0, seed=1, listen_port=None,
+                 burst=None, reorder_pct=0.0, reorder_ms=40.0, dup_pct=0.0, keep=400, corrupt_pct=0.0):
+        import heapq
+        self._hq = heapq
+        self.host_port = host_port
+        self.latency, self.jitter = latency_ms / 1000.0, jitter_ms / 1000.0
+        self.loss, self.reorder, self.reorder_s, self.dup = loss_pct / 100.0, reorder_pct / 100.0, reorder_ms / 1000.0, dup_pct / 100.0
+        self.bursts = Bursts(*burst) if burst else None
+        self.corrupt = corrupt_pct / 100.0
+        self.corrupted = 0
+        self.rng = random.Random(seed)
+        self.stalled_until = 0.0
+        self.outage_until = 0.0
+        self.cut_all = False
+        self.dropped = self.forwarded = self.duplicated = self.reordered = 0
+        self.delivered = {True: [], False: []}
+        self.captured = []
+        self.keep = keep
+        self._clients = {}                                   # addr do join -> socket "upstream" ate o host
+        self._heap, self._seq = [], 0
+        self._cv = threading.Condition()
+        self._stop = False
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.bind(('127.0.0.1', listen_port or 0))
+        self.port = self._sock.getsockname()[1]
+        self._sock.settimeout(0.2)
+        threading.Thread(target=self._rx_join, daemon=True).start()
+        threading.Thread(target=self._scheduler, daemon=True).start()
+
+    # ---- controles ----
+    def stall(self, seconds):
+        self.stalled_until = time.time() + seconds
+
+    def outage(self, seconds):
+        self.outage_until = time.time() + seconds
+
+    def cut(self):
+        self.cut_all = True
+
+    blackhole = cut
+
+    def replay(self, index):
+        """Reenvia ao host (de um socket NOVO) o datagrama capturado de numero `index` (replay de datagrama antigo)."""
+        self.inject(self.captured[index])
+
+    def inject(self, data):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.sendto(data, ('127.0.0.1', self.host_port))
+
+    def close(self):
+        self._stop = True
+        with self._cv:
+            self._cv.notify_all()
+        for u in list(self._clients.values()):
+            try:
+                u.close()
+            except OSError:
+                pass
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+    # ---- interno ----
+    def _schedule(self, due, send, from_host):
+        with self._cv:
+            self._seq += 1
+            self._hq.heappush(self._heap, (due, self._seq, send, from_host))
+            self._cv.notify()
+
+    def _fate(self, from_host):
+        """Lista de atrasos de entrega (vazia = descartado)."""
+        now = time.time()
+        if self.cut_all or now < self.outage_until:
+            self.dropped += 1
+            return []
+        if self.bursts and self.bursts.end_of_burst(now) is not None:
+            self.dropped += 1
+            return []
+        if self.loss and self.rng.random() < self.loss:
+            self.dropped += 1
+            return []
+        d = self.latency + (self.rng.random() * self.jitter if self.jitter else 0.0)
+        if self.reorder and self.rng.random() < self.reorder:
+            d += self.rng.random() * self.reorder_s
+            self.reordered += 1
+        out = [d]
+        if self.dup and self.rng.random() < self.dup:
+            out.append(d + self.rng.random() * 0.01)
+            self.duplicated += 1
+        return out
+
+    def _maybe_corrupt(self, data):
+        if self.corrupt and data and self.rng.random() < self.corrupt:
+            b = bytearray(data)
+            b[self.rng.randrange(len(b))] ^= 1 << self.rng.randrange(8)
+            self.corrupted += 1
+            return bytes(b)
+        return data
+
+    def _rx_join(self):
+        while not self._stop:
+            try:
+                data, addr = self._sock.recvfrom(65535)
+            except (socket.timeout, ConnectionResetError):      # Windows: ICMP 'porta fechada' vira ConnectionResetError
+                continue
+            except OSError:
+                return
+            up = self._clients.get(addr)
+            if up is None:
+                up = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                up.bind(('127.0.0.1', 0))
+                up.settimeout(0.2)
+                self._clients[addr] = up
+                threading.Thread(target=self._rx_host, args=(up, addr), daemon=True).start()
+            if len(self.captured) < self.keep:
+                self.captured.append(data)
+            data = self._maybe_corrupt(data)
+            for d in self._fate(False):
+                self._schedule(time.time() + d, lambda up=up, data=data: up.sendto(data, ('127.0.0.1', self.host_port)), False)
+
+    def _rx_host(self, up, addr):
+        while not self._stop:
+            try:
+                data, _ = up.recvfrom(65535)
+            except (socket.timeout, ConnectionResetError):      # Windows: ICMP 'porta fechada' vira ConnectionResetError
+                continue
+            except OSError:
+                return
+            data = self._maybe_corrupt(data)
+            for d in self._fate(True):
+                self._schedule(time.time() + d, lambda data=data, addr=addr: self._sock.sendto(data, addr), True)
+
+    def _scheduler(self):
+        while not self._stop:
+            with self._cv:
+                while not self._heap and not self._stop:
+                    self._cv.wait(0.2)
+                if self._stop:
+                    return
+                due = self._heap[0][0]
+                now = time.time()
+                if due > now:
+                    self._cv.wait(min(0.05, due - now))
+                    continue
+                _, _, send, from_host = self._hq.heappop(self._heap)
+            if time.time() < self.stalled_until:                 # stall: segura e libera junto
+                self._schedule(self.stalled_until + self.rng.random() * 0.002, send, from_host)
+                continue
+            try:
+                send()
+                self.forwarded += 1
+                self.delivered[from_host].append(time.time())
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -218,6 +446,15 @@ class Result:
         m = re.search(r'LINK packets.*', self.out)
         return {int(p): (int(v), int(i)) for p, v, i in re.findall(r'P(\d) valid=(\d+) invalid=(\d+)', m.group(0))} if m else {}
 
+    def status(self):
+        """JSON de `--link-status` desta instancia (ultima gravacao) ou {}."""
+        import json
+        try:
+            with open(self.status_path, encoding='utf-8') as f:
+                return json.load(f)
+        except (OSError, ValueError, AttributeError):
+            return {}
+
     def link_lines(self):
         return [ln for ln in self.err.splitlines() + self.out.splitlines() if ln.startswith('[link]')]
 
@@ -237,7 +474,8 @@ class Cluster:
     proxies: dict {indice_do_join: dict(latency_ms=..., jitter_ms=..., loss_pct=...)} -> o join passa por um TcpProxy."""
 
     def __init__(self, n=2, frames=3000, keys=None, env=None, extra=None, proxies=None, snaps=None, timeout=240,
-                 stagger=1.0, rom=None, per_instance_extra=None, per_instance_env=None, bench=True, peek=True, join_frames=None):
+                 stagger=1.0, rom=None, per_instance_extra=None, per_instance_env=None, bench=True, peek=True, join_frames=None,
+                 transport=None, status=True):
         self.n, self.frames, self.env, self.extra = n, frames, env or {}, extra or []
         self.keys = keys or [LT.COOP_KEYS['host']] + [LT.COOP_KEYS['join']] * (n - 1)
         self.proxy_cfg = proxies or {}
@@ -246,6 +484,7 @@ class Cluster:
         self.per_instance_extra = per_instance_extra or {}
         self.per_instance_env = per_instance_env or {}
         self.bench, self.peek, self.join_frames = bench, peek, join_frames
+        self.transport, self.status = transport or DEFAULT_TRANSPORT, status
         self.proxies = {}
         self.procs = []
         self.tmp = None
@@ -256,7 +495,7 @@ class Cluster:
         self.tmp = tempfile.TemporaryDirectory()
         self.port = free_port()
         for i, cfg in self.proxy_cfg.items():
-            self.proxies[i] = TcpProxy(self.port, **cfg)
+            self.proxies[i] = (UdpProxy if self.transport == 'udp' else TcpProxy)(self.port, **cfg)
         return self
 
     def __exit__(self, *a):
@@ -289,6 +528,10 @@ class Cluster:
         else:
             port = self.proxies[i].port if i in self.proxies else self.port
             cmd += ['--link', 'join', '--link-host', '127.0.0.1', '--link-port', str(port)]
+        if self.status:
+            cmd += ['--link-status', os.path.join(d, 'st%d.json' % i)]
+        if self.transport == 'udp':
+            cmd += [TRANSPORT_FLAG, 'udp']
         return cmd + self.extra + self.per_instance_extra.get(i, [])
 
     def start(self):
@@ -326,6 +569,7 @@ class Cluster:
             with open(fe.name, 'rb') as f:
                 e = f.read().decode('utf-8', 'replace')
             r = Result(i, rcs[i], o, e, time.time() - self.started)
+            r.status_path = os.path.join(self.tmp.name, 'st%d.json' % i)
             try:
                 with open(os.path.join(self.tmp.name, 'ex%d.log' % i), encoding='ascii', errors='replace') as f:
                     r.exlog = f.read().splitlines()

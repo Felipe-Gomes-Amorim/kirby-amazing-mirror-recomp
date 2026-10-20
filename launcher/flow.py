@@ -24,6 +24,7 @@ KL_ONLINE_HOST, KL_ONLINE_JOIN, KL_ONLINE_LEAVE, KL_ONLINE_START = 6, 7, 8, 9
 KL_PAGE_MAIN, KL_PAGE_ONLINE = 0, 3
 KLO_OFFLINE, KLO_HOSTING, KLO_CONNECTING, KLO_CONNECTED, KLO_PLAYING, KLO_DESYNC, KLO_LOST = range(7)
 KLS_EMPTY, KLS_CONNECTING, KLS_CONNECTED, KLS_READY, KLS_LOST = range(5)
+KLQ_UNKNOWN, KLQ_GOOD, KLQ_FAIR, KLQ_POOR = range(4)
 EXIT_BACK_TO_LAUNCHER = 77       # kirby.exe exits with this when the user presses F1
 EXIT_NO_LINK = 78                # kirby.exe --link-required exits with this when it could not set up the cable
 
@@ -52,7 +53,10 @@ class KlOnlineC(ctypes.Structure):
     """Mirror of KlOnline in hw/launcher_ui.h."""
     _fields_ = [('state', ctypes.c_int), ('slots', ctypes.c_int * 4), ('ping_ms', ctypes.c_int * 4),
                 ('names', (ctypes.c_char * 16) * 4), ('self_slot', ctypes.c_int),
-                ('my_address', ctypes.c_char * 48), ('message', ctypes.c_char * 96)]
+                ('my_address', ctypes.c_char * 48), ('message', ctypes.c_char * 96),
+                # added at the end of the C struct (NOTES 18b)
+                ('quality', ctypes.c_int), ('stalls_100ms', ctypes.c_int), ('ping_p95_ms', ctypes.c_int),
+                ('addresses', (ctypes.c_char * 48) * 4)]
 
 
 KlOnlinePoll = ctypes.CFUNCTYPE(None, ctypes.POINTER(KlOnlineC))
@@ -136,6 +140,26 @@ def read_link_status(path):
         return {}
 
 
+def link_quality(js):
+    """(quality, stalls_100ms, ping_p95_ms) from the status JSON of kirby.exe.
+    GOOD: p95 < 60 ms and fewer than 1 pause > 100 ms per minute; POOR: p95 >= 120 ms or >= 6 such pauses per minute;
+    FAIR in between. Unknown for the first ~5 seconds (300 frames)."""
+    def num(v, d=0.0):
+        return float(v) if isinstance(v, (int, float)) else d
+    frames = num(js.get('frames_total', js.get('frame', 0)))
+    p95s = [num(x) for x in (js.get('rtt_p95_ms') or []) if isinstance(x, (int, float)) and x > 0]
+    p95 = int(round(max(p95s))) if p95s else 0
+    gt100 = int(num(js.get('stall_gt100')))
+    if frames < 300:
+        return KLQ_UNKNOWN, gt100, p95
+    per_min = gt100 / max(frames / 3600.0, 1.0 / 60)
+    if p95 >= 120 or per_min >= 6:
+        return KLQ_POOR, gt100, p95
+    if p95 >= 60 or per_min >= 1:
+        return KLQ_FAIR, gt100, p95
+    return KLQ_GOOD, gt100, p95
+
+
 class OnlineSession:
     """One online session = one `kirby.exe --link host|join` process, seen through its status JSON.
     Pure logic (the process, the files and the address come from `env`), unit-tested with a fake env.
@@ -144,6 +168,7 @@ class OnlineSession:
     env.online_launch(role, params, status, start_flag) -> process-like (poll(), terminate()) or None
     env.online_request_start(start_flag)                 host: stop waiting for more players
     env.online_address(port) -> 'ip:port'
+    env.online_addresses(port) -> up to 4 'ip:port' of this PC (the UI lets the user pick one)
     env.online_failure_hint() -> last [link] line of kirby.log ('' if none)
     """
     CONNECT_TIMEOUT = 15.0
@@ -157,6 +182,7 @@ class OnlineSession:
         self.status_path = self.start_path = None
         self.message, self.seen, self.t0 = '', 0, 0.0
         self.address = ''
+        self.addresses = []
         self._js, self._js_t = {}, 0.0
 
     def active(self):
@@ -169,6 +195,10 @@ class OnlineSession:
             self.role, self.params = role, dict(params)
             self.phase, self.message, self.seen, self.t0 = 'preparing', '', 0, self.clock()
             self.address = self.env.online_address(params['port']) if role == 'host' else ''
+            try:
+                self.addresses = list(self.env.online_addresses(params['port']))[:4] if role == 'host' else []
+            except Exception:
+                self.addresses = []
             self._js, self._js_t = {}, 0.0
         threading.Thread(target=self._launch, daemon=True).start()
 
@@ -238,11 +268,12 @@ class OnlineSession:
                     self.message = 'Could not reach %s:%s. Check the address, the port and that the host is waiting.' % (
                         self.params.get('host', '?'), self.params.get('port', '?'))
             out = dict(state=KLO_OFFLINE, slots=[KLS_EMPTY] * 4, ping=[-1] * 4, names=[''] * 4, self_slot=-1,
-                       address='', message=self.message)
+                       address='', message=self.message, quality=KLQ_UNKNOWN, stalls=0, p95=0, addresses=[])
             if self.phase == 'idle' or self.phase == 'ended':
                 return out
             host = self.role == 'host'
             out['address'] = self.address
+            out['addresses'] = list(self.addresses)
             if self.phase == 'preparing':
                 out['state'] = KLO_HOSTING if host else KLO_CONNECTING
                 out['message'] = 'Preparing the game...'
@@ -275,6 +306,8 @@ class OnlineSession:
             out['self_slot'] = self_slot if 0 <= self_slot < 4 else -1
             if 0 <= out['self_slot'] < 4:
                 out['names'][out['self_slot']] = str(self.params.get('name', ''))[:15]
+            if playing:
+                out['quality'], out['stalls'], out['p95'] = link_quality(js)
             if js.get('desync'):
                 out['state'], out['message'] = KLO_DESYNC, 'The two games differ (desync). Press LEAVE and start again.'
             elif st == 'dropped':
@@ -309,9 +342,13 @@ def online_params(ini_path):
             delay = str(max(0, min(8, int(delay))))
         except ValueError:
             delay = 'auto'
+    transport = (read_ini_value(ini_path, 'link', 'transport', 'auto') or 'auto').strip().lower()
+    if transport not in ('auto', 'udp', 'tcp'):
+        transport = 'auto'
     return dict(host=(read_ini_value(ini_path, 'link', 'host', '127.0.0.1') or '127.0.0.1').strip(),
                 port=num('port', 47900, 1, 65535), players=num('players', 2, 2, 4), delay=delay,
-                name=(read_ini_value(ini_path, 'link', 'name', 'Player') or 'Player').strip()[:15])
+                name=(read_ini_value(ini_path, 'link', 'name', 'Player') or 'Player').strip()[:15],
+                transport=transport)
 
 
 class BuildMonitor:
@@ -515,6 +552,11 @@ class Controller:
             o.self_slot = snap['self_slot']
             o.my_address = snap['address'].encode('ascii', 'replace')[:47]
             o.message = snap['message'].encode('ascii', 'replace')[:95]
+            o.quality = snap['quality']
+            o.stalls_100ms = snap['stalls']
+            o.ping_p95_ms = snap['p95']
+            for i in range(4):
+                o.addresses[i] = (snap['addresses'][i] if i < len(snap['addresses']) else '').encode('ascii', 'replace')[:47]
         cb = KlOnlinePoll(poll)
         self._online_poll_ref = cb
         return cb

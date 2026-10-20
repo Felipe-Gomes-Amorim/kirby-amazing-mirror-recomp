@@ -61,6 +61,7 @@ typedef struct {
     int link_players;     /* 2..4 (host), default 2 */
     int link_delay;       /* -1 = auto (default), or 0..8 frames of host slack (as --link-delay) */
     char link_name[16];   /* player name for the lobby, default Player */
+    char link_transport[8]; /* auto | udp | tcp, default auto (as --link-transport) */
 } KirbyConfig;
 
 void cfg_defaults(KirbyConfig *c);

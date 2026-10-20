@@ -11,7 +11,7 @@
 #include "window_sdl.h"      /* WIN_TITLE, win_icon_pixels, win_font_rows */
 
 /* ------------------------------------------------------------------ widgets */
-typedef enum { W_BUTTON, W_RADIO, W_CHECK, W_SLIDER, W_SHAPE, W_FIELD } WType;
+typedef enum { W_BUTTON, W_RADIO, W_CHECK, W_SLIDER, W_SHAPE, W_FIELD, W_ROW } WType;
 enum { SH_RECT, SH_CIRCLE };
 
 typedef struct {
@@ -25,7 +25,7 @@ typedef struct {
     int btn;                /* W_SHAPE: CFG_BTN_* index */
     int shape;              /* W_SHAPE: SH_* */
     int slider;             /* W_SLIDER: 0 = volume, 1 = deadzone, 2 = link delay */
-    int fld;                /* W_FIELD: 0 name, 1 address, 2 port */
+    int fld;                /* W_FIELD: 0 name, 1 address, 2 port; W_ROW: address index */
 } Widget;
 
 #define MAX_W 32
@@ -60,11 +60,19 @@ static int start_page;
 static char want_focus[24];          /* widget id to focus after the next layout() */
 static KlOnlinePoll online_poll;
 static KlOnline onl;
+static int addr_sel;                 /* selected entry of the HOSTING address list */
 static void layout(void);
 static void focus_move(int d);
 static void nav(int dir);
 static int port_ok(void) { int n = atoi(fbuf[2]); return fbuf[2][0] && n >= 1 && n <= 65535; }
 static int online_busy(void) { return onl.state != KLO_OFFLINE; }
+static int addr_count(void) {
+    int n = 0;
+    while (n < 4 && onl.addresses[n][0]) n++;
+    return n ? n : (onl.my_address[0] ? 1 : 0);
+}
+static const char *addr_get(int i) { return onl.addresses[0][0] ? onl.addresses[i] : onl.my_address; }
+static int show_addrs(void) { return onl.state != KLO_PLAYING && addr_count() > 0; }
 static int slots_up(void) { int n = 0; for (int i = 0; i < 4; i++) if (onl.slots[i] == KLS_CONNECTED || onl.slots[i] == KLS_READY) n++; return n; }
 
 /* texts and the progress bar drawn on the last frame (layout checks in the tests) */
@@ -279,7 +287,12 @@ static void layout(void) {
         }
         add("online_addr", W_FIELD, 100, 62, 368, 22, "");  wd[nw - 1].fld = 1; wd[nw - 1].enabled = off;
         add("online_port", W_FIELD, 80, 90, 70, 22, "");   wd[nw - 1].fld = 2; wd[nw - 1].enabled = off;
-        add("online_delay", W_SLIDER, 236, 90, 150, 22, ""); wd[nw - 1].slider = 2; wd[nw - 1].enabled = off;
+        add("online_delay", W_SLIDER, 236, 90, 80, 22, ""); wd[nw - 1].slider = 2; wd[nw - 1].enabled = off;
+        {   /* transport: one button that cycles AUTO -> UDP -> TCP (the page has no room for three radios) */
+            char nl[16];
+            snprintf(nl, sizeof nl, "NET %s", !strcmp(cfg.link_transport, "udp") ? "UDP" : !strcmp(cfg.link_transport, "tcp") ? "TCP" : "AUTO");
+            add("online_net", W_BUTTON, 392, 90, 76, 22, nl); wd[nw - 1].enabled = off;
+        }
         add("online_host", W_BUTTON, 12, 118, 100, 24, "HOST");
         wd[nw - 1].enabled = off && port_ok(); wd[nw - 1].primary = 1;
         add("online_join", W_BUTTON, 118, 118, 100, 24, "JOIN");
@@ -288,8 +301,14 @@ static void layout(void) {
         wd[nw - 1].enabled = onl.state == KLO_HOSTING && slots_up() >= 2;
         add("online_leave", W_BUTTON, 330, 118, 100, 24, "LEAVE");
         wd[nw - 1].enabled = online_busy();
-        add("online_copy", W_BUTTON, 396, 144, 72, 20, "COPY");
-        wd[nw - 1].enabled = onl.my_address[0] != 0;
+        add("online_copy", W_BUTTON, 396, 148, 72, 20, "COPY");
+        wd[nw - 1].enabled = show_addrs();
+        if (show_addrs())
+            for (int a = 0; a < addr_count(); a++) {
+                static const char *const rid[4] = { "online_ip0", "online_ip1", "online_ip2", "online_ip3" };
+                add(rid[a], W_ROW, 12, 148 + a * 11, 370, 11, "");
+                wd[nw - 1].fld = a;
+            }
         add("online_back", W_BUTTON, 380, 6, 88, 22, "BACK");
     } else if (page) {
         /* editable pages: tabs + reset + back on top, the GBA outline in the middle */
@@ -352,6 +371,8 @@ static void layout(void) {
         for (int i = 0; i < nw; i++) if (!strcmp(wd[i].id, want_focus)) focus = i;
         want_focus[0] = 0;
     }
+    if (addr_sel >= addr_count()) addr_sel = 0;
+    if (page == KL_PAGE_ONLINE && focus < nw && wd[focus].type == W_ROW) addr_sel = wd[focus].fld;   /* arrows pick the address */
 }
 
 static int find(const char *id) {
@@ -520,6 +541,11 @@ static int online_activate(const char *id) {
         if (cfg.link_delay > slider_max(2)) cfg.link_delay = slider_max(2);
         save_cfg(); return 1;
     }
+    if (!strcmp(id, "online_net")) {
+        const char *nx = !strcmp(cfg.link_transport, "auto") ? "udp" : !strcmp(cfg.link_transport, "udp") ? "tcp" : "auto";
+        snprintf(cfg.link_transport, sizeof cfg.link_transport, "%s", nx);
+        save_cfg(); return 1;
+    }
     if (!strcmp(id, "online_host") || !strcmp(id, "online_join")) {
         int join = !strcmp(id, "online_join");
         end_edit();
@@ -540,7 +566,12 @@ static int online_activate(const char *id) {
         return 1;
     }
     if (!strcmp(id, "online_copy")) {
-        if (onl.my_address[0]) { SDL_SetClipboardText(onl.my_address); set_note("ADDRESS COPIED", 0); }
+        if (show_addrs()) { SDL_SetClipboardText(addr_get(addr_sel)); set_note("ADDRESS COPIED", 0); }
+        return 1;
+    }
+    if (!strncmp(id, "online_ip", 9)) {
+        int a = id[9] - '0';
+        if (a >= 0 && a < addr_count()) addr_sel = a;
         return 1;
     }
     if (!strncmp(id, "kp_", 3) && keypad_field >= 0) {
@@ -733,6 +764,15 @@ static void draw_widget(int i) {
         text(line, k->r.x + 4, k->r.y + 4, 2, !k->enabled ? C_DIM : (k->fld == 2 && !port_ok()) ? C_ERR : C_TEXT);
         break;
     }
+    case W_ROW: {
+        int sel = k->fld == addr_sel;
+        char a[64];
+        if (sel) fill(k->r, C_PANEL);
+        clip(addr_get(k->fld), k->r.w - 24, a, sizeof a);
+        text(sel ? ">" : " ", k->r.x + 4, k->r.y + 2, 1, C_ACC);
+        text(a, k->r.x + 16, k->r.y + 2, 1, sel ? C_OK : C_TEXT);
+        break;
+    }
     case W_SHAPE: {
         int active = capture == k->btn;
         SDL_Color bg = active ? C_ACC : (is_hover ? (SDL_Color){ 90, 90, 140, 255 } : (SDL_Color){ 70, 70, 112, 255 });
@@ -748,7 +788,8 @@ static void draw_widget(int i) {
         break;
     }
     }
-    if (is_focus) {
+    if (is_focus && k->type == W_ROW) frame(k->r, C_FOCUS);
+    else if (is_focus) {
         SDL_Rect f = k->r;
         f.w = widget_w(k);
         f.x -= 3; f.y -= 3; f.w += 6; f.h += 6;
@@ -906,22 +947,27 @@ static void draw_online(void) {
     text("ADDRESS", 12, 66, 2, lab);
     text("PORT", 12, 94, 2, lab);
     text("DELAY", 170, 94, 2, lab);
-    if (onl.my_address[0]) {
-        char a[48];
-        text("YOUR ADDRESS", 12, 150, 1, C_DIM);
-        clip(onl.my_address, 290, a, sizeof a);
-        text(a, 96, 150, 1, C_OK);
+    if (onl.state == KLO_PLAYING) {                       /* connection quality (replaces the address list) */
+        static const char *const qn[4] = { "MEASURING...", "GOOD", "FAIR", "POOR" };
+        int q = onl.quality >= 0 && onl.quality <= 3 ? onl.quality : 0;
+        SDL_Color qc = q == KLQ_GOOD ? C_OK : q == KLQ_FAIR ? C_FOCUS : q == KLQ_POOR ? C_ERR : C_DIM;
+        char ql[64], sl2[48];
+        if (q && onl.ping_p95_ms >= 0) snprintf(ql, sizeof ql, "CONNECTION: %s (P95 %d MS)", qn[q], onl.ping_p95_ms > 999 ? 999 : onl.ping_p95_ms);
+        else snprintf(ql, sizeof ql, "CONNECTION: %s", qn[q]);
+        text(ql, 12, 150, 2, qc);
+        snprintf(sl2, sizeof sl2, "PAUSES OVER 100 MS: %d", onl.stalls_100ms > 9999 ? 9999 : onl.stalls_100ms);
+        text(sl2, 12, 172, 1, onl.stalls_100ms > 0 ? C_FOCUS : C_DIM);
     }
     /* slots */
-    SDL_Rect panel = { 12, 170, 456, 92 };
+    SDL_Rect panel = { 12, 194, 456, 72 };
     fill(panel, C_PANEL);
     frame(panel, C_DIM);
-    text("SLOT", 20, 173, 1, C_DIM);
-    text("NAME", 112, 173, 1, C_DIM);
-    text("STATE", 264, 173, 1, C_DIM);
-    text("PING", 440, 173, 1, C_DIM);
+    text("SLOT", 20, 197, 1, C_DIM);
+    text("NAME", 112, 197, 1, C_DIM);
+    text("STATE", 264, 197, 1, C_DIM);
+    text("PING", 440, 197, 1, C_DIM);
     for (int i = 0; i < 4; i++) {
-        int y = 186 + i * 18, sst = onl.slots[i];
+        int y = 207 + i * 14, sst = onl.slots[i];
         SDL_Color c = sst == KLS_EMPTY ? C_DIM : sst == KLS_LOST ? C_ERR : (i == onl.self_slot ? C_ACC : C_TEXT);
         char nm[16];
         text(i == 0 ? "P1 HOST" : (const char *[]){ "", "P2", "P3", "P4" }[i], 20, y, 2, c);
@@ -938,13 +984,14 @@ static void draw_online(void) {
     /* state line and hint */
     char sl[64];
     snprintf(sl, sizeof sl, "STATE: %s", online_state_text());
-    text(sl, 12, 268, 2, onl.state == KLO_DESYNC || onl.state == KLO_LOST ? C_ERR : (onl.state >= KLO_CONNECTED ? C_OK : C_TEXT));
+    text(sl, 12, 269, 2, onl.state == KLO_DESYNC || onl.state == KLO_LOST ? C_ERR : (onl.state >= KLO_CONNECTED ? C_OK : C_TEXT));
     {
         char hint[96] = "";
         SDL_Color hc = C_DIM;
         if (onl.message[0]) { snprintf(hint, sizeof hint, "%s", onl.message); hc = C_ACC; }
         else if (off && !port_ok()) { snprintf(hint, sizeof hint, "PORT MUST BE 1-65535"); hc = C_ERR; }
         else if (off && !fbuf[1][0]) snprintf(hint, sizeof hint, "TYPE THE HOST ADDRESS TO JOIN, OR PRESS HOST");
+        else if (onl.state == KLO_HOSTING && addr_count() > 1) snprintf(hint, sizeof hint, "UP/DOWN: PICK THE ADDRESS THE OTHERS CAN REACH, THEN COPY");
         else if (onl.state == KLO_HOSTING && slots_up() < 2) snprintf(hint, sizeof hint, "START NEEDS AT LEAST 2 PLAYERS");
         char h2[96];
         clip(hint, 450, h2, sizeof h2);
@@ -1191,6 +1238,7 @@ KL_API int kl_test_capture(void) { return capture; }
 KL_API const char *kl_test_note(void) { return note[0] && SDL_GetTicks() < note_until ? note : ""; }
 KL_API void kl_test_fake_pad(int present, int ax, int ay) { fake_pad = present; fake_ax = ax; fake_ay = ay; }
 KL_API int kl_test_pad_present(void) { return pad_present(); }
+KL_API int kl_test_addr_sel(void) { return addr_sel; }
 KL_API int kl_test_confirm(void) { return confirm; }
 KL_API int kl_test_editing(void) { return editing; }
 KL_API int kl_test_keypad(void) { return keypad_field; }
@@ -1239,7 +1287,7 @@ KL_API int kl_run(const char *ini_path, KlPoll poll) {
     sync_fields();
     memset(&st, 0, sizeof st);
     dropped[0] = 0; note[0] = 0; page = start_page; focus = 0; hover = -1; dragging = 0; nw = 0; capture = -1; confirm = 0;
-    editing = -1; keypad_field = -1; via_pad = 0; want_focus[0] = 0; memset(&onl, 0, sizeof onl);
+    editing = -1; keypad_field = -1; via_pad = 0; addr_sel = 0; want_focus[0] = 0; memset(&onl, 0, sizeof onl);
     fake_pad = -1; pad = NULL;
     result = KL_QUIT; running = 1;
 
@@ -1310,6 +1358,8 @@ KL_API int kl_run(const char *ini_path, KlPoll poll) {
                 online_poll(&no);
                 no.my_address[sizeof no.my_address - 1] = 0;
                 no.message[sizeof no.message - 1] = 0;
+                for (int q = 0; q < 4; q++) no.addresses[q][sizeof no.addresses[q] - 1] = 0;
+                if (no.quality < 0 || no.quality > 3) no.quality = 0;
                 for (int q = 0; q < 4; q++) no.names[q][sizeof no.names[q] - 1] = 0;
                 onl = no;
             }

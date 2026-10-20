@@ -9,6 +9,7 @@ Duas instancias reais do jogo em 127.0.0.1 (`--link host` / `--link join`), rote
 - O host rejeita ROM diferente, versao de protocolo diferente e lixo no socket.
 Lento: so com RECOMP_SLOW=1."""
 import json
+import re
 import os
 import socket
 import subprocess
@@ -16,11 +17,11 @@ import tempfile
 import time
 import unittest
 
-from tests.netharness import Cluster, LT
+from tests.netharness import Cluster, LT, exchange_prefix_ok
 from tests.test_link_lockstep import EXE, ROM, KEYS_HOST, KEYS_JOIN, free_port, stats
 
 
-def run_pair(tmp, tag, frames, host_args=(), join_args=(), env_join=None, env_host=None, wait_s=None):
+def run_pair(tmp, tag, frames, host_args=(), join_args=(), env_join=None, env_host=None, wait_s=None, join_frames=None):
     port = free_port()
     ini = os.path.join(tmp, 'empty.ini')
     open(ini, 'w').close()
@@ -38,7 +39,7 @@ def run_pair(tmp, tag, frames, host_args=(), join_args=(), env_join=None, env_ho
                             + peek + list(host_args), stdout=outs['h'], stderr=subprocess.STDOUT, text=True, env=eh)
     time.sleep(1)
     join = subprocess.Popen(base + ['--link', 'join', '--keys', KEYS_JOIN, '--link-status', os.path.join(tmp, tag + '.j.json')]
-                            + peek + list(join_args), stdout=outs['j'], stderr=subprocess.STDOUT, text=True, env=ej)
+                            + peek + (['--frames', str(join_frames)] if join_frames else []) + list(join_args), stdout=outs['j'], stderr=subprocess.STDOUT, text=True, env=ej)
     try:
         join.wait(timeout=400)
         host.wait(timeout=400)
@@ -181,6 +182,96 @@ class MaxDelayTest(unittest.TestCase):
                 hr, ho, jr, jo = run_pair(tmp, tag, frames, ['--link-delay', str(k)], [])
                 self.assertEqual((hr, jr), (0, 0))
                 self.assertEqual(stats(ho)[0], want, 'K=%d' % k)
+
+
+@unittest.skipUnless(os.environ.get('RECOMP_SLOW') and EXE and os.path.exists(ROM),
+                     'RECOMP_SLOW=1 + rt_boot + baserom.gba')
+class UdpTest(unittest.TestCase):
+    """Transporte UDP (confiabilidade por redundancia): mesmo resultado do TCP, bem menos paradas com perda real."""
+    SIM = '10,20,5,3,2'   # ida 10 ms, jitter 20, 5% de perda, 3% fora de ordem, 2% duplicados
+
+    def run_k2(self, tmp, tag, transport, sim):
+        args = ['--link-delay', '2', '--link-transport', transport]
+        jargs = ['--link-transport', transport]
+        if sim:
+            args += ['--link-sim', sim]
+            jargs += ['--link-sim', sim]
+        hr, ho, jr, jo = run_pair(tmp, tag, 3800, args, jargs)
+        self.assertEqual((hr, jr), (0, 0), ho[-600:] + jo[-600:])
+        with open(os.path.join(tmp, tag + '.h.json')) as f:
+            return stats(ho), ho, jo, json.load(f)
+
+    def test_same_hash_as_tcp_and_fewer_stalls_under_loss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            clean, ho, jo, _ = self.run_k2(tmp, 'c', 'tcp', None)
+            udp, uho, ujo, ust = self.run_k2(tmp, 'u', 'udp', self.SIM)
+            tcp, tho, tjo, tst = self.run_k2(tmp, 't', 'tcp', self.SIM)
+            self.assertEqual(clean[0], udp[0], 'UDP under loss/reorder/duplication must give the same exchange hash as TCP without loss')
+            self.assertEqual(clean[0], tcp[0])
+            for out in (uho, ujo):
+                self.assertEqual(len(re.findall(r'02038580=00000000 03002554=0000(?:8393|8303)', out)), 2, out[-500:])
+            self.assertNotIn('DESYNC', uho + ujo)
+            self.assertEqual(ust['transport'], 'udp')
+            self.assertEqual(tst['transport'], 'tcp')
+            # paradas do host: UDP bem melhor que TCP nas mesmas condicoes
+            self.assertLess(ust['stall_gt100'] + ust['stall_gt250'], (tst['stall_gt100'] + tst['stall_gt250']) / 4.0,
+                            (ust['stall_gt33'], ust['stall_gt100'], ust['stall_gt250'], tst['stall_gt33'], tst['stall_gt100'], tst['stall_gt250']))
+            self.assertLess(ust['stall_gt33'], tst['stall_gt33'] / 2.0)
+            self.assertGreater(ust['udp_dup_rx'] + ust['udp_retx'], 0)
+            print('\nUDP stalls >33/>100/>250: %d/%d/%d  TCP: %d/%d/%d' % (ust['stall_gt33'], ust['stall_gt100'], ust['stall_gt250'],
+                                                                          tst['stall_gt33'], tst['stall_gt100'], tst['stall_gt250']))
+
+    def test_udp_reference_hash_and_clean_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            hr, ho, jr, jo = run_pair(tmp, 'z', 3200, ['--link-delay', '0', '--link-transport', 'udp'], ['--link-transport', 'udp'])
+            self.assertEqual((hr, jr), (0, 0))
+            self.assertEqual(stats(ho)[0], '3f70b1ec58b17557')
+            t0 = time.time()
+            hr, ho, jr, jo = run_pair(tmp, 'y', 900, ['--link-transport', 'udp'], ['--link-transport', 'udp'], join_frames=1800)
+            self.assertEqual((hr, jr), (0, 0))
+            self.assertIn('host disconnected', jo)   # BYE: sem esperar os 8 s de timeout
+            self.assertNotIn('no datagram from the peer', jo)
+
+    def test_udp_hello_checks_and_tcp_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for var, text in (('KIRBY_LINK_TEST_BADROM', 'different ROM'), ('KIRBY_LINK_TEST_BADVER', 'protocol version')):
+                hr, ho, jr, jo = run_pair(tmp, 's', 60, ['--link-transport', 'udp'], ['--link-transport', 'udp'], env_join={var: '1'}, wait_s=3)
+                self.assertIn(text, ho)
+                self.assertIn('rejected', jo)
+                self.assertIn('running without cable', jo)
+            # auto: o host escuta TCP+UDP; o filho que nao fala UDP (host so TCP) cai para TCP em 3 s
+            hr, ho, jr, jo = run_pair(tmp, 'f', 120, ['--link-transport', 'tcp'], ['--link-transport', 'auto'], wait_s=30)
+            self.assertEqual((hr, jr), (0, 0), jo[-400:])
+            self.assertIn('falling back to tcp', jo)
+            self.assertIn('(lockstep)', jo)
+            hr, ho, jr, jo = run_pair(tmp, 'g', 120, ['--link-transport', 'auto'], ['--link-transport', 'auto'], wait_s=30)
+            self.assertEqual((hr, jr), (0, 0))
+            self.assertIn('player 2 connected (udp)', ho)
+
+    def test_coop_over_udp_with_loss_matches_tcp_hash(self):
+        """Co-op (2 jogadores, K=2) com 5% de perda, jitter 20 ms e reordenacao: chega ao co-op sem erro e o hash do host
+        e o mesmo do TCP sem perda."""
+        def run(extra):
+            with Cluster(2, COOP + 1, extra=['--link-delay', '2'] + extra) as c:
+                return c.run(timeout=400)
+        tcp = run(['--link-transport', 'tcp'])
+        udp = run(['--link-transport', 'udp', '--link-sim', self.SIM])
+        for r in tcp + udp:
+            self.assertEqual(r.rc, 0, r.err[-300:])
+            self.assertTrue(reached_coop(r, 2), (r.idx, r.state(COOP)))
+        self.assertEqual(tcp[0].hash[0], udp[0].hash[0])
+        self.assertTrue(exchange_prefix_ok(udp[0], udp[1])[0])
+
+    def test_four_players_over_udp_reach_coop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            c = Cluster(4, COOP + 1, extra=['--link-delay', '1', '--link-transport', 'udp', '--link-sim', '3,3,2,2,1'])
+            with c:
+                res = c.run(timeout=400)
+            for r in res:
+                self.assertEqual(r.rc, 0, r.err[-300:])
+                self.assertTrue(reached_coop(r, 4), (r.idx, r.state(COOP)))
+            for r in res[1:]:   # o log de cada filho e prefixo do log do host
+                self.assertTrue(exchange_prefix_ok(res[0], r)[0], r.idx)
 
 
 if __name__ == '__main__':

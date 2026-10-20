@@ -1284,8 +1284,21 @@ typedef struct {
     int self_slot;           /* 0..3 or -1 */
     char my_address[48];     /* host: "192.168.1.5:47900" (enables COPY) */
     char message[96];        /* optional line (errors/hints) shown under the state; '' = the UI's own hint */
+    /* --- added at the END (item 18b); a launcher built for the older struct just leaves them zero --- */
+    int quality;             /* KLQ_UNKNOWN 0, GOOD 1, FAIR 2, POOR 3 (only shown while PLAYING) */
+    int stalls_100ms;        /* pauses > 100 ms in this session */
+    int ping_p95_ms;         /* RTT p95 in ms */
+    char addresses[4][48];   /* HOSTING: up to 4 "ip:port" of this PC, '' ends the list */
 } KlOnline;
 ```
+- **18b. Connection quality + address list (Gwen).** *PLAYING:* a line `CONNECTION: GOOD|FAIR|POOR (P95 NN MS)` (green / yellow / red;
+  `MEASURING...` for quality 0, no p95) and a small `PAUSES OVER 100 MS: N` line (yellow when > 0) take the place of the address list.
+  *Not playing, with addresses:* one selectable row per address (decision: a **new field** `addresses[4][48]`, not ';'-separated;
+  if it is empty, `my_address` alone is shown as a one-entry list). Up/Down (or d-pad) move between rows and the focused row IS the
+  selection (marked `>`), a click/Enter on a row selects it; `COPY` copies the selected one; with more than one address the hint line
+  says to pick the address the others can reach (VPN/Hamachi/Radmin). Order = the order the launcher sends (put the likeliest first).
+  The slots panel moved down (y 194..266) to make room; geometry tests cover long names, 47-char addresses, p95 5000, stalls 99999.
+  New test hook `kl_test_addr_sel()`. Test: `test_kirby_ui_online` scenario E.
 - **`[link]` contract in kirby.ini** (same keys as `rt_sio_read_ini`): `mode=off|host|join|solo`, `host=` (IP/name, default `127.0.0.1`),
   `port=` (1..65535, 47900), `players=` (2..4, 2), `delay=auto|0..8` (default `auto` = -1, the runtime's frames of host slack),
   `name=` (<= 15 printable characters, `Player`; read by config_ini only - the runtime does not read it yet).
@@ -1935,6 +1948,24 @@ cache global do zig, +alguns s).
 **Regra implementada (`link_k_max`):** K maximo = **2 com 2 jogadores, 1 com 3 ou 4**. `delay=auto` (K = ceil((RTT-12)/16,7)+1) respeita esse maximo. `delay=`/`--link-delay` explicito acima do maximo e **reduzido ao maximo com aviso**, e a sessao nunca comeca com um K que sabidamente nao chega ao co-op: `[link] K=2 is above 1 for 3 players, using 1` (valida tambem K=3..8 com 2 jogadores: `K=3 is above 2 for 2 players, using 2`). Escape de diagnostico: `KIRBY_LINK_FORCE_K=1` mantem o valor pedido (so aviso `forced by KIRBY_LINK_FORCE_K: the game will not reach the lobby`), para testes que documentam o limite (os de K>=3 e de 3-4 jogadores com K=2 da Poppy precisam desse env agora).
 **JSON (`--link-status`):** novos campos `delay` (K efetivo) e `delay_max` (maximo para o numero de jogadores). O filho recebe os dois do host (mensagem `INFO`, tipo 11) e mostra o mesmo valor. Velocidade cheia (60 q/s): periodo do quadro ~ (RTT+4)/(K+1): 2 jogadores ate RTT ~45 ms; **3-4 jogadores ate ~29 ms** (K=1); acima o host espera (jogo mais lento, sem erro). O RTT que vale e o do PIOR filho.
 **Testes (`tests/test_link_net.py::MaxDelayTest`, RECOMP_SLOW=1; usa `tests/netharness.py` sem editar):** pedido acima do maximo (2 jog. K=3 -> 2; 3 e 4 jog. K=2 -> 1) chega ao co-op nos N jogadores (`0x0203AD10=2`, jogadores=N, erro 0), mensagem no log e JSON `delay`/`delay_max`; `auto` com 35 ms de ida (proxy no join 1) -> K=2 com 2 jogadores e K=1 com 3; hashes de referencia K=0/K=2 (2 jogadores) iguais aos de antes.
+
+### Cabo link P2d: medicao de paradas e transporte UDP (Nasus)
+**Contexto:** sessao real de ~9 min em 2 PCs (Wi-Fi + VPN Radmin, K=2): RTT 12-42 ms (media 28), picos de 389 e 621 ms, espera maxima do host 602 ms. Hipotese: perda no tunel + retransmissao do TCP (RTO >= 200 ms). **Confirmada na simulacao** (abaixo): com 5% de perda o TCP gera centenas de paradas > 100 ms; o UDP com redundancia, quase nenhuma.
+**Parte 1 - medicao** (JSON de `--link-status`, log a cada 600 quadros e linha-resumo no fim da sessao; os campos antigos ficam): `stall_gt33`, `stall_gt100`, `stall_gt250` (esperas do host pelo filho acima de 33/100/250 ms; no filho, esperas pelo quadro do host), `stalls_total` (esperas > 1 quadro = 16,7 ms), `frames_total`, `rtt_p50_ms[4]`, `rtt_p95_ms[4]`, `rtt_p99_ms[4]` (janela movel de 1024 amostras por jogador), `transport` (tcp|udp|mixed), `udp_retx`, `udp_dup_rx`. O PING subiu de 30 para **10 quadros** (15 B por PING+PONG = ~1,5 B/quadro, desprezivel; a janela de 1000 amostras cobre ~170 s). Resumo no `kirby.log` ao sair: `[link] session summary (host, udp, K=2): 3803 frames, rtt p50/p95/p99 ..., host waits >33 ms: N, >100 ms: N, >250 ms: N (waits >1 frame: N of F frames, longest X ms), KB enviados/recebidos`.
+**Parte 2 - transporte UDP** (`[link] transport=tcp|udp|auto`, `--link-transport`; **padrao continua tcp**): mesmas mensagens do TCP (HELLO/WELCOME/REJECT/INFO/FRAME/DONE/PING/PONG), mesmo codec, **mesmo hash** (K=0 `3f70b1ec58b17557`, K=2 `57fb962b2ca52a64`, com e sem perda). Camada de confiabilidade em `rt_sio.c` (secao "UDP"):
+- Datagrama DATA `[0xA1][sessao u32][ack u32][n u8]` + n x `[seq u32][tipo u8][tam u16][carga]`; ack cumulativo = maior seq recebida EM ORDEM. **Cada datagrama leva todas as mensagens ainda nao confirmadas** (ate 12 / ~1180 B, <= 1200 B: sem fragmentacao IP), entao a perda de um datagrama e coberta pelo seguinte, sem esperar retransmissao. Receptor: ignora duplicatas, reordena numa janela de 32, entrega em ordem. Ack-only apos 10 ms sem envio; reenvio por timer de 200 ms so como rede de seguranca; keepalive 1 s.
+- Handshake: `HELLO [0xA0]` a cada 200 ms (ate 3 s no modo auto, ate o limite de espera no udp); o host valida magic/versao/SHA-1 da ROM/sala cheia/sessao iniciada e responde `REJECT [0xA2][motivo]` (lixo com magic errado nao recebe resposta); o `WELCOME` ja vai pela camada confiavel (HELLO repetido reenvia). Saida: `BYE [0xA3][sessao]` (2x); timeout sem receber nada = `KIRBY_LINK_TIMEOUT_MS` (8 s). Nada de ROM trafega.
+- Um unico socket no host atende varios filhos, distinguidos por endereco:porta + id de sessao (aleatorio); 4 jogadores funcionam. Socket nao bloqueante, mesmas esperas/`rt_link_idle` do TCP (a janela nao trava). Windows: `SIO_UDP_CONNRESET` desligado (sem WSAECONNRESET espurio).
+- `transport=auto`: o host escuta TCP e UDP na mesma porta; o filho tenta UDP por 3 s e cai para TCP (`no answer over udp in 3 s: falling back to tcp`). **Proposta:** tornar `auto` o padrao depois de uma sessao real em Internet/VPN; tcp continua disponivel.
+- `--link-sim lat,jitter,perda%[,reordena%[,duplica%]]`: com UDP a perda e **real** (o datagrama some), `reordena` atrasa o datagrama alem dos seguintes e `duplica` o envia 2x; semente fixa. No TCP a "perda" continua modelando retransmissao (RTO 200 ms + 3 x lat) e os dois ultimos campos sao ignorados.
+**Resultado (SUB-GAMES > Speed Eaters, K=2, 3800 quadros, `--link-sim 10,20,5,3,2` = ida 10 ms, jitter 20 ms, 5% de perda, 3% fora de ordem, 2% duplicados; mesmas condicoes nos dois):**
+| | paradas do host > 33 ms | > 100 ms | > 250 ms | esperas > 1 quadro | RTT p50/p95/p99 (ms) | enviado pelo host |
+|---|---|---|---|---|---|---|
+| TCP | 495 | 301 | 95 | 1189 | 34 / 259 / 409 | 127 KB |
+| **UDP** | **30** | **0** | **0** | 364 | 13 / 36 / 52 | 458 KB |
+O hash do fluxo de trocas e **o mesmo do TCP sem perda** (`57fb962b2ca52a64`), nos dois lados, com `0x02038580 = 0` e gLink sincronizado (0x8393/0x8303) nos quadros 3000 e 3790; sem `DESYNC`. Custo: a redundancia manda ~3,6x mais bytes (~120 B/quadro do host, ~7 KB/s) - desprezivel em LAN/VPN. Co-op de 2 jogadores (K=2) com a mesma perda: hash do host igual ao do TCP limpo e co-op alcancado; 4 jogadores (K=1) por UDP com perda: co-op alcancado nos 4.
+**Testes (`tests/test_link_net.py::UdpTest`, RECOMP_SLOW=1):** mesmo hash do TCP sob perda + paradas UDP < 1/4 das do TCP (>100/>250) e < 1/2 (>33); hash de referencia K=0 em UDP e saida limpa do filho quando o host sai (BYE, sem esperar 8 s); HELLO invalido (ROM/versao) recusado em UDP; fallback `auto` -> TCP quando o host so fala TCP; 4 jogadores por UDP com perda chegam ao co-op; co-op 2 jogadores sob perda com hash igual ao do TCP.
+**Fix de passagem:** `rt_sio_report` agora fecha o transporte ao terminar (o UDP manda BYE; o filho nao espera mais 8 s quando o host sai).
 
 ## Som (M4A) e save (SRAM) (Riven)
 Fonte: desmontagem a mao dos enderecos abaixo (capstone) + ram_code.csv da Poppy. E o motor
@@ -2679,3 +2710,50 @@ Nao testavel hoje: perda recuperavel (UDP), reconexao do filho, host migrando.
 **Testes:** `tests/test_launcher_flow.py` (37: sessão, controlador, ini), `tests/test_link_launcher.py` (RECOMP_SLOW: status em espera, START, join paciente, 78, `--link off`), UI (`run_ui.ps1`). Simulação de duas sessões do launcher com `rt_boot` real: espera/slots/mensagens OK; o jogo em si só roda de verdade (janela) no `kirby.exe` do pacote.
 **Decisão:** online usa SEMPRE o build do interpretador (o compilado pode ficar pronto em um PC e não no outro, e o lockstep exige o mesmo código). Risco aberto: velocidade do interpretador em PCs fracos (medido ~7x tempo real no runtime de teste) e o firewall do Windows pergunta na 1ª vez que o host abre a porta.
 **Falta:** teste em 2 PCs reais (roteiro da Poppy, secção 14), 4 jogadores pela UI, e README/release.
+
+
+### 15. P1e: proxy UDP, "Wi-Fi ruim" TCP x UDP, robustez do UDP e QA manual tcp x udp (Poppy, 2026-10-20)
+**Estado**: o `rt_boot.exe` de 19/10 AINDA NAO tem o transporte UDP (sem `--link-transport` no binario; "P2d" da Nasus nao publicada). Entreguei a infraestrutura e os testes, que **pulam sozinhos** ate o executavel ter a flag (`netharness.udp_supported()`; nome em `netharness.TRANSPORT_FLAG = '--link-transport'`, proposto no ROLES.md - mude 1 linha se a Nasus usar outro). Os numeros da tabela abaixo sao do **TCP**; a coluna UDP sai com `python tests\netbench.py --transports tcp,udp` assim que existir.
+**Ferramentas** (`tests/`, nenhum arquivo da Nasus editado):
+- `netharness.UdpProxy`: entre 1 join e o host, sem conhecer o formato dos datagramas. Perda aleatoria, **rajadas** (`burst=(a_cada_s, ms)`), latencia, jitter, **reordenacao** (`reorder_pct`/`reorder_ms`), **duplicacao**, `stall(s)` (segura e libera), `outage(s)` (descarta por s), `cut()` (para sempre), **corrupcao de 1 bit** (`corrupt_pct`), `captured`/`replay(i)`/`inject(dados)` (replay e datagrama avulso). Cuidado de Windows ja tratado: o ICMP "porta fechada" vira `ConnectionResetError` no `recvfrom`.
+- `netharness.TcpProxy` ganhou `loss_model='retransmit'` (perda = atraso de RTO 200 ms com bloqueio de cabeca de fila, como TCP de verdade; o `'drop'` antigo mata a sessao) e `burst=`. Os dois proxies registram o instante de cada entrega host->filho (`delivered`) -> `gap_stats` = paradas > 33/100/250 ms.
+- `Cluster(..., transport='tcp'|'udp')`, `Result.status()` (JSON do `--link-status`), `KIRBY_LINK_FORCE_K` nos testes de K.
+- `tests/test_netharness.py` (13 testes, ~15 s, sem jogo): valida os proxies e as pecas dos testes UDP.
+- `tests/netbench.py`: matriz de cenarios (tabela abaixo) para qualquer transporte; `--players 4`, `--out arq.json`, `--extra "--link-delay 2"`.
+- `tests/test_link_network.py`: os 4 testes de K agora usam `KIRBY_LINK_FORCE_K=1` (K=3/4 com 2 jogadores e K=2 com 3-4 jogadores precisam forcar; sem o env o runtime limita) + novo `test_k_above_max_is_clamped_without_force` (K=3 -> 2; 3-4 jogadores K=2 -> 1, e o co-op chega). As classes `TestBaseline/Disconnect/Hello/Desync/Latency` ganham variantes `*UDP`.
+- `tests/test_link_udp.py` (lento, so com UDP): Wi-Fi ruim (perda 1/3/5/10%, jitter 10/25/40, rajadas 100/300 ms, perfil VPN com picos de 620 ms, reordenacao+duplicacao, 4 jogadores com perda, bit invertido) e **robustez do socket** (item 3 da tarefa): datagramas lixo de 0 a 65507 B antes e durante a partida, **replay** de datagramas antigos (inclusive o HELLO) de outra porta, HELLO falso, datagrama acima do limite, ROM/versao errada, sala cheia, sessao ja iniciada, host que some, filho que some, corte total, corte curto. Criterio: rc 0, sem travar (tempo limite), sem DESYNC falso e **nunca fluxo divergente sem aviso** (`silent_divergence`).
+
+**"Wi-Fi ruim" - TCP** (proxy com TCP real; base = 15 ms por sentido +-10 ms = RTT ~30 ms, K=auto, co-op completo de 3001 quadros, 2 jogadores; "q/s" = velocidade BRUTA sem pacing (60 = tempo real); "perdas" = segmentos perdidos e retransmitidos; ">33/>100/>250" = intervalos entre entregas ao filho maiores que esse limite (ms); erros = rc, DESYNC, fluxo divergente, fora do co-op):
+| cenario | q/s | perdas | >33 | >100 | >250 | maior parada | erros |
+|---|---|---|---|---|---|---|---|
+| limpo (RTT 30) | 60,5 | 0 | 267 | 0 | 0 | 81 ms | nenhum |
+| perda 1% | 48,5 | 70 | 413 | 68 | 0 | 247 ms | nenhum |
+| perda 3% | 38,0 | 180 | 589 | 153 | 4 | 410 ms | nenhum |
+| perda 5% | 30,9 | 302 | 689 | 245 | 6 | 434 ms | nenhum |
+| perda 10% | 21,3 | 623 | 966 | 456 | 36 | 450 ms | nenhum |
+| jitter 10 ms | 61,0 | 0 | 283 | 0 | 0 | 60 ms | nenhum |
+| jitter 25 ms | 45,1 | 0 | 802 | 2 | 0 | 110 ms | nenhum |
+| jitter 40 ms | 34,9 | 0 | 1111 | 30 | 1 | 313 ms | nenhum |
+| rajada 100 ms a cada 2 s | 51,8 | 87 | 286 | 28 | 28 | 439 ms | nenhum |
+| rajada 300 ms a cada 2 s | 46,2 | 99 | 325 | 32 | 32 | 529 ms | nenhum |
+| perfil seu (8 ms +-15, rajada 400 ms/15 s) | 66,8 | 6 | 204 | 3 | 2 | 591 ms | nenhum |
+| perfil seu + 2% perda + rajada 620 ms/10 s | 43,8 | 137 | 324 | 113 | 8 | 832 ms | nenhum |
+Leitura: **o TCP nunca erra, so fica lento** (a retransmissao de 200 ms e o bloqueio de cabeca de fila viram paradas): ja com **1% de perda sai do tempo real (48 q/s)**, 3% -> 38 q/s, 10% -> 21 q/s, e jitter >= 25 ms tambem tira. Uma rajada de 300 ms vira ~1 parada de 300-500 ms por rajada. Criterio de "jogavel" que uso: >= 55 q/s sustentado e nenhuma parada > 250 ms.
+**UDP - em que perda deixa de ser jogavel: NAO MEDIDO ainda (sem transporte).** O que o teste vai responder: rodar `python tests\netbench.py --transports udp --scen clean,loss1,loss3,loss5,loss10,burst100,burst300,real,real_x,udp_chaos` e ler a coluna q/s e as paradas; o limite e a menor perda em que q/s < 55 ou aparece parada > 250 ms ou erro. Referencia para comparar: com K=2 (33 ms de folga) uma rajada > ~33 ms de perda precisa de redundancia/reenvio para nao parar, e acima de ~5-8% a redundancia sozinha tende a nao bastar. Registrar o numero medido aqui quando houver.
+
+**Roteiro manual de QA - comparar TCP x UDP em 2 PCs (Wi-Fi e VPN)**. Pre-requisitos: o roteiro da secao 14 ja passou em LAN por cabo (TCP). Dois PCs, mesma versao e ROM; um em Wi-Fi (idealmente o pior sinal) e, se possivel, o link por VPN. Repita CADA passo duas vezes, uma com `transport=tcp` e outra com `transport=udp` (launcher: campo TRANSPORT; linha de comando `--link-transport tcp|udp`), mesma sala/horario, e anote lado a lado.
+1. **Preparo**: dois `kirby.log`; em cada PC `ping -n 60 IP_DO_OUTRO` (anotar min/media/max e % de perda) ANTES; em cada PC abrir um terminal para `type kirby.log` e o arquivo de `--link-status` (`--link-status C:\temp\st.json`, regravado a cada 60 quadros).
+2. **Entrada e delay**: mesmo roteiro do co-op (secao 13). Ler no log: `RTT x ms -> input delay K=n (auto)` (K escolhido) e, no JSON, `rtt_ms`, `rtt_avg_ms`, `rtt_max_ms` (+ `rtt_p95_ms`/`rtt_p99_ms` e as contagens de **parada** da P2d quando existirem). Para N >= 3, K <= 1.
+3. **Jogo parado ("fluidez")**: 10 min de jogo andando e pulando sem parar. Anotar a olho e pelo JSON: quadros/s medios (campo `frame` x tempo, ou o log a cada 600 quadros), `wait_frames`/`wait_ms`/`wait_max_ms` (quanto o jogo esperou o outro lado), quantas **paradas > 100 ms / > 250 ms** o jogo teve, e se houve "camera lenta" persistente. Cronometre um trecho de 60 s: contar quadros pelo contador do JSON.
+4. **Piora provocada**: (a) afaste o PC do Wi-Fi do roteador / ande com ele ate o pior sinal por 2 min; (b) abra um download pesado no mesmo Wi-Fi; (c) em PowerShell administrador `Disable-NetAdapter` por 1 s e `Enable-NetAdapter` (rajada); (d) com `clumsy` (se disponivel) 3% / 5% / 10% de perda e 40 ms de jitter. Para cada um: sobreviveu sem erro? quantos segundos de parada? voltou sozinho? Comparar TCP x UDP.
+5. **Cortes**: tirar o Wi-Fi por 2 s, 10 s e 30 s e religar; fechar o jogo de um lado; hibernar o PC do join por 30 s. Esperado: sem travar nenhum processo; mensagem clara; UDP nao deve ficar mais tempo "pendurado" que o TCP.
+6. **Seguranca basica (LAN)**: de um terceiro PC ou do proprio, `nmap -sU -p 47900 IP` ou um script que mande lixo UDP (`python -c "import socket;s=socket.socket(2,2);[s.sendto(b'x'*n,('IP',47900)) for n in (0,1,26,1500,65000) for _ in range(50)]"`) durante a partida: o jogo nao pode cair nem engasgar; tentar entrar numa sala cheia e depois do inicio: recusado.
+7. **Colher logs** (os dois PCs, os dois transportes): `kirby.log`, o JSON `--link-status` (copiar o arquivo ao fim e tambem uma copia no meio), `ping` antes/depois, descricao do que se fez e hora, versao e SHA-1 da ROM. Se rodou por linha de comando com `--bench`: o `LINK exchange hash` e `LINK: N exchanges`. Rodar no PC de teste: `python tests\netbench.py --transports tcp,udp --scen real,real_x` para ter a referencia de proxy da mesma versao.
+8. **Tabela de resultado** (preencher): transporte | rede (Wi-Fi/VPN, RTT min/med/max, % perda do ping) | K | q/s medio | paradas >100 ms | paradas >250 ms | maior parada | erros/DESYNC | observacao subjetiva (0-5).
+**Aprovacao do UDP**: >= TCP em q/s e paradas em TODA condicao testada; melhor que o TCP com perda >= 1% e com rajadas; nenhum DESYNC; sem travamento em corte/lixo/sala cheia. **Bloqueia release**: UDP pior que TCP em Wi-Fi bom, travamento, crash com datagrama lixo, DESYNC calado.
+
+### Online: UDP, qualidade e lista de IPs ligados no launcher (Riven, 2026-10-20)
+- **TRANSPORT na tela:** botão `NET AUTO|UDP|TCP` na página ONLINE (muda a cada clique; salva `[link] transport=` no kirby.ini; padrão **auto** = UDP e, se o host não responder em 3 s, TCP). Para caber, o slider DELAY ficou com 80 px (o texto do valor continua à direita). O launcher passa `--link-transport` ao `kirby.exe`. Host e join devem usar o mesmo valor (host em `auto` aceita TCP e UDP).
+- **Qualidade (`link_quality`, flow.py)** do JSON do jogo: desconhecida nos primeiros 300 quadros; **GOOD** p95 < 60 ms e < 1 parada > 100 ms por minuto; **POOR** p95 >= 120 ms ou >= 6 paradas > 100 ms/min; FAIR no meio. Vai em `KlOnline.quality/stalls_100ms/ping_p95_ms` (struct estendida no fim, 452 bytes; teste confere o tamanho e os offsets 248/260 com o C).
+- **Lista de IPs:** `online_addresses` manda até 4 `ip:porta` do PC (rota padrão primeiro; sem 127.x/169.254.x); com VPN (Radmin 26.x, Hamachi 25.x, Tailscale 100.64/10) o IP certo costuma ser o da VPN: a tela deixa escolher e COPY copia o selecionado.
+- **Testes:** `tests/test_launcher_flow.py` (44 com os de interp) e `hw/tests/run_ui.ps1` (o teste de geometria inclui `online_net`).

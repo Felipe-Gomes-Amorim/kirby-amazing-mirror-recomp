@@ -92,7 +92,8 @@ static void fresh_ini(const char *txt) {
 
 /* ---------------------------------------------------------------- layout */
 static const char *const ONL_IDS[] = { "online_name", "online_p2", "online_p3", "online_p4", "online_addr", "online_port",
-    "online_delay", "online_host", "online_join", "online_start", "online_leave", "online_copy", "online_back" };
+    "online_delay", "online_net", "online_host", "online_join", "online_start", "online_leave", "online_copy", "online_back",
+    "online_ip0", "online_ip1", "online_ip2", "online_ip3" };
 static const char *const KP_IDS[] = { "kp_0", "kp_1", "kp_2", "kp_3", "kp_4", "kp_5", "kp_6", "kp_7", "kp_8", "kp_9",
     "kp_del", "kp_clr", "kp_dot", "kp_ok", "kp_cancel" };
 
@@ -396,6 +397,8 @@ static void scen_states(int s) {
             }
             cur_on.self_slot = k % 4;
             snprintf(cur_on.my_address, sizeof cur_on.my_address, "very-long-host-name.example.org:47900 and more more");
+            for (int q = 0; q < 4; q++) memset(cur_on.addresses[q], '9' - q, sizeof cur_on.addresses[q] - 1);
+            cur_on.quality = k % 4; cur_on.stalls_100ms = 99999; cur_on.ping_p95_ms = 5000;
             snprintf(cur_on.message, sizeof cur_on.message,
                      "A very long status message that has to be clipped inside the canvas width and not overflow it ok");
         } else if (ph == 2) {
@@ -405,6 +408,59 @@ static void scen_states(int s) {
         }
     }
     if (s == 2 + n * 3) quit_now();
+}
+
+
+/* ---------------------------------------------------------------- E: address list + connection quality */
+static void scen_addr(int s) {
+    switch (s) {
+    case 2:
+        cur_on.state = KLO_HOSTING;
+        cur_on.slots[0] = KLS_READY;
+        snprintf(cur_on.addresses[0], 48, "192.168.1.5:47900");
+        snprintf(cur_on.addresses[1], 48, "25.10.20.30:47900");
+        snprintf(cur_on.addresses[2], 48, "26.1.2.3:47900");
+        break;
+    case 4:
+        CHECK(kl_test_widget("online_ip0", NULL, NULL, NULL, NULL) && kl_test_widget("online_ip2", NULL, NULL, NULL, NULL) &&
+              !kl_test_widget("online_ip3", NULL, NULL, NULL, NULL), "one row per address (3 here)");
+        CHECK(kl_test_addr_sel() == 0, "the first address is selected by default");
+        if (layout_problems("addresses", ONL_IDS, (int)(sizeof ONL_IDS / sizeof ONL_IDS[0]), 1)) fails++;
+        kl_test_set_focus("online_ip0");
+        break;
+    case 5:
+        key(SDLK_DOWN);
+        break;
+    case 7:
+        CHECK(!strcmp(kl_test_focus(), "online_ip1") && kl_test_addr_sel() == 1, "Down moves to the next address and selects it");
+        click("online_copy");
+        break;
+    case 9: {
+        char *t = SDL_GetClipboardText();
+        CHECK(t && !strcmp(t, "25.10.20.30:47900"), "COPY puts the SELECTED address on the clipboard");
+        if (t) SDL_free(t);
+        click("online_ip2");
+        break;
+    }
+    case 11:
+        CHECK(kl_test_addr_sel() == 2, "clicking a row selects it");
+        cur_on.state = KLO_PLAYING; cur_on.quality = KLQ_FAIR; cur_on.ping_p95_ms = 88; cur_on.stalls_100ms = 3;
+        break;
+    case 13:
+        CHECK(!kl_test_widget("online_ip0", NULL, NULL, NULL, NULL) && !kl_test_enabled("online_copy"),
+              "no address list (and COPY off) while PLAYING: the connection line takes its place");
+        if (layout_problems("playing", ONL_IDS, (int)(sizeof ONL_IDS / sizeof ONL_IDS[0]), 1)) fails++;
+        memset(cur_on.addresses, 0, sizeof cur_on.addresses);
+        snprintf(cur_on.my_address, sizeof cur_on.my_address, "10.0.0.2:47900");
+        cur_on.state = KLO_HOSTING;
+        break;
+    case 15:
+        CHECK(kl_test_widget("online_ip0", NULL, NULL, NULL, NULL) && !kl_test_widget("online_ip1", NULL, NULL, NULL, NULL),
+              "my_address alone is a one-entry list");
+        quit_now();
+        break;
+    default: break;
+    }
 }
 
 static void scen_keypad_geometry(int s) {
@@ -468,6 +524,10 @@ int main(int argc, char **argv) {
     reset_online();
     rc = run_script(scen_keypad_geometry, 1);
     CHECK(rc == KL_QUIT, "keypad geometry scenario ends with quit");
+
+    reset_online();
+    rc = run_script(scen_addr, 1);
+    CHECK(rc == KL_QUIT, "address list scenario ends with quit");
 
     /* no poll: the page still works and shows an offline state */
     kl_set_online_poll(NULL);

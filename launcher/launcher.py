@@ -541,6 +541,19 @@ class LauncherEnv:
             pass
         return '%s:%s' % (ip, port)
 
+    def online_addresses(self, port):
+        """Every IPv4 address of this PC as 'ip:port' (the default-route one first). With a VPN (Radmin, Hamachi,
+        Tailscale) the address friends need is the VPN adapter's, which is not always the first."""
+        import socket
+        ips = []
+        first = self.online_address(port).rsplit(':', 1)[0]
+        for ip in [first] + [a[4][0] for a in _host_addrs()]:
+            if ip and ip not in ips and not ip.startswith(('127.', '169.254.', '0.')):
+                ips.append(ip)
+        if not ips:
+            ips = [first]
+        return ['%s:%s' % (ip, port) for ip in ips[:4]]
+
     def online_request_start(self, flag):
         with open(flag, 'w') as f:
             f.write('1')
@@ -561,7 +574,8 @@ class LauncherEnv:
         if not exe:
             return None
         self.backup_now()
-        args = [exe, self.rom, '--gui', '--link', role, '--link-port', str(p['port']), '--link-status', status, '--link-required']
+        args = [exe, self.rom, '--gui', '--link', role, '--link-port', str(p['port']), '--link-status', status, '--link-required',
+                '--link-transport', p.get('transport', 'auto')]
         if role == 'host':
             args += ['--link-players', str(p['players']), '--link-delay', str(p['delay']),
                      '--link-bind', '0.0.0.0', '--link-start-file', flag]
@@ -617,6 +631,14 @@ class KlUI:
         if hasattr(self.dll, 'kl_set_start_page'):
             self.dll.kl_set_start_page.argtypes = [ctypes.c_int]
             self.dll.kl_set_start_page(int(page))
+
+
+def _host_addrs():
+    import socket
+    try:
+        return socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+    except OSError:
+        return []
 
 
 def shift_held():

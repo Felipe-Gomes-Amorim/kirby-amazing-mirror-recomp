@@ -217,6 +217,7 @@ int main(int argc, char **argv) {
             if (link_delay > 8) link_delay = 8;
             link_cli_mask |= 8;
         }
+        else if (!strcmp(argv[i], "--link-transport") && i + 1 < argc) rt_link_set_transport(argv[++i]);   /* tcp | udp | auto */
         else if (!strcmp(argv[i], "--link-bind") && i + 1 < argc) rt_link_set_bind(argv[++i]);
         else if (!strcmp(argv[i], "--link-sim") && i + 1 < argc) rt_link_sim(argv[++i]);   /* "lat_ms,jitter_ms,perda%" (testes) */
         else if (!strcmp(argv[i], "--link-status") && i + 1 < argc) rt_link_status_path = argv[++i];

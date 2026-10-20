@@ -13,7 +13,7 @@ from flow import (Controller, FakeUI, BuildMonitor, STATE_PREPARING, STATE_FAST,
                   KL_OPEN_SAVE_DIR, KL_EXPORT_SAVE, KL_IMPORT_SAVE, OnlineSession, set_ini_value,
                   online_params, KLO_OFFLINE, KLO_HOSTING, KLO_CONNECTING, KLO_CONNECTED, KLO_PLAYING,
                   KLO_DESYNC, KLO_LOST, KLS_EMPTY, KLS_CONNECTED, KLS_READY, KLS_LOST, EXIT_NO_LINK,
-                  KL_PAGE_ONLINE, KlOnlineC)
+                  KL_PAGE_ONLINE, KlOnlineC, link_quality, KLQ_UNKNOWN, KLQ_GOOD, KLQ_FAIR, KLQ_POOR)
 
 
 class FakeEnv:
@@ -295,6 +295,9 @@ class OnlineEnv(FakeEnv):
     def online_address(self, port):
         return '192.168.1.5:%s' % port
 
+    def online_addresses(self, port):
+        return ['192.168.1.5:%s' % port, '26.4.3.2:%s' % port]
+
     def online_launch(self, role, p, status, flag):
         self.launched.append((role, dict(p)))
         return self.proc
@@ -468,9 +471,38 @@ class OnlineSessionTests(unittest.TestCase):
             f.write('{ "state": "lock')              # half written
         self.assertEqual(self.s.snapshot()['state'], KLO_HOSTING)
 
+    def test_quality_levels_from_the_status_json(self):
+        base = dict(frames_total=3600, rtt_p95_ms=[0, 30.0, 0, 0], stall_gt100=0)
+        self.assertEqual(link_quality(base), (KLQ_GOOD, 0, 30))
+        self.assertEqual(link_quality(dict(base, frames_total=100))[0], KLQ_UNKNOWN)         # too early
+        self.assertEqual(link_quality(dict(base, rtt_p95_ms=[0, 75.0, 0, 0]))[0], KLQ_FAIR)
+        self.assertEqual(link_quality(dict(base, stall_gt100=3))[0], KLQ_FAIR)               # 3 per minute
+        self.assertEqual(link_quality(dict(base, rtt_p95_ms=[0, 130.0, 0, 0]))[0], KLQ_POOR)
+        self.assertEqual(link_quality(dict(base, stall_gt100=8))[0], KLQ_POOR)
+        self.assertEqual(link_quality({})[0], KLQ_UNKNOWN)                                    # no json
+        self.assertEqual(link_quality(dict(base, rtt_p95_ms=[0, 'x', None, 0])), (KLQ_GOOD, 0, 0))
+
+    def test_playing_snapshot_carries_quality_and_hosting_carries_addresses(self):
+        self.s.begin('host', self.PARAMS)
+        wait_running(self.s)
+        snap = self.s.snapshot()
+        self.assertEqual(snap['addresses'], ['192.168.1.5:47900', '26.4.3.2:47900'])
+        self.assertEqual(snap['quality'], KLQ_UNKNOWN)
+        self.clock.t += 1
+        self.env.write_status(state='lockstep', mask=3, players=2, player=0, frames_total=7200, frame=7200,
+                              rtt_p95_ms=[0, 150, 0, 0], stall_gt100=5, rtt_ms=[0, 20, 0, 0])
+        snap = self.s.snapshot()
+        self.assertEqual((snap['quality'], snap['stalls'], snap['p95']), (KLQ_POOR, 5, 150))
+        j = OnlineSession(OnlineEnv(self._t.name), clock=self.clock)
+        j.begin('join', self.PARAMS)
+        wait_running(j)
+        self.assertEqual(j.snapshot()['addresses'], [])                                       # only a host lists addresses
+
     def test_structure_matches_the_c_header(self):
         import ctypes
-        self.assertEqual(ctypes.sizeof(KlOnlineC), 4 + 16 + 16 + 64 + 4 + 48 + 96)
+        self.assertEqual(ctypes.sizeof(KlOnlineC), 452)            # sizeof(KlOnline) in hw/launcher_ui.h
+        self.assertEqual(KlOnlineC.quality.offset, 248)
+        self.assertEqual(KlOnlineC.addresses.offset, 260)
 
 
 class OnlineControllerTests(unittest.TestCase):
@@ -492,7 +524,8 @@ class OnlineControllerTests(unittest.TestCase):
         ui = FakeUI(script=['host', 'leave', 'quit'])
         ini = self.ini()
         self.assertEqual(Controller(env).run(ui, ini), 0)
-        self.assertEqual(env.launched, [('host', dict(host='1.2.3.4', port=5555, players=3, delay='1', name='Kirby'))])
+        self.assertEqual(env.launched, [('host', dict(host='1.2.3.4', port=5555, players=3, delay='1', name='Kirby',
+                                                      transport='auto'))])
         self.assertTrue(env.proc.killed)                           # LEAVE killed it
         self.assertEqual(ui.pages, [0, KL_PAGE_ONLINE, KL_PAGE_ONLINE])   # reopened on the ONLINE page each time
         self.assertEqual(read_ini_value(ini, 'link', 'mode'), 'off')      # a stray mode=host is cleared
@@ -576,12 +609,19 @@ class IniWriteTests(unittest.TestCase):
     def test_online_params_defaults_and_clamps(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = os.path.join(tmp, 'k.ini')
-            self.assertEqual(online_params(p), dict(host='127.0.0.1', port=47900, players=2, delay='auto', name='Player'))
+            self.assertEqual(online_params(p), dict(host='127.0.0.1', port=47900, players=2, delay='auto', name='Player',
+                                                    transport='auto'))
             with open(p, 'w') as f:
                 f.write('[link]\nport=70000\nplayers=9\ndelay=77\nname=ABCDEFGHIJKLMNOPQRS\nhost= 10.0.0.2 \n')
             r = online_params(p)
             self.assertEqual((r['port'], r['players'], r['delay'], r['host']), (47900, 2, '8', '10.0.0.2'))
             self.assertEqual(len(r['name']), 15)
+            with open(p, 'w') as f:
+                f.write('[link]\ntransport=TCP\n')
+            self.assertEqual(online_params(p)['transport'], 'tcp')
+            with open(p, 'w') as f:
+                f.write('[link]\ntransport=quic\n')
+            self.assertEqual(online_params(p)['transport'], 'auto')
 
 
 if __name__ == '__main__':
