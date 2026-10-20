@@ -264,6 +264,7 @@ README = """Kirby & The Amazing Mirror - Recomp (unofficial)
   2. Drag the ROM onto KirbyRecomp.exe (or double-click it and pick the file).
   3. The game starts within seconds. In the background it builds the fully recompiled version
      (a few minutes); the next start uses it and opens instantly.
+  4. Online (2-4 players): ONLINE... in the launcher. Everyone needs their own ROM and this same version.
 
 The generated game lives in %LOCALAPPDATA%\KirbyRecomp. No game data is shipped in this package.
 Default controls: X = A, Z = B, Enter = Start, Backspace = Select, arrow keys, A / S = L / R,

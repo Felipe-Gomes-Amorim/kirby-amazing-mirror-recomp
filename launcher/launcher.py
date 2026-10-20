@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 
-VERSION = '0.1'
+VERSION = '0.6'
 SUPPORTED = {'274b102b6d940f46861a92b4e65f89a51815c12c': 'Kirby & The Amazing Mirror (USA)'}
 HERE = os.path.dirname(os.path.abspath(__file__))            # <install>/app/launcher
 APP = os.path.dirname(HERE)                                  # <install>/app

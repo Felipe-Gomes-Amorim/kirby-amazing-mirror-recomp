@@ -52,13 +52,24 @@ Windows may warn about an unsigned program: the launcher runs a compiler and the
 | Sound | PCM and PSG through SDL2 audio (not compared against a reference yet) |
 | Save | 32 KiB `<rom>.sav` next to the ROM; written within ~1 s of the game saving (atomic), automatic backups, export/import from the launcher |
 | Play while building | interpreter now, compiled game on the next start |
+| Online (link cable) | 2–4 players over LAN/VPN/internet from the launcher (UDP with redundancy, TCP fallback); tested between two PCs over Wi-Fi + VPN |
 
 ### Saves
 
 The save is the raw 32 KiB `.sav` other emulators use, kept next to your ROM. It is written about a second after the game
 saves, through a temporary file that is renamed over the old one, so a crash cannot leave it half-written. Each time you press
-Play the launcher also keeps a backup (the 10 most recent per ROM) in `%LOCALAPPDATA%\KirbyRecompackups`. The **Save** section
+Play the launcher also keeps a backup (the 10 most recent per ROM) in `%LOCALAPPDATA%\KirbyRecomp\backups`. The **Save** section
 of the launcher can open the folder, **export** the save to a file and **import** one (the current save is backed up first).
+
+### Online play (link cable, experimental)
+
+The game's multiplayer (the 4-player adventure and the sub-games) talks over the GBA link cable. The launcher can carry that cable over a network: **every player needs their own ROM and the same version of KirbyRecomp** (no game data ever travels, the host only checks the ROM's SHA-1).
+
+1. **Host:** `ONLINE...` > choose `PLAYERS`, press `HOST`, allow the Windows firewall prompt and send the address shown (`COPY`). The game starts when everyone has joined, or press `START` to begin with whoever is connected.
+2. **Join:** type the host's **IPv4 address** and port, press `JOIN`.
+3. **In the game:** `START GAME` > `MULTI PLAYER`; the host confirms `OK?`, then everyone picks a game pak.
+
+`NET` picks the transport (`AUTO` tries UDP, then TCP) and `DELAY` the input delay (`AUTO` is chosen from the measured ping; the game tolerates at most 2 frames with 2 players and 1 with 3-4). The game runs at full speed up to roughly 45 ms ping (about 29 ms with 3-4 players) and slows down, without errors, above that. Over the internet you need to forward the TCP/UDP port (47900 by default) or use a VPN such as Radmin, Hamachi or Tailscale. Online always uses the interpreter build so that every player runs identical code. There is no encryption and no NAT traversal. 4-player sessions were only tested on one PC.
 
 ### Known limitations
 
@@ -66,7 +77,8 @@ of the launcher can open the folder, **export** the save to a file and **import*
   unverified. Please report crashes with `%LOCALAPPDATA%\KirbyRecomp\launcher.log`.
 - Controller support was **tried with one generic controller** and works; other models (Xbox,
   PlayStation, Switch Pro) are expected to work through SDL's mappings but are untested.
-- USA ROM only. Link-cable multiplayer is not implemented.
+- USA ROM only.
+- Online play is new: tested with two PCs over Wi-Fi + VPN, not yet with a real port-forwarded internet link or four separate PCs.
 - Timing is approximate (not cycle-accurate); the executable is not code-signed.
 
 Numbers, decisions and open problems: an English summary in [`NOTES.en.md`](NOTES.en.md), and the

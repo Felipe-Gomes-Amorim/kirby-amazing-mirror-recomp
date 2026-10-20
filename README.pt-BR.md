@@ -51,13 +51,24 @@ O Windows pode avisar sobre programa não assinado: o launcher executa um compil
 | Som | PCM e PSG por SDL2 (ainda não comparado com uma referência) |
 | Save | `<rom>.sav` de 32 KiB ao lado da ROM; gravado ~1 s depois de o jogo salvar (atômico), backups automáticos, exportar/importar no launcher |
 | Jogar enquanto compila | interpretador agora, jogo compilado na próxima abertura |
+| Online (cabo link) | 2 a 4 jogadores por LAN/VPN/internet a partir do launcher (UDP com redundância, TCP como alternativa); testado entre dois PCs em Wi-Fi + VPN |
 
 ### Saves
 
 O save é o `.sav` cru de 32 KiB que outros emuladores usam, guardado ao lado da ROM. Ele é gravado cerca de um segundo depois de o jogo
 salvar, por um arquivo temporário que é renomeado sobre o antigo, então uma queda não o deixa pela metade. A cada **Play** o launcher
-guarda também um backup (os 10 mais recentes por ROM) em `%LOCALAPPDATA%\KirbyRecompackups`. A seção **Save** do launcher abre a
+guarda também um backup (os 10 mais recentes por ROM) em `%LOCALAPPDATA%\KirbyRecomp\backups`. A seção **Save** do launcher abre a
 pasta, **exporta** o save para um arquivo e **importa** outro (o save atual recebe backup antes).
+
+### Jogar online (cabo link, experimental)
+
+O multiplayer do jogo (a aventura para 4 e os sub-jogos) conversa pelo cabo link do GBA. O launcher leva esse cabo pela rede: **cada jogador precisa da própria ROM e da mesma versão do KirbyRecomp** (nenhum dado do jogo trafega; o host só confere o SHA-1 da ROM).
+
+1. **Host:** `ONLINE...` > escolha `PLAYERS`, aperte `HOST`, permita o aviso do firewall do Windows e envie o endereço mostrado (`COPY`). A partida começa quando todos entram, ou aperte `START` para começar com quem já está conectado.
+2. **Join:** digite o **endereço IPv4** do host e a porta e aperte `JOIN`.
+3. **No jogo:** `START GAME` > `MULTI PLAYER`; o host confirma o `OK?` e todos escolhem o cartucho.
+
+`NET` escolhe o transporte (`AUTO` tenta UDP e cai para TCP) e `DELAY` o atraso de entrada (`AUTO` é escolhido pelo ping medido; o jogo tolera no máximo 2 quadros com 2 jogadores e 1 com 3-4). O jogo roda em velocidade total até cerca de 45 ms de ping (uns 29 ms com 3-4 jogadores) e fica mais lento, sem erros, acima disso. Pela internet é preciso redirecionar a porta (47900 por padrão, TCP e UDP) ou usar uma VPN como Radmin, Hamachi ou Tailscale. O online usa sempre a versão com interpretador, para que todos executem o mesmo código. Não há criptografia nem NAT traversal. Sessões de 4 jogadores só foram testadas em um PC.
 
 ### Limitações conhecidas
 
@@ -65,7 +76,8 @@ pasta, **exporta** o save para um arquivo e **importa** outro (o save atual rece
   verificados. Reporte falhas com `%LOCALAPPDATA%\KirbyRecomp\launcher.log`.
 - O suporte a controle foi **testado com um controle genérico** e funciona; outros modelos (Xbox,
   PlayStation, Switch Pro) devem funcionar pelos mapeamentos do SDL, mas não foram testados.
-- Só a ROM USA. Multiplayer por cabo não está implementado.
+- Só a ROM USA.
+- O online é novo: testado com dois PCs em Wi-Fi + VPN, ainda não com internet real com porta redirecionada nem com quatro PCs separados.
 - O tempo é aproximado (não é preciso por ciclo); o executável não é assinado.
 
 Números, decisões e problemas abertos: um resumo em inglês em [`NOTES.en.md`](NOTES.en.md) e o

@@ -22,13 +22,16 @@ No ROM, BIOS or generated output is committed.
 | Recompiler (ARM/Thumb → C) | runs the game: 8,000+ frames, 0 aborts, 0 unresolved addresses |
 | Hardware | tiled/affine backgrounds, sprites, windows, blending, mosaic, DMA, timers, PCM FIFO, PSG |
 | Picture | title screen, opening cutscene and first level render correctly |
-| Window / keyboard | SDL2 window works (`--window`) |
-| Sound output | written (SDL2 audio) but **not yet linked into the game executable**, so the game runs silent; verified only with the "dummy" driver, not by ear |
-| Save | 32 KiB SRAM file |
+| Window / input | SDL2 window, keyboard and one controller, remappable, analog stick as D-pad |
+| Sound output | PCM + PSG through SDL2 audio, heard in game; not compared against a reference |
+| Save | 32 KiB SRAM file, atomic debounced writer, 10 automatic backups per ROM, import/export |
+| Launcher | Python + SDL2 UI: ROM check, build/progress, play-while-building (interpreter first, compiled later), settings, saves, ONLINE page |
+| Online | link-cable multi-play (SIO) emulated; deterministic per-frame lockstep between instances; TCP or UDP-with-redundancy transport; 2-4 players; tested on two PCs over Wi-Fi + VPN |
 | Speed | about 9.7× real time without frame limiting; PPU rendering is the main cost |
 
-Not done: a fallback interpreter for unexpected RAM code (it aborts today), a whole-program
-differential oracle, cycle-accurate timing, link-cable multiplayer.
+Not done: a whole-program differential oracle, cycle-accurate timing, save states (the compiled build keeps state on the
+native stack), regions other than USA, and a full playthrough check (testing so far concentrates on the first area).
+A fallback interpreter for code the analysis did not predict exists and is used when needed.
 
 ## 3. How to run it
 
@@ -119,9 +122,8 @@ ROM function, so it can be aliased.
 - The read of unmapped address `0x100F0D55` is explained: the game reads `table[0xFFFF]` (an "empty slot"
   sentinel) at `0x08034FA8`, an original quirk that is harmless on hardware (open bus). Not confirmed against
   a reference emulator.
-- The fallback interpreter for RAM code that was not predicted.
 - A whole-program oracle to catch silent errors.
-- Repository licence, and whether short disassembly excerpts in `NOTES.md` should stay.
+- Online: real-internet test with a forwarded port, four separate PCs, and measuring UDP against TCP on a real network.
 
 ## 9. Where to look in `NOTES.md`
 
