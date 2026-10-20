@@ -151,6 +151,9 @@ static void fatal_msg(const char *msg) {
 #endif
 }
 
+static char cov_path[1100];
+extern void rt_log(const char *fmt, ...);
+
 int main(int argc, char **argv) {
     static char found[1024];
     const char *rom_path = NULL;
@@ -314,6 +317,12 @@ int main(int argc, char **argv) {
             if (e) strcpy(e + 1, "kirby.log"); else strcpy(lg, "kirby.log");
             rt_input_set_log_entry(lg);
             { extern void rt_log_set(const char *p); rt_log_set(lg); }
+            if (!rt_unresolved_path && (gui_defaults || window)) {   /* coverage log: targets with no recompiled function, 1 line each */
+                snprintf(cov_path, sizeof cov_path, "%s", lg);
+                char *c2 = strrchr(cov_path, '.');
+                if (c2) strcpy(c2, "-coverage.log");
+                rt_unresolved_path = cov_path;
+            }
         }
         if (!scale_explicit) scale = rt_cfg_get(0);
         if (rt_cfg_get(5)) { extern int rt_mute; rt_mute = 1; }
@@ -376,5 +385,15 @@ int main(int argc, char **argv) {
     }
     for (int i = 0; i < 256; i++)
         if (rt_swi_count[i]) printf("SWI 0x%02X x%d\n", i, rt_swi_count[i]);
+    if (window || bench) {   /* one line in kirby.log per session: what the game needed that was not recompiled */
+        extern uint64_t rt_interp_entries, rt_interp_steps, rt_outside_hits;
+        int nswi = 0;
+        for (int i = 0; i < 256; i++) if (rt_swi_count[i]) nswi++;
+        rt_log("[play] session summary: %llu frames (%.1f min), end=%s, unresolved targets=%llu, interpreter entries=%llu (%llu instructions), "
+               "code outside the map=%llu, distinct BIOS calls=%d%s",
+               (unsigned long long)rt_frames_done, rt_frames_done / 3600.0, why, (unsigned long long)rt_unresolved_count,
+               (unsigned long long)rt_interp_entries, (unsigned long long)rt_interp_steps, (unsigned long long)rt_outside_hits, nswi,
+               rt_unresolved_count || rt_outside_hits ? " (details in kirby-coverage.log)" : "");
+    }
     return rt_exit_code ? rt_exit_code : (cpu.stop == RT_STOP_ERROR ? 2 : 0);
 }
