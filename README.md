@@ -23,8 +23,9 @@ somewhere you can write to, then:
 
 1. **Drag your ROM onto `KirbyRecomp.exe`** (or run it and pick the file).
 2. The launcher opens. Choose window size, fullscreen, scaling and volume, then press **Play**.
-3. The first run is playable in about 15 seconds (a built-in interpreter) while the fully compiled
-   version is built in the background, a few minutes at low priority. The next start uses the
+3. The first run starts with a one-time preparation of a fast mode (a built-in interpreter): from about 15 seconds up to
+   about 3 minutes depending on the PC, because the bundled compiler has to build its own runtime libraries once. The game then
+   opens while the fully compiled version is built in the background, a few minutes at low priority. The next start uses the
    compiled game and opens in under a second.
 
 Controls (all remappable from the launcher: **Keyboard...** / **Controller...**):

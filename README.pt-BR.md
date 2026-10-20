@@ -22,8 +22,9 @@ em uma pasta onde você possa gravar e:
 
 1. **Arraste a sua ROM sobre `KirbyRecomp.exe`** (ou abra o programa e escolha o arquivo).
 2. O launcher abre. Escolha tamanho da janela, tela cheia, escala e volume e aperte **Play**.
-3. Na primeira vez o jogo já é jogável em cerca de 15 segundos (interpretador embutido) enquanto a versão
-   compilada é construída em segundo plano, em alguns minutos e com prioridade baixa. Nas próximas
+3. A primeira vez começa com uma preparação única do modo rápido (um interpretador embutido): de uns 15 segundos até
+   uns 3 minutos conforme o PC, porque o compilador incluso precisa construir suas próprias bibliotecas uma vez. Depois o jogo
+   abre enquanto a versão compilada é construída em segundo plano, em alguns minutos e com prioridade baixa. Nas próximas
    aberturas usa o jogo compilado e abre em menos de um segundo.
 
 Controles (todos configuráveis no launcher: **Keyboard...** / **Controller...**):
