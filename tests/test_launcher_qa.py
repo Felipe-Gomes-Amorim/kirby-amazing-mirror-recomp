@@ -13,7 +13,7 @@ Estado em 2026-10 (ver NOTES.md, secao "QA do launcher"):
     contrato; PULAM com motivo explicito ate `hw/config_ini.c` gravar a v2. Ativam sozinhos.
   - "launcher.py e kirby.exe leem o mesmo arquivo": idem; pulam ate os dois chamarem `cfg_load` /
     uma funcao `ini_path_*` no launcher.
-  - `expectedFailure` = bug real de config_ini.c achado por estes testes (pedido ao dono no ROLES.md);
+  - `expectedFailure` = bug real de config_ini.c achado por estes testes (pedido ao dono);
     quando for corrigido o teste vira "unexpected success" e o decorador deve ser removido.
 """
 import ntpath

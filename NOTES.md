@@ -5,7 +5,7 @@
 
 ## Como ler este arquivo
 Este arquivo e o registro de trabalho de quatro frentes paralelas; por isso ele cresceu em
-camadas. Cada secao tem um dono (ver [ROLES.md](ROLES.md)) e as mais recentes tem prioridade
+camadas. Cada secao tem um dono e as mais recentes tem prioridade
 sobre o plano inicial (secoes 1-6), que ficou como historico.
 
 | Se voce quer... | Leia |
@@ -933,7 +933,7 @@ PCM. Nos dois canais acontece; so e audivel no B porque o que vem depois do buff
   instantes/offsets; com latencia constante (0..5000) sempre 99 pedidos, L==R e nenhum ponteiro; com
   latencia 0/1000 alternada: 98,100,98,100... pedidos, ponteiro (73) so no L (como medido no jogo);
   `hw_step_irq` para exatamente no VBlank.
-- **Pedido ao runtime** (ROLES.md): usar `hw_step_irq` em `rt_tick`, `rt_tick_loop` e `vblank_intr_wait`
+- **Pedido ao runtime**: usar `hw_step_irq` em `rt_tick`, `rt_tick_loop` e `vblank_intr_wait`
   (entregar o IRQ no ciclo exato e depois gastar o resto), e nao avancar o hw enquanto roda o handler de IRQ
   (relogio congelado ate o retorno), para o reinicio cair sempre no mesmo ponto (e_p constante).
 - **Descartado:** FIFO A vs B (mesma logica, `cur` repete a ultima amostra no underflow nos dois), latch de
@@ -2568,7 +2568,7 @@ Estado em 2026-10-16 do `hw/hw.c` + `rt_sio.c` (Nasus/Gwen, P1) marcado entre pa
 - Risco: o mestre faz ~16 trocas por quadro **dirigidas pelo Timer3**; se o hw emulado entrega as trocas mais rapido/lento que 1,04 ms por troca, o pacote pode nao completar em um quadro (o receptor so completa em idx==11).
 
 ### 11. Pendencias deste estudo (atualizado em P0b; ver secao 12)
-- Fases/bytes de lobby 0x20/0x40/0x41/0x42/0x22 e bit19 de `0x03002440`: decodificacao estatica na secao 12; a confirmacao com TRACOS das 2 instancias reais depende do formato pedido no ROLES.md.
+- Fases/bytes de lobby 0x20/0x40/0x41/0x42/0x22 e bit19 de `0x03002440`: decodificacao estatica na secao 12; a confirmacao com TRACOS das 2 instancias reais depende do formato pedido.
 - Semantica fina das flags de cabecalho bits 4-6: ainda so por leitura de codigo.
 - Secao 4 (15 trocas, soma -15) **CONFIRMADA em execucao** (secao 12).
 
@@ -2713,7 +2713,7 @@ Nao testavel hoje: perda recuperavel (UDP), reconexao do filho, host migrando.
 
 
 ### 15. P1e: proxy UDP, "Wi-Fi ruim" TCP x UDP, robustez do UDP e QA manual tcp x udp (Poppy, 2026-10-20)
-**Estado**: o `rt_boot.exe` de 19/10 AINDA NAO tem o transporte UDP (sem `--link-transport` no binario; "P2d" da Nasus nao publicada). Entreguei a infraestrutura e os testes, que **pulam sozinhos** ate o executavel ter a flag (`netharness.udp_supported()`; nome em `netharness.TRANSPORT_FLAG = '--link-transport'`, proposto no ROLES.md - mude 1 linha se a Nasus usar outro). Os numeros da tabela abaixo sao do **TCP**; a coluna UDP sai com `python tests\netbench.py --transports tcp,udp` assim que existir.
+**Estado**: o `rt_boot.exe` de 19/10 AINDA NAO tem o transporte UDP (sem `--link-transport` no binario; "P2d" da Nasus nao publicada). Entreguei a infraestrutura e os testes, que **pulam sozinhos** ate o executavel ter a flag (`netharness.udp_supported()`; nome em `netharness.TRANSPORT_FLAG = '--link-transport'`, proposto na epoca - mude 1 linha se a Nasus usar outro). Os numeros da tabela abaixo sao do **TCP**; a coluna UDP sai com `python tests\netbench.py --transports tcp,udp` assim que existir.
 **Ferramentas** (`tests/`, nenhum arquivo da Nasus editado):
 - `netharness.UdpProxy`: entre 1 join e o host, sem conhecer o formato dos datagramas. Perda aleatoria, **rajadas** (`burst=(a_cada_s, ms)`), latencia, jitter, **reordenacao** (`reorder_pct`/`reorder_ms`), **duplicacao**, `stall(s)` (segura e libera), `outage(s)` (descarta por s), `cut()` (para sempre), **corrupcao de 1 bit** (`corrupt_pct`), `captured`/`replay(i)`/`inject(dados)` (replay e datagrama avulso). Cuidado de Windows ja tratado: o ICMP "porta fechada" vira `ConnectionResetError` no `recvfrom`.
 - `netharness.TcpProxy` ganhou `loss_model='retransmit'` (perda = atraso de RTO 200 ms com bloqueio de cabeca de fila, como TCP de verdade; o `'drop'` antigo mata a sessao) e `burst=`. Os dois proxies registram o instante de cada entrega host->filho (`delivered`) -> `gap_stats` = paradas > 33/100/250 ms.

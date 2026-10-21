@@ -126,7 +126,6 @@ baserom.gba ──► análise ──► mapa de funções ──► recompilado
 | [`launcher/`](launcher) | fluxo do launcher (Python), stub do Windows, ponte com a UI |
 | [`tests/`](tests) | testes do recompilador (contra o Unicorn) e suítes de QA do launcher e das entradas |
 | [`NOTES.en.md`](NOTES.en.md), [`NOTES.md`](NOTES.md) | resumo técnico (inglês) e diário completo (português) |
-| [`ROLES.md`](ROLES.md) | quem cuida de quê, no trabalho em paralelo |
 
 ## Como rodar a partir do código-fonte
 

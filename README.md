@@ -127,7 +127,6 @@ baserom.gba ──► analysis ──► function map ──► recompiler ─�
 | [`launcher/`](launcher) | launcher flow (Python), Windows stub, UI bridge |
 | [`tests/`](tests) | recompiler tests (against Unicorn) and launcher / input QA suites |
 | [`NOTES.en.md`](NOTES.en.md), [`NOTES.md`](NOTES.md) | technical summary (English) and full working log (Portuguese) |
-| [`ROLES.md`](ROLES.md) | who owns what, for the parallel workstreams |
 
 ## Running it from the source tree
 

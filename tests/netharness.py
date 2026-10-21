@@ -40,7 +40,7 @@ def find_exe():
 
 EXE = find_exe()
 DEFAULT_TRANSPORT = 'tcp'              # os testes UDP trocam isto em setUp (test_link_network.Base)
-TRANSPORT_FLAG = '--link-transport'      # nome proposto no ROLES.md; ajuste quando a Nasus publicar (P2d)
+TRANSPORT_FLAG = '--link-transport'      # nome proposto; ajuste quando a Nasus publicar (P2d)
 AVAILABLE = bool(EXE and os.path.exists(ROM))
 
 
