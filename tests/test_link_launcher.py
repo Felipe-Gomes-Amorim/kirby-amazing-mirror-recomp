@@ -105,6 +105,60 @@ class LauncherRuntimeTests(unittest.TestCase):
         self.assertEqual(host.wait(60), 0)
         self.assertIn(join.wait(60), (0,))
 
+    def test_ready_gate_names_pings_and_start_only_when_everybody_is_ready(self):
+        """v0.7: a full room does NOT start by itself; the host starts when every player pressed READY (a file each),
+        the lobby status carries names (UTF-8), the ready mask and the host-measured ping."""
+        port = str(free_port())
+        hs, js = os.path.join(self.tmp, 'h.json'), os.path.join(self.tmp, 'j.json')
+        hr, jr = os.path.join(self.tmp, 'h.ready'), os.path.join(self.tmp, 'j.ready')
+        host = self.spawn('--link', 'host', '--link-players', '2', '--link-port', port, '--link-status', hs,
+                          '--link-ready-file', hr, '--link-name-hex', 'Pink'.encode().hex(), '--link-required',
+                          '--frames', '240')
+        self.assertIsNotNone(wait_for(lambda: status(hs).get('state') == 'waiting'))
+        join = self.spawn('--link', 'join', '--link-port', port, '--link-status', js, '--link-required',
+                          '--link-ready-file', jr, '--link-name-hex', 'José Ção'.encode().hex(),
+                          '--frames', '240')
+        d = wait_for(lambda: status(hs) if status(hs).get('mask') == 3 and status(hs).get('names', [''] * 4)[1] else None)
+        self.assertIsNotNone(d, 'the host sees the joiner and its name')
+        self.assertEqual(d['names'][:2], ['Pink', 'José Ção'])
+        self.assertEqual(d['ready'] & 3, 0)
+        d = wait_for(lambda: status(hs) if (status(hs).get('lobby_ping') or [0, 0])[1] > 0 else None)
+        self.assertIsNotNone(d, 'the host measures the joiner ping while waiting')
+        self.assertLess(d['lobby_ping'][1], 1000)
+        time.sleep(1.5)
+        self.assertEqual(status(hs).get('state'), 'waiting', 'a full room must not start by itself')
+        open(hr, 'w').close()                                       # the host is ready, the joiner is not
+        time.sleep(1.5)
+        self.assertEqual(status(hs).get('state'), 'waiting')
+        self.assertEqual(status(hs).get('ready') & 3, 1)
+        open(jr, 'w').close()                                       # now everybody is ready: the game starts
+        j = wait_for(lambda: status(js) if status(js).get('state') == 'lockstep' else None)
+        d = wait_for(lambda: status(hs) if status(hs).get('state') == 'lockstep' else None)
+        self.assertIsNotNone(d, 'the host starts when everybody is ready')
+        self.assertIsNotNone(j)
+        self.assertEqual(host.wait(60), 0)
+        self.assertEqual(join.wait(60), 0)
+
+    def test_joiner_sees_the_room_names_ready_and_pings_from_the_host(self):
+        port = str(free_port())
+        hs, js = os.path.join(self.tmp, 'h.json'), os.path.join(self.tmp, 'j.json')
+        hr, jr = os.path.join(self.tmp, 'h.ready'), os.path.join(self.tmp, 'j.ready')
+        open(hr, 'w').close()                                       # the host is ready from the start
+        self.spawn('--link', 'host', '--link-players', '3', '--link-port', port, '--link-status', hs,
+                   '--link-ready-file', hr, '--link-name-hex', 'Host'.encode().hex(), '--link-required', '--frames', '60')
+        self.assertIsNotNone(wait_for(lambda: status(hs).get('state') == 'waiting'))
+        self.spawn('--link', 'join', '--link-port', port, '--link-status', js, '--link-required',
+                   '--link-ready-file', jr, '--link-name-hex', 'Ana'.encode().hex(), '--frames', '60')
+        j = wait_for(lambda: status(js) if status(js).get('names', [''] * 4)[0] == 'Host' and status(js).get('mask') == 3 else None)
+        self.assertIsNotNone(j, 'the joiner receives the host name and the mask over the wire')
+        self.assertEqual(j['names'][1], 'Ana')
+        self.assertEqual(j['ready'] & 3, 1)                         # the host is ready, the joiner is not
+        open(jr, 'w').close()
+        j = wait_for(lambda: status(js) if status(js).get('ready', 0) & 3 == 3 else None)
+        self.assertIsNotNone(j, 'the joiner sees its own READY come back from the host')
+        j = wait_for(lambda: status(js) if (status(js).get('lobby_ping') or [0, 0])[1] > 0 else None)
+        self.assertIsNotNone(j, 'the joiner receives its own ping measured by the host')
+
     def test_link_required_exits_78_when_the_host_is_not_there(self):
         p = self.spawn('--link', 'join', '--link-port', str(free_port()), '--link-required', '--frames', '30',
                        KIRBY_LINK_WAIT_S='2')

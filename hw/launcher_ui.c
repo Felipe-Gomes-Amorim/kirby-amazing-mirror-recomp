@@ -73,6 +73,8 @@ static int addr_count(void) {
 }
 static const char *addr_get(int i) { return onl.addresses[0][0] ? onl.addresses[i] : onl.my_address; }
 static int show_addrs(void) { return onl.state != KLO_PLAYING && addr_count() > 0; }
+static int self_ready(void) { return onl.self_slot >= 0 && onl.self_slot < 4 && onl.slots[onl.self_slot] == KLS_READY && onl.state != KLO_PLAYING; }
+static int all_ready(void) { for (int i = 0; i < 4; i++) if (onl.slots[i] == KLS_CONNECTED) return 0; return 1; }
 static int slots_up(void) { int n = 0; for (int i = 0; i < 4; i++) if (onl.slots[i] == KLS_CONNECTED || onl.slots[i] == KLS_READY) n++; return n; }
 
 /* texts and the progress bar drawn on the last frame (layout checks in the tests) */
@@ -136,23 +138,69 @@ static void round_rect(SDL_Rect r, int rad, SDL_Color c) {  /* filled rectangle 
     }
 }
 
+/* UTF-8: the font is 5x7 capitals; the Latin-1 letters (U+00C0..U+00FF) are drawn as their base capital plus a one-row mark above
+ * (the cedilla below). Anything else outside ASCII shows as '?'. */
+static int utf8_next(const char **p) {
+    const unsigned char *s = (const unsigned char *)*p;
+    int c = *s;
+    if (!c) return 0;
+    if (c < 0x80) { *p += 1; return c; }
+    if (c >= 0xC2 && c <= 0xDF && (s[1] & 0xC0) == 0x80) { *p += 2; return ((c & 0x1F) << 6) | (s[1] & 0x3F); }
+    int n = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : 1;                   /* skip the rest of a sequence we do not draw */
+    int k = 1;
+    while (k < n && (s[k] & 0xC0) == 0x80) k++;
+    *p += k;
+    return '?';
+}
+static int utf8_count(const char *s) { int n = 0; while (utf8_next(&s)) n++; return n; }
+/* copy at most max_cp characters of s (never half of one) */
+static void utf8_cut(char *dst, size_t cap, const char *s, int max_cp) {
+    const char *p = s;
+    for (int i = 0; i < max_cp && utf8_next(&p); i++) {}
+    size_t n = (size_t)(p - s);
+    if (n >= cap) n = cap - 1;
+    memcpy(dst, s, n);
+    dst[n] = 0;
+}
+enum { MK_NONE, MK_GRAVE, MK_ACUTE, MK_CIRC, MK_TILDE, MK_DIAER, MK_RING, MK_CEDIL };
+static const char latin_base[32] = { 'A','A','A','A','A','A','A','C','E','E','E','E','I','I','I','I',
+                                     'D','N','O','O','O','O','O','X','O','U','U','U','U','Y','P','S' };
+static const unsigned char latin_mark[32] = { MK_GRAVE, MK_ACUTE, MK_CIRC, MK_TILDE, MK_DIAER, MK_RING, MK_NONE, MK_CEDIL,
+                                              MK_GRAVE, MK_ACUTE, MK_CIRC, MK_DIAER, MK_GRAVE, MK_ACUTE, MK_CIRC, MK_DIAER,
+                                              MK_NONE, MK_TILDE, MK_GRAVE, MK_ACUTE, MK_CIRC, MK_TILDE, MK_DIAER, MK_NONE,
+                                              MK_NONE, MK_GRAVE, MK_ACUTE, MK_CIRC, MK_DIAER, MK_ACUTE, MK_NONE, MK_NONE };
+/* one row of 5 pixels (bit 4 = leftmost) */
+static const uint8_t mark_row[8] = { 0x00, 0x0C, 0x06, 0x0E, 0x16, 0x0A, 0x04, 0x04 };
+
 static int text_w(const char *s, int scale) {
-    int n = (int)strlen(s);
+    int n = utf8_count(s);
     return n ? n * 6 * scale - scale : 0;
 }
 
 static void text(const char *s, int x, int y, int scale, SDL_Color c) {
     if (rec_texts && ntexts < MAX_TEXTS && *s) {
-        SDL_Rect r = { x, y, (int)strlen(s) * 6 * scale - scale, 7 * scale };
+        SDL_Rect r = { x, y, utf8_count(s) * 6 * scale - scale, 7 * scale };
         texts[ntexts++] = r;
     }
     setc(c);
-    for (; *s; s++, x += 6 * scale) {
-        const uint8_t *rows = win_font_rows((unsigned char)*s);
+    for (int cp; (cp = utf8_next(&s)) != 0; x += 6 * scale) {
+        int mark = MK_NONE;
+        if (cp >= 0xC0 && cp <= 0xFF) {                          /* lowercase accented letters share the capital's glyph */
+            int k = (cp >= 0xE0 ? cp - 0x20 : cp) - 0xC0;
+            cp = latin_base[k];
+            mark = latin_mark[k];
+        } else if (cp > 0x7F) cp = '?';
+        const uint8_t *rows = win_font_rows(cp);
         for (int ry = 0; ry < 7; ry++)
             for (int cx = 0; cx < 5; cx++)
                 if (rows[ry] >> (4 - cx) & 1) {
                     SDL_Rect q = { x + cx * scale, y + ry * scale, scale, scale };
+                    SDL_RenderFillRect(ren, &q);
+                }
+        if (mark != MK_NONE)
+            for (int cx = 0; cx < 5; cx++)
+                if (mark_row[mark] >> (4 - cx) & 1) {
+                    SDL_Rect q = { x + cx * scale, y + (mark == MK_CEDIL ? 7 : -1) * scale, scale, scale };
                     SDL_RenderFillRect(ren, &q);
                 }
     }
@@ -293,13 +341,15 @@ static void layout(void) {
             snprintf(nl, sizeof nl, "NET %s", !strcmp(cfg.link_transport, "udp") ? "UDP" : !strcmp(cfg.link_transport, "tcp") ? "TCP" : "AUTO");
             add("online_net", W_BUTTON, 392, 90, 76, 22, nl); wd[nw - 1].enabled = off;
         }
-        add("online_host", W_BUTTON, 12, 118, 100, 24, "HOST");
+        add("online_host", W_BUTTON, 12, 118, 86, 24, "HOST");
         wd[nw - 1].enabled = off && port_ok(); wd[nw - 1].primary = 1;
-        add("online_join", W_BUTTON, 118, 118, 100, 24, "JOIN");
+        add("online_join", W_BUTTON, 103, 118, 86, 24, "JOIN");
         wd[nw - 1].enabled = off && port_ok() && fbuf[1][0];
-        add("online_start", W_BUTTON, 224, 118, 100, 24, "START");
-        wd[nw - 1].enabled = onl.state == KLO_HOSTING && slots_up() >= 2;
-        add("online_leave", W_BUTTON, 330, 118, 100, 24, "LEAVE");
+        add("online_ready", W_BUTTON, 194, 118, 86, 24, self_ready() ? "CANCEL" : "READY");
+        wd[nw - 1].enabled = onl.state == KLO_HOSTING || onl.state == KLO_CONNECTED;
+        add("online_start", W_BUTTON, 285, 118, 86, 24, "START");
+        wd[nw - 1].enabled = onl.state == KLO_HOSTING && slots_up() >= 2 && all_ready();
+        add("online_leave", W_BUTTON, 376, 118, 92, 24, "LEAVE");
         wd[nw - 1].enabled = online_busy();
         add("online_copy", W_BUTTON, 396, 148, 72, 20, "COPY");
         wd[nw - 1].enabled = show_addrs();
@@ -488,7 +538,23 @@ static void field_append(int f, int c) {
     fbuf[f][n + 1] = 0;
 }
 
-static void field_backspace(int f) { size_t n = strlen(fbuf[f]); if (n) fbuf[f][n - 1] = 0; }
+/* a code point typed or pasted: the NAME field also takes the Latin-1 letters (stored as UTF-8: 2 bytes) */
+static void field_append_cp(int f, int cp) {
+    if (cp < 0x80) { field_append(f, cp); return; }
+    if (f != 0 || cp < 0xC0 || cp > 0xFF || cp == 0xD7 || cp == 0xF7) return;
+    size_t n = strlen(fbuf[f]);
+    if ((int)n + 2 > fcap[f]) return;
+    fbuf[f][n] = (char)(0xC0 | (cp >> 6));
+    fbuf[f][n + 1] = (char)(0x80 | (cp & 0x3F));
+    fbuf[f][n + 2] = 0;
+}
+static void field_append_text(int f, const char *s) { for (int cp; (cp = utf8_next(&s)) != 0;) field_append_cp(f, cp); }
+
+static void field_backspace(int f) {
+    size_t n = strlen(fbuf[f]);
+    while (n > 1 && ((unsigned char)fbuf[f][n - 1] & 0xC0) == 0x80) n--;   /* a whole UTF-8 character */
+    if (n) fbuf[f][n - 1] = 0;
+}
 static void begin_edit(int f) { editing = f; SDL_StartTextInput(); }
 static void end_edit(void) {
     if (editing < 0) return;
@@ -500,7 +566,7 @@ static void end_edit(void) {
 static void field_paste(int f) {
     char *t = SDL_GetClipboardText();
     if (!t) return;
-    for (const char *p = t; *p; p++) field_append(f, (unsigned char)*p);
+    field_append_text(f, t);
     SDL_free(t);
 }
 
@@ -558,6 +624,7 @@ static int online_activate(const char *id) {
         return 1;
     }
     if (!strcmp(id, "online_start")) { end_edit(); result = KL_ONLINE_START; running = 0; return 1; }
+    if (!strcmp(id, "online_ready")) { end_edit(); result = KL_ONLINE_READY; running = 0; return 1; }
     if (!strcmp(id, "online_leave")) {
         end_edit();
         snprintf(cfg.link_mode, sizeof cfg.link_mode, "off");
@@ -758,9 +825,11 @@ static void draw_widget(int i) {
         frame(k->r, ed ? C_ACC : (k->enabled ? C_TEXT : C_DIM));
         const char *b = fbuf[k->fld];
         int maxc = (k->r.w - 8) / 12 - 1;                       /* one cell is kept for the caret */
-        int n = (int)strlen(b);
+        int n = utf8_count(b);
         char line[64];
-        snprintf(line, sizeof line, "%s%s", n > maxc ? b + n - maxc : b, ed && (SDL_GetTicks() / 400) % 2 == 0 ? "_" : "");
+        const char *tail = b;
+        for (int skip = n - maxc; skip > 0; skip--) utf8_next(&tail);   /* show the end of a long value */
+        snprintf(line, sizeof line, "%s%s", tail, ed && (SDL_GetTicks() / 400) % 2 == 0 ? "_" : "");
         text(line, k->r.x + 4, k->r.y + 4, 2, !k->enabled ? C_DIM : (k->fld == 2 && !port_ok()) ? C_ERR : C_TEXT);
         break;
     }
@@ -959,7 +1028,7 @@ static void draw_online(void) {
         text(sl2, 12, 172, 1, onl.stalls_100ms > 0 ? C_FOCUS : C_DIM);
     }
     /* slots */
-    SDL_Rect panel = { 12, 194, 456, 72 };
+    SDL_Rect panel = { 12, 194, 456, 78 };
     fill(panel, C_PANEL);
     frame(panel, C_DIM);
     text("SLOT", 20, 197, 1, C_DIM);
@@ -967,11 +1036,11 @@ static void draw_online(void) {
     text("STATE", 264, 197, 1, C_DIM);
     text("PING", 440, 197, 1, C_DIM);
     for (int i = 0; i < 4; i++) {
-        int y = 207 + i * 14, sst = onl.slots[i];
+        int y = 209 + i * 16, sst = onl.slots[i];
         SDL_Color c = sst == KLS_EMPTY ? C_DIM : sst == KLS_LOST ? C_ERR : (i == onl.self_slot ? C_ACC : C_TEXT);
         char nm[16];
         text(i == 0 ? "P1 HOST" : (const char *[]){ "", "P2", "P3", "P4" }[i], 20, y, 2, c);
-        snprintf(nm, sizeof nm, "%.12s", onl.names[i][0] ? onl.names[i] : (sst == KLS_EMPTY ? "-" : "?"));
+        utf8_cut(nm, sizeof nm, onl.names[i][0] ? onl.names[i] : (sst == KLS_EMPTY ? "-" : "?"), 12);
         text(nm, 112, y, 2, c);
         text(slot_state_text(sst), 264, y, 2, sst == KLS_READY ? C_OK : c);
         if ((sst == KLS_CONNECTED || sst == KLS_READY) && onl.ping_ms[i] >= 0) {
@@ -984,7 +1053,7 @@ static void draw_online(void) {
     /* state line and hint */
     char sl[64];
     snprintf(sl, sizeof sl, "STATE: %s", online_state_text());
-    text(sl, 12, 269, 2, onl.state == KLO_DESYNC || onl.state == KLO_LOST ? C_ERR : (onl.state >= KLO_CONNECTED ? C_OK : C_TEXT));
+    text(sl, 12, 275, 2, onl.state == KLO_DESYNC || onl.state == KLO_LOST ? C_ERR : (onl.state >= KLO_CONNECTED ? C_OK : C_TEXT));
     {
         char hint[96] = "";
         SDL_Color hc = C_DIM;
@@ -992,12 +1061,13 @@ static void draw_online(void) {
         else if (off && !port_ok()) { snprintf(hint, sizeof hint, "PORT MUST BE 1-65535"); hc = C_ERR; }
         else if (off && !fbuf[1][0]) snprintf(hint, sizeof hint, "TYPE THE HOST ADDRESS TO JOIN, OR PRESS HOST");
         else if (onl.state == KLO_HOSTING && addr_count() > 1) snprintf(hint, sizeof hint, "UP/DOWN: PICK THE ADDRESS THE OTHERS CAN REACH, THEN COPY");
-        else if (onl.state == KLO_HOSTING && slots_up() < 2) snprintf(hint, sizeof hint, "START NEEDS AT LEAST 2 PLAYERS");
+        else if (onl.state == KLO_HOSTING && slots_up() < 2) snprintf(hint, sizeof hint, "WAITING FOR PLAYERS. EVERYBODY PRESSES READY");
+        else if ((onl.state == KLO_HOSTING || onl.state == KLO_CONNECTED) && !all_ready()) snprintf(hint, sizeof hint, "THE GAME STARTS WHEN EVERYBODY IS READY");
         char h2[96];
         clip(hint, 450, h2, sizeof h2);
-        if (h2[0]) text(h2, 12, 286, 1, hc);
+        if (h2[0]) text(h2, 12, 292, 1, hc);
     }
-    if (note[0] && SDL_GetTicks() < note_until) { char n2[96]; clip(note, 450, n2, sizeof n2); text(n2, 12, 298, 1, note_err ? C_ERR : C_OK); }
+    if (note[0] && SDL_GetTicks() < note_until) { char n2[96]; clip(note, 450, n2, sizeof n2); text(n2, 12, 302, 1, note_err ? C_ERR : C_OK); }
     text("TAB/ARROWS: MOVE   ENTER: EDIT/SELECT   ESC: BACK", 12, 313, 1, C_DIM);
 }
 
@@ -1154,8 +1224,8 @@ static void handle(SDL_Event *e) {
         break;
     case SDL_TEXTINPUT:
         if (!for_us(e->text.windowID)) break;
-        if (editing >= 0) for (const char *p = e->text.text; *p; p++) field_append(editing, (unsigned char)*p);
-        else if (keypad_field >= 0) for (const char *p = e->text.text; *p; p++) field_append(keypad_field, (unsigned char)*p);
+        if (editing >= 0) field_append_text(editing, e->text.text);
+        else if (keypad_field >= 0) field_append_text(keypad_field, e->text.text);
         break;
     case SDL_MOUSEMOTION: {
         if (!for_us(e->motion.windowID)) break;

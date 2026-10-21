@@ -20,7 +20,7 @@ import time
 STATE_NONE, STATE_PREPARING, STATE_FAST, STATE_READY, STATE_ERROR = 0, 1, 2, 3, 4
 KL_QUIT, KL_PLAY, KL_PICK_ROM = 0, 1, 2
 KL_OPEN_SAVE_DIR, KL_EXPORT_SAVE, KL_IMPORT_SAVE = 3, 4, 5
-KL_ONLINE_HOST, KL_ONLINE_JOIN, KL_ONLINE_LEAVE, KL_ONLINE_START = 6, 7, 8, 9
+KL_ONLINE_HOST, KL_ONLINE_JOIN, KL_ONLINE_LEAVE, KL_ONLINE_START, KL_ONLINE_READY = 6, 7, 8, 9, 10
 KL_PAGE_MAIN, KL_PAGE_ONLINE = 0, 3
 KLO_OFFLINE, KLO_HOSTING, KLO_CONNECTING, KLO_CONNECTED, KLO_PLAYING, KLO_DESYNC, KLO_LOST = range(7)
 KLS_EMPTY, KLS_CONNECTING, KLS_CONNECTED, KLS_READY, KLS_LOST = range(5)
@@ -167,6 +167,7 @@ class OnlineSession:
     env.online_paths() -> (status_json, start_flag)      fresh files for this session
     env.online_launch(role, params, status, start_flag) -> process-like (poll(), terminate()) or None
     env.online_request_start(start_flag)                 host: stop waiting for more players
+    env.online_set_ready(ready_flag, on)                 create / remove the file whose existence means 'I am ready'
     env.online_address(port) -> 'ip:port'
     env.online_addresses(port) -> up to 4 'ip:port' of this PC (the UI lets the user pick one)
     env.online_failure_hint() -> last [link] line of kirby.log ('' if none)
@@ -180,6 +181,8 @@ class OnlineSession:
         self.role, self.params = None, {}
         self.proc = None
         self.status_path = self.start_path = None
+        self.ready_path = None                   # existence = this player pressed READY (start_path + '.ready')
+        self.ready = False
         self.message, self.seen, self.t0 = '', 0, 0.0
         self.address = ''
         self.addresses = []
@@ -206,6 +209,9 @@ class OnlineSession:
         proc, err = None, ''
         try:
             self.status_path, self.start_path = self.env.online_paths()
+            self.ready_path = self.start_path + '.ready'
+            self.ready = False
+            self.env.online_set_ready(self.ready_path, False)
             proc = self.env.online_launch(self.role, self.params, self.status_path, self.start_path)
         except Exception as e:                           # never let the worker die silently
             self.env.log('online launch failed: %r' % (e,))
@@ -236,6 +242,12 @@ class OnlineSession:
     def start_game(self):
         if self.phase == 'running' and self.role == 'host' and self.start_path:
             self.env.online_request_start(self.start_path)
+
+    def toggle_ready(self):
+        """READY on/off (host and joiners). The game process reads the file; the game starts when everybody is ready."""
+        if self.phase == 'running' and self.ready_path:
+            self.ready = not self.ready
+            self.env.online_set_ready(self.ready_path, self.ready)
 
     def _status(self):
         if self.clock() - self._js_t >= 0.25:
@@ -283,29 +295,42 @@ class OnlineSession:
             st = js.get('state')
             mask = int(js.get('mask', 0) or 0) | (1 if host else 0)
             self.seen |= mask
+            ready_mask = int(js.get('ready', 0) or 0)
             self_slot = 0 if host else int(js.get('player', -1) if js.get('player', -1) is not None else -1)
             playing = st in ('lockstep', 'free')
             for i in range(4):
                 if mask >> i & 1:
-                    out['slots'][i] = KLS_READY if playing else KLS_CONNECTED
+                    out['slots'][i] = KLS_READY if (playing or ready_mask >> i & 1) else KLS_CONNECTED
                 elif self.seen >> i & 1:
                     out['slots'][i] = KLS_LOST
             if not host and not mask:
                 out['slots'][0] = KLS_CONNECTING
-            rtt = js.get('rtt_ms') or []
-            for i in range(1, min(4, len(rtt))):
-                try:
-                    if mask >> i & 1 and i != self_slot and float(rtt[i]) > 0:
-                        out['ping'][i] = int(round(float(rtt[i])))
-                except (TypeError, ValueError):
-                    pass
-            if not host and self_slot != 0:                  # a child measures nothing: show the host's RTT if known
+            lobby = js.get('lobby_ping') or []                 # ping of each player as the HOST measures it (lobby)
+            rtt = js.get('rtt_ms') or []                       # in the game: per joiner (host only)
+            for i in range(1, 4):
+                v = 0.0
+                for src in ((rtt, lobby) if playing else (lobby, rtt)):
+                    try:
+                        if i < len(src) and float(src[i]) > 0:
+                            v = float(src[i])
+                            break
+                    except (TypeError, ValueError):
+                        pass
+                if v > 0 and mask >> i & 1:
+                    out['ping'][i] = int(round(v))
+            if not host and 0 < self_slot < 4 and out['ping'][self_slot] > 0:
+                out['ping'][0] = out['ping'][self_slot]          # a joiner's own ping to the host is the host's row
+            if not host and self_slot != 0 and playing and out['ping'][0] <= 0:   # in the game a joiner measures nothing
                 best = [float(r) for r in rtt if isinstance(r, (int, float)) and r > 0]
                 if best:
                     out['ping'][0] = int(round(max(best)))
             out['self_slot'] = self_slot if 0 <= self_slot < 4 else -1
+            names = js.get('names') if isinstance(js.get('names'), list) else []
+            for i in range(min(4, len(names))):
+                if isinstance(names[i], str) and mask >> i & 1:
+                    out['names'][i] = names[i]
             if 0 <= out['self_slot'] < 4:
-                out['names'][out['self_slot']] = str(self.params.get('name', ''))[:15]
+                out['names'][out['self_slot']] = utf8_trunc(str(self.params.get('name', '')), 15).decode('utf-8')
             if playing:
                 out['quality'], out['stalls'], out['p95'] = link_quality(js)
             if js.get('desync'):
@@ -318,14 +343,26 @@ class OnlineSession:
                                   % js.get('delay', '?'))
             elif host:
                 out['state'] = KLO_HOSTING
-                out['message'] = 'Give your friends the address above. START begins with who is connected.'
+                if bin(mask).count('1') < 2:
+                    out['message'] = 'Give your friends the address above. Everybody presses READY to begin.'
+                elif ready_mask & mask != mask:
+                    out['message'] = 'Waiting for everybody to press READY.'
+                else:
+                    out['message'] = 'Everybody is ready. The game starts when the room is full, or press START.'
             elif st in ('waiting', 'starting'):
                 out['state'] = KLO_CONNECTED
-                out['message'] = 'Connected. Waiting for the host to start.'
+                out['message'] = ('You are ready. Waiting for the others.' if ready_mask >> max(self_slot, 0) & 1
+                                  else 'Connected. Press READY when you are set.')
             else:
                 out['state'] = KLO_CONNECTING
                 out['message'] = 'Connecting to %s:%s ...' % (self.params.get('host', '?'), self.params.get('port', '?'))
             return out
+
+
+def utf8_trunc(text, nbytes):
+    """`text` as UTF-8 bytes cut to at most `nbytes` without splitting a character."""
+    b = text.encode('utf-8', 'replace')[:nbytes]
+    return b.decode('utf-8', 'ignore').encode('utf-8')
 
 
 def online_params(ini_path):
@@ -347,7 +384,7 @@ def online_params(ini_path):
         transport = 'auto'
     return dict(host=(read_ini_value(ini_path, 'link', 'host', '127.0.0.1') or '127.0.0.1').strip(),
                 port=num('port', 47900, 1, 65535), players=num('players', 2, 2, 4), delay=delay,
-                name=(read_ini_value(ini_path, 'link', 'name', 'Player') or 'Player').strip()[:15],
+                name=utf8_trunc((read_ini_value(ini_path, 'link', 'name', 'Player') or 'Player').strip(), 15).decode('utf-8'),
                 transport=transport)
 
 
@@ -491,7 +528,7 @@ class Controller:
                 ui.set_start_page(page)
             page = KL_PAGE_MAIN
             r = ui.run(ini_path, poll)
-            if r in (KL_ONLINE_HOST, KL_ONLINE_JOIN, KL_ONLINE_LEAVE, KL_ONLINE_START):
+            if r in (KL_ONLINE_HOST, KL_ONLINE_JOIN, KL_ONLINE_LEAVE, KL_ONLINE_START, KL_ONLINE_READY):
                 page = KL_PAGE_ONLINE                           # reopen on the ONLINE page after the action
                 self._online_action(r, ini_path)
                 continue
@@ -532,6 +569,8 @@ class Controller:
                 self.online.leave()
             elif code == KL_ONLINE_START:
                 self.online.start_game()
+            elif code == KL_ONLINE_READY:
+                self.online.toggle_ready()
             elif not self.playable():
                 self.online.message = 'The game is still being prepared. Try again in a moment.'
             else:
@@ -548,7 +587,7 @@ class Controller:
             for i in range(4):
                 o.slots[i] = snap['slots'][i]
                 o.ping_ms[i] = snap['ping'][i]
-                o.names[i] = snap['names'][i].encode('ascii', 'replace')[:15]
+                o.names[i] = utf8_trunc(snap['names'][i], 15)
             o.self_slot = snap['self_slot']
             o.my_address = snap['address'].encode('ascii', 'replace')[:47]
             o.message = snap['message'].encode('ascii', 'replace')[:95]
@@ -610,7 +649,8 @@ class FakeUI:
                 self.script.pop(0)
                 return {'play': KL_PLAY, 'quit': KL_QUIT, 'pick': KL_PICK_ROM,
                         'wait-ready': KL_PLAY, 'wait-fast': KL_PLAY, 'host': KL_ONLINE_HOST,
-                        'join': KL_ONLINE_JOIN, 'leave': KL_ONLINE_LEAVE, 'start': KL_ONLINE_START}.get(want, KL_QUIT)
+                        'join': KL_ONLINE_JOIN, 'leave': KL_ONLINE_LEAVE, 'start': KL_ONLINE_START,
+                        'ready': KL_ONLINE_READY}.get(want, KL_QUIT)
             if st.state in (STATE_FAST, STATE_READY):
                 return KL_PLAY
             n += 1

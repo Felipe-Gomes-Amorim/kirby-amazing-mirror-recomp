@@ -285,6 +285,7 @@ class OnlineEnv(FakeEnv):
         self.launched = []
         self.proc = FakeProc()
         self.starts = []
+        self.ready_calls = []
         self.hint = ''
         self.status = os.path.join(tmp, 'link_status.json')
         self.flag = os.path.join(tmp, 'start.flag')
@@ -304,6 +305,9 @@ class OnlineEnv(FakeEnv):
 
     def online_request_start(self, flag):
         self.starts.append(flag)
+
+    def online_set_ready(self, flag, on):
+        self.ready_calls.append((flag, bool(on)))
 
     def online_failure_hint(self):
         return self.hint
@@ -453,6 +457,49 @@ class OnlineSessionTests(unittest.TestCase):
         wait_running(h)
         h.start_game()
         self.assertEqual(env.starts, [env.flag])
+
+    def test_ready_toggles_a_file_and_the_lobby_shows_names_ready_and_pings(self):
+        self.s.begin('host', self.PARAMS)
+        wait_running(self.s)
+        rp = self.env.flag + '.ready'
+        self.assertEqual(self.env.ready_calls[0], (rp, False))          # a new session starts not ready
+        self.s.toggle_ready()
+        self.s.toggle_ready()
+        self.assertEqual(self.env.ready_calls[1:], [(rp, True), (rp, False)])
+        self.clock.t += 1
+        self.env.write_status(state='waiting', role='host', players=3, mask=7, player=0, ready=5,
+                              names=['Pink', 'José', '', ''], lobby_ping=[0, 48, 120, 0])
+        snap = self.s.snapshot()
+        self.assertEqual(snap['slots'][:3], [KLS_READY, KLS_CONNECTED, KLS_READY])
+        self.assertEqual(snap['names'][:3], ['Pink', 'José', ''])
+        self.assertEqual(snap['ping'][1:3], [48, 120])
+        self.assertIn('READY', snap['message'])
+        self.clock.t += 1
+        self.env.write_status(state='waiting', role='host', players=3, mask=7, ready=7, names=['Pink', 'A', 'B', ''])
+        self.assertIn('Everybody is ready', self.s.snapshot()['message'])
+
+    def test_ready_is_ignored_when_not_running(self):
+        self.s.toggle_ready()
+        self.assertEqual(self.env.ready_calls, [])
+
+    def test_a_joiner_sees_its_own_ping_as_the_host_row(self):
+        self.s.begin('join', self.PARAMS)
+        wait_running(self.s)
+        self.clock.t += 1
+        self.env.write_status(state='waiting', role='join', players=3, mask=7, player=2, ready=1,
+                              names=['Host', 'Ana', 'Bia', ''], lobby_ping=[0, 30, 90, 0])
+        snap = self.s.snapshot()
+        self.assertEqual(snap['self_slot'], 2)
+        self.assertEqual(snap['ping'][0], 90)
+        self.assertEqual(snap['ping'][1], 30)
+        self.assertEqual(snap['names'][:3], ['Host', 'Ana', 'Pink'])    # its own name comes from its settings
+        self.assertIn('Press READY', snap['message'])
+
+    def test_utf8_trunc_never_splits_a_letter(self):
+        from flow import utf8_trunc
+        self.assertEqual(utf8_trunc('José', 15), 'José'.encode())
+        self.assertEqual(utf8_trunc('é' * 10, 15), ('é' * 7).encode())     # 14 bytes: the 8th letter does not fit
+        self.assertEqual(utf8_trunc('abc', 2), b'ab')
 
     def test_launch_failure_is_reported(self):
         env = OnlineEnv(self._t.name)

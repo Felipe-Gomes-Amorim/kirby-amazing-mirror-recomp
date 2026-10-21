@@ -141,3 +141,21 @@ ROM function, so it can be aliased.
 
 [N64Recomp](https://github.com/N64Recomp/N64Recomp), [gba-recomp](https://github.com/JRickey/gba-recomp)
 and [gbarecomp](https://github.com/mstan/gbarecomp) were studied for ideas; no code was copied.
+
+## 11. v0.7: online lobby (READY, names, ping) and the stutter report
+
+- **Lobby protocol (version 3).** While the host waits, joiners send `M_LOBBY_C` (ready flag + UTF-8 name) and the host
+  answers every 250 ms with `M_LOBBY` (mask, ready mask, ping of each player, names). The host pings every second in the
+  lobby; those samples are kept apart from the session statistics. The game starts when the room is full **and** everybody
+  is ready, or on `START` (>= 2 players, all ready). "Ready" is a file per player (`--link-ready-file`) that the launcher
+  creates/removes; without the option a player is always ready, so the old CLI/tests behave as before. The status JSON gained
+  `ready`, `names` and `lobby_ping`.
+- **Nicknames with accents.** Typed/pasted UTF-8 is accepted for Latin-1 letters (U+00C0..U+00FF, not x or /), stored in
+  kirby.ini as UTF-8 (<= 15 bytes), sent to the game process as hex (`--link-name-hex`: the Windows argv is not UTF-8) and
+  drawn with the 5x7 capitals font as base letter + one-row accent mark.
+- **Stutter log analysis (host side, 17:29-17:45).** At 8-10 ms RTT (K=0) the host waited more than 33 ms in 84 of 2991
+  frames (2.8 %), same for TCP and UDP. Sessions with the friend (Radmin 26.x address): RTT p50 80-90 ms, p95 230-460 ms, p99 up
+  to 626 ms, 35-40 % of the frames waited more than one frame, longest 0.5-1.4 s, K=2 (the maximum the game accepts) while the game
+  needs about 5 frames at that RTT. So it is the path (latency + jitter over the VPN), not a bug: the lockstep cannot hide
+  a median of 85 ms. Both transports show it because both wait for the slowest packet. The first 600 frames show one stall of
+  ~370 ms in every session (also at 9 ms RTT): the start-up hitch of the second process, worth a look but not the cause.

@@ -116,10 +116,13 @@ int cfg_validate(KirbyConfig *c) {
     fixes += clampi(&c->link_port, 1, 65535, 47900);
     fixes += clampi(&c->link_players, 2, 4, 2);
     fixes += clampi(&c->link_delay, -1, 8, -1);
-    {   /* the name goes into an ini value and onto the screen: printable ASCII, no ini syntax characters */
+    {   /* the name goes into an ini value and onto the screen: printable ASCII or Latin-1 letters (UTF-8), no ini syntax characters */
         int bad = c->link_name[0] == 0;
-        for (const char *q = c->link_name; *q; q++)
-            if ((unsigned char)*q < 32 || (unsigned char)*q > 126 || *q == '=' || *q == ';' || *q == '#' || *q == '[' || *q == ']') bad = 1;
+        for (const char *q = c->link_name; *q; q++) {
+            unsigned char u = (unsigned char)*q;
+            if (u == 0xC3 && ((unsigned char)q[1] & 0xC0) == 0x80 && q[1] != (char)0x97 && q[1] != (char)0xB7) { q++; continue; }   /* Latin-1 letter in UTF-8 (not x or /) */
+            if (u < 32 || u > 126 || *q == '=' || *q == ';' || *q == '#' || *q == '[' || *q == ']') bad = 1;
+        }
         if (bad) { set_str(c->link_name, sizeof c->link_name, "Player"); fixes++; }
     }
     return fixes;

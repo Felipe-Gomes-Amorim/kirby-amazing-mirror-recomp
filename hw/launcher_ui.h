@@ -26,7 +26,8 @@
  *     KL_ONLINE_HOST  = 6   start hosting with [link] players/port/delay/name ([link] mode is now host)
  *     KL_ONLINE_JOIN  = 7   join [link] host:port ([link] mode is now join)
  *     KL_ONLINE_LEAVE = 8   leave / stop hosting ([link] mode is now off)
- *     KL_ONLINE_START = 9   host only: start the game with the players that are connected
+ *     KL_ONLINE_START = 9   host only: start the game now with the players that are connected (all of them ready)
+ *     KL_ONLINE_READY = 10  toggle this player's READY flag (the game starts when everybody in the room is ready)
  *   The live data (slots, ping, messages) comes from a second poll set with kl_set_online_poll(), called with
  *   the normal poll (~10x/s, UI thread).
  *
@@ -58,7 +59,8 @@ typedef struct {
 typedef void (*KlPoll)(KlStatus *out);   /* called ~10x/s from the UI thread */
 
 enum { KL_QUIT = 0, KL_PLAY = 1, KL_PICK_ROM = 2, KL_OPEN_SAVE_DIR = 3, KL_EXPORT_SAVE = 4, KL_IMPORT_SAVE = 5,
-       KL_ONLINE_HOST = 6, KL_ONLINE_JOIN = 7, KL_ONLINE_LEAVE = 8, KL_ONLINE_START = 9 };
+       KL_ONLINE_HOST = 6, KL_ONLINE_JOIN = 7, KL_ONLINE_LEAVE = 8, KL_ONLINE_START = 9,
+       KL_ONLINE_READY = 10 };
 
 /* ---- ONLINE page: live data from the launcher ---- */
 enum {   /* KlOnline.state */

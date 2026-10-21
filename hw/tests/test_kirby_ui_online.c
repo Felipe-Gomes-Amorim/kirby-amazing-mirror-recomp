@@ -92,7 +92,7 @@ static void fresh_ini(const char *txt) {
 
 /* ---------------------------------------------------------------- layout */
 static const char *const ONL_IDS[] = { "online_name", "online_p2", "online_p3", "online_p4", "online_addr", "online_port",
-    "online_delay", "online_net", "online_host", "online_join", "online_start", "online_leave", "online_copy", "online_back",
+    "online_delay", "online_net", "online_host", "online_join", "online_ready", "online_start", "online_leave", "online_copy", "online_back",
     "online_ip0", "online_ip1", "online_ip2", "online_ip3" };
 static const char *const KP_IDS[] = { "kp_0", "kp_1", "kp_2", "kp_3", "kp_4", "kp_5", "kp_6", "kp_7", "kp_8", "kp_9",
     "kp_del", "kp_clr", "kp_dot", "kp_ok", "kp_cancel" };
@@ -343,13 +343,41 @@ static void scen_live(int s) {
         cur_on.slots[1] = KLS_CONNECTED; cur_on.ping_ms[1] = 35; snprintf(cur_on.names[1], 16, "Guest");
         break;
     case 6:
-        CHECK(kl_test_enabled("online_start"), "START enabled with 2 connected players");
+        CHECK(!kl_test_enabled("online_start"), "START waits until everybody is READY");
+        CHECK(kl_test_enabled("online_ready"), "READY is available while hosting");
+        cur_on.slots[0] = KLS_READY; cur_on.slots[1] = KLS_READY;
+        break;
+    case 7:
+        CHECK(kl_test_enabled("online_start"), "START enabled with 2 connected players, all READY");
         click("online_copy");
         break;
     case 8:
         CHECK(!strcmp(kl_test_note(), "ADDRESS COPIED"), "COPY gives feedback");
         click("online_start");
         break;
+    default: break;
+    }
+}
+
+/* READY: a toggle in the room (host and joiner), the label follows the slot state */
+static void scen_ready(int s) {
+    if (s == 2) { cur_on.state = KLO_CONNECTED; cur_on.slots[0] = KLS_CONNECTED; cur_on.slots[1] = KLS_CONNECTED; cur_on.self_slot = 1; }
+    if (s == 4) {
+        CHECK(kl_test_enabled("online_ready"), "a joiner can press READY");
+        CHECK(!kl_test_enabled("online_start"), "a joiner never has START");
+        click("online_ready");
+    }
+}
+
+/* accents in the nickname: typed (UTF-8 text input), kept as UTF-8, one backspace removes a whole letter, x and / are refused */
+static void scen_accents(int s) {
+    switch (s) {
+    case 2: click("online_name"); break;
+    case 3: key(SDLK_END); for (int i = 0; i < 20; i++) key(SDLK_BACKSPACE); break;
+    case 5: typed("Jos\xC3\xA9 "); typed("\xC3\x87\xC3\xA3o"); typed("\xC3\x97"); typed("\xCE\xA9"); break;
+    case 7: key(SDLK_BACKSPACE); typed("X"); break;
+    case 9: key(SDLK_RETURN); break;
+    case 11: quit_now(); break;
     default: break;
     }
 }
@@ -504,6 +532,17 @@ int main(int argc, char **argv) {
     reset_online();
     rc = run_script(scen_live, 1);
     CHECK(rc == KL_ONLINE_START, "START returns KL_ONLINE_START (9)");
+
+    reset_online();
+    rc = run_script(scen_ready, 1);
+    CHECK(rc == KL_ONLINE_READY, "READY returns KL_ONLINE_READY (10)");
+
+    reset_online();
+    fresh_ini("[link]\r\nmode=off\r\n");
+    rc = run_script(scen_accents, 1);
+    CHECK(rc == KL_QUIT, "accent scenario ends with quit");
+    cfg_load(ini, &c);
+    CHECK(!strcmp(c.link_name, "Jos\xC3\xA9 \xC3\x87\xC3\xA3X"), "accented letters are kept as UTF-8, x/Greek refused, backspace removes a whole letter");
 
     reset_online();
     rc = run_script(scen_leave, 1);

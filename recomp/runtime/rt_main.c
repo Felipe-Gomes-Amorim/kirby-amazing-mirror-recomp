@@ -225,6 +225,16 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--link-sim") && i + 1 < argc) rt_link_sim(argv[++i]);   /* "lat_ms,jitter_ms,perda%" (testes) */
         else if (!strcmp(argv[i], "--link-status") && i + 1 < argc) rt_link_status_path = argv[++i];
         else if (!strcmp(argv[i], "--link-start-file") && i + 1 < argc) rt_link_start_file = argv[++i];   /* launcher: "START" do host */
+        else if (!strcmp(argv[i], "--link-ready-file") && i + 1 < argc) rt_link_ready_file = argv[++i];   /* launcher: "PRONTO" deste jogador */
+        else if (!strcmp(argv[i], "--link-name-hex") && i + 1 < argc) {   /* nome em hexa: o argv do Windows nao e UTF-8 */
+            const char *h = argv[++i];
+            int n = 0;
+            for (; h[0] && h[1] && n < 15; h += 2, n++) {
+                char t[3] = { h[0], h[1], 0 };
+                rt_link_name[n] = (char)strtol(t, NULL, 16);
+            }
+            rt_link_name[n] = 0;
+        }
         else if (!strcmp(argv[i], "--link-required")) link_required = 1;   /* sem cabo = sai com 78 (o launcher avisa) */
         else if (!strcmp(argv[i], "--selftest-link")) {
             extern int rt_selftest_link(void);

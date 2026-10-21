@@ -455,9 +455,11 @@ void link_hub_disconnect(LinkTransport *t) {
  * quadros do host na ordem, com atraso. O FIFO de SENDs do filho tem atraso fixo D = 20 + 17*K trocas
  * (o fluxo de trocas depende so de K, nunca do relogio: mesmo hash com ou sem latencia na rede). */
 enum { M_HELLO = 1, M_WELCOME = 2, M_REJECT = 3, M_SEND = 4, M_ROUND = 5, M_ACK = 6, M_FRAME = 7, M_DONE = 8,
-       M_PING = 9, M_PONG = 10, M_INFO = 11 };
+       M_PING = 9, M_PONG = 10, M_INFO = 11,
+       M_LOBBY_C = 12,   /* filho->host, na sala de espera: pronto u8 + nome UTF-8 (<= 15 B) */
+       M_LOBBY = 13 };   /* host->filho: mascara u8, prontos u8, 4 x ping i16 (ms, -1 = ?), 4 x (tam u8 + nome) */
 #define PROTO_MAGIC 0x4C52424Bu   /* "KBRL" */
-#define PROTO_VER 2
+#define PROTO_VER 3
 #define MSG_MAX 1024
 #define FQ_MAX 32
 #define HELLO_LEN 26
@@ -518,6 +520,8 @@ typedef struct Local {
     uint32_t sent_frames, done_cnt[4];
     uint16_t dec_prev_send[4];   /* ultimo valor decodificado de DONE por filho (compactacao) */
     uint32_t ping_seq;
+    /* sala de espera (antes do 1o quadro): nomes, 'pronto' por jogador e ping medido pelo host */
+    char names[4][16]; uint8_t ready; int lob_ping[4]; int in_lobby; double lob_ping_t, lob_t; uint8_t my_ready_sent; int my_ready_known;
     /* lockstep, filho */
     FrameIn fq[FQ_MAX]; int fqh, fqn;
     uint32_t cur_frame; int cur_has_hash; uint64_t cur_hash;
@@ -854,6 +858,7 @@ static void local_drop(Local *l, int i) {
     l->peers[i].fd = SOCK_BAD; l->peers[i].have = 0; l->peers[i].sqn = 0;
     if (l->host) {
         l->mask &= ~(1u << i); l->latest[i] = LINK_ABSENT;
+        l->ready &= ~(1u << i); l->lob_ping[i] = 0;
         rt_log("[link] player %d disconnected (0xFFFF from now on)", i + 1);
     } else {
         l->mask = 0;
@@ -871,6 +876,38 @@ static void note_rtt(Local *l, int i, double ms) {
     l->rtt_sum[i] += ms; l->rtt_n[i]++;
     s->rtt_avg_ms[i] = l->rtt_sum[i] / (double)l->rtt_n[i];
     if (ms > s->rtt_max_ms[i]) s->rtt_max_ms[i] = ms;
+}
+
+/* ---- sala de espera: 'pronto' (arquivo do launcher) e nomes ---- */
+const char *rt_link_ready_file;     /* --link-ready-file: o arquivo existe = este jogador esta PRONTO (sem a opcao: sempre pronto) */
+char rt_link_name[16];              /* --link-name-hex: nome deste jogador (UTF-8, <= 15 B) */
+static int file_exists(const char *path) {
+    if (!path || !*path) return 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+static int self_ready(void) { return rt_link_ready_file && *rt_link_ready_file ? file_exists(rt_link_ready_file) : 1; }
+/* copia um nome da rede/linha de comando: so UTF-8 bem formado (sequencias C3 80..BF = Latin-1), sem aspas/barra/controle */
+static void name_clean(char *dst, const char *src, int len) {
+    int n = 0;
+    for (int i = 0; i < len && src[i] && n < 15;) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == 0xC3 && i + 1 < len && ((unsigned char)src[i + 1] & 0xC0) == 0x80) {
+            if (n + 2 > 15) break;
+            dst[n++] = src[i]; dst[n++] = src[i + 1]; i += 2;
+        } else {
+            dst[n++] = (c < 32 || c > 126 || c == '"' || c == '\\') ? '?' : (char)c;
+            i++;
+        }
+    }
+    dst[n] = 0;
+}
+/* todos os presentes (inclusive o host) prontos? */
+static int lobby_all_ready(Local *l) {
+    uint32_t r = l->ready | (self_ready() ? 1u : 0u);
+    return (l->mask & ~r) == 0;
 }
 
 
@@ -1213,6 +1250,7 @@ static void host_accept(Local *l) {
         l->latest[id] = l->lock ? 0 : LINK_ABSENT;
         l->acked[id] = l->round;
         l->done_cnt[id] = 0;
+        l->ready &= ~(1u << id); l->names[id][0] = 0; l->lob_ping[id] = 0;
         uint8_t w[3] = {(uint8_t)id, (uint8_t)l->players, (uint8_t)l->mask};
         peer_send(&l->peers[id], M_WELCOME, w, 3);
         rt_log("[link] player %d connected", id + 1);
@@ -1227,7 +1265,15 @@ static void host_msg(Local *l, int i, const Msg *m) {
         if (m->len >= 12) {
             double t0;
             memcpy(&t0, m->p + 4, 8);
-            note_rtt(l, i, (rt_now_us() - t0) / 1000.0);
+            double ms = (rt_now_us() - t0) / 1000.0;
+            if (l->in_lobby) { l->lob_ping[i] = ms < 1 ? 1 : ms > 9999 ? 9999 : (int)(ms + 0.5); break; }   /* a sala de espera nao entra nas estatisticas */
+            note_rtt(l, i, ms);
+        }
+        break;
+    case M_LOBBY_C:
+        if (m->len >= 1) {
+            if (m->p[0]) l->ready |= 1u << i; else l->ready &= ~(1u << i);
+            name_clean(l->names[i], (const char *)m->p + 1, m->len - 1);
         }
         break;
     case M_DONE: {
@@ -1320,6 +1366,19 @@ static void child_msg(Local *l, const Msg *m) {
     switch (m->type) {
     case M_PING:   /* devolve igual: o host calcula o RTT */
         peer_send(&l->peers[0], M_PONG, m->p, m->len);
+        break;
+    case M_LOBBY:   /* host: quem esta na sala, quem esta pronto, ping de cada um */
+        if (m->len >= 10) {
+            int k = 10;
+            l->mask = m->p[0]; l->ready = m->p[1];
+            for (int i = 0; i < 4; i++) l->lob_ping[i] = (int16_t)(m->p[2 + 2 * i] | (m->p[3 + 2 * i] << 8));
+            for (int i = 0; i < 4; i++) {
+                int n = k < m->len ? m->p[k++] : 0;
+                if (k + n > m->len) { n = 0; }
+                name_clean(l->names[i], (const char *)m->p + k, n);
+                k += n;
+            }
+        }
         break;
     case M_INFO:   /* host: K efetivo e maximo (so para a medicao) */
         if (m->len >= 2) { l->K = m->p[0]; l->Kmax = m->p[1]; }
@@ -1737,10 +1796,16 @@ static void wait_status(Local *l, const char *state, int player) {
     snprintf(tmp, sizeof tmp, "%s.tmp", path);
     FILE *f = fopen(tmp, "wb");
     if (!f) return;
+    unsigned rdy = l->ready | (l->host && self_ready() ? 1u : 0u);
+    char nm[4][16];
+    for (int i = 0; i < 4; i++) name_clean(nm[i], l->names[i], 15);
+    if (l->host) name_clean(nm[0], rt_link_name, 15);
     fprintf(f, "{ \"state\": \"%s\", \"role\": \"%s\", \"players\": %d, \"mask\": %u, \"player\": %d, \"delay\": %d, "
-               "\"delay_max\": %d, \"frame\": 0, \"rtt_ms\": [0, 0, 0, 0], \"desync\": false }\n",
+               "\"delay_max\": %d, \"frame\": 0, \"rtt_ms\": [0, 0, 0, 0], \"desync\": false, "
+               "\"ready\": %u, \"names\": [\"%s\", \"%s\", \"%s\", \"%s\"], \"lobby_ping\": [%d, %d, %d, %d] }\n",
             state, l->host ? "host" : "join", l->players, (unsigned)l->mask, player,
-            l->K, link_k_max(l->players));
+            l->K, link_k_max(l->players), rdy, nm[0], nm[1], nm[2], nm[3],
+            l->lob_ping[0], l->lob_ping[1], l->lob_ping[2], l->lob_ping[3]);
     fclose(f);
 #ifdef _WIN32
     MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING);
@@ -1751,10 +1816,23 @@ static void wait_status(Local *l, const char *state, int player) {
 static int start_file_present(Local *l) {
     if (!rt_link_start_file || !*rt_link_start_file) return 0;
     if (__builtin_popcount((unsigned)l->mask) < 2) return 0;
-    FILE *f = fopen(rt_link_start_file, "rb");
-    if (!f) return 0;
-    fclose(f);
-    return 1;
+    return file_exists(rt_link_start_file) && lobby_all_ready(l);
+}
+
+/* host: manda a sala de espera aos filhos */
+static void host_send_lobby(Local *l) {
+    uint8_t b[10 + 4 * 16];
+    int k = 10;
+    b[0] = (uint8_t)l->mask; b[1] = (uint8_t)(l->ready | (self_ready() ? 1u : 0u));
+    for (int i = 0; i < 4; i++) { b[2 + 2 * i] = (uint8_t)l->lob_ping[i]; b[3 + 2 * i] = (uint8_t)(l->lob_ping[i] >> 8); }
+    for (int i = 0; i < 4; i++) {
+        char nm[16];
+        name_clean(nm, i == 0 ? rt_link_name : l->names[i], 15);
+        int n = (int)strlen(nm);
+        b[k++] = (uint8_t)n; memcpy(b + k, nm, (size_t)n); k += n;
+    }
+    for (int i = 1; i < l->players; i++)
+        if (l->peers[i].fd != SOCK_BAD) peer_send(&l->peers[i], M_LOBBY, b, k);
 }
 
 int link_local_lockstep(LinkTransport **tp, int wait_s, int delay) {
@@ -1766,15 +1844,23 @@ int link_local_lockstep(LinkTransport **tp, int wait_s, int delay) {
         uint32_t full = (1u << l->players) - 1;
         l->lock = 1;
         rt_log("[link] lockstep: waiting for %d player(s)...", l->players - 1);
-        double last_idle = t0, last_st = 0;
-        while ((l->mask & full) != full && rt_now_us() - t0 < limit) {
-            host_accept(l);
-            if (rt_now_us() - last_st > 250000.0) { last_st = rt_now_us(); wait_status(l, "waiting", 0); }
-            if (start_file_present(l)) { rt_log("[link] start requested: starting with mask %X", l->mask); break; }
-            if ((l->mask & full) != full) wait_fd(l->listener != SOCK_BAD ? l->listener : l->usock, 0, 30);
-            if (rt_now_us() - last_idle > 50000.0) { last_idle = rt_now_us(); if (!idle()) break; }
+        double last_idle = t0, last_st = 0, last_ping = 0;
+        int ready_gate = rt_link_ready_file && *rt_link_ready_file;   /* com o launcher: so comeca quando todos estiverem prontos */
+        int by_start = 0;
+        l->in_lobby = 1;
+        for (;;) {
+            if (rt_now_us() - t0 >= limit) break;
+            host_drain(l);                                   /* aceita, atende PONG e 'pronto' */
+            if ((l->mask & full) == full && (!ready_gate || lobby_all_ready(l))) break;
+            if (start_file_present(l)) { by_start = 1; rt_log("[link] start requested: starting with mask %X", l->mask); break; }
+            double now = rt_now_us();
+            if (now - last_ping > 1e6) { last_ping = now; send_pings(l); }
+            if (now - last_st > 250000.0) { last_st = now; host_send_lobby(l); wait_status(l, "waiting", 0); }
+            wait_fd(l->listener != SOCK_BAD ? l->listener : l->usock, 0, 30);
+            if (now - last_idle > 50000.0) { last_idle = now; if (!idle()) break; }
         }
-        if ((l->mask & full) != full && !start_file_present(l)) rt_log("[link] timeout: starting with mask %X", l->mask);
+        l->in_lobby = 0;
+        if ((l->mask & full) != full && !by_start) rt_log("[link] timeout: starting with mask %X", l->mask);
         wait_status(l, "starting", 0);
         /* RTT de cada filho (5 pings) -> K automatico */
         double worst = 0;
@@ -1863,19 +1949,37 @@ int link_local_lockstep(LinkTransport **tp, int wait_s, int delay) {
         l->lock = 1;
         rt_log("[link] connected as player %d of %d (lockstep)", m.p[0] + 1, m.p[1]);
         wait_status(l, "waiting", m.p[0]);
-        /* o host pode ainda estar esperando outros jogadores (ate `limit`): o primeiro dado dele (INFO) so chega
-         * quando ele comeca. Sem isto o filho desistia dos 8 s de timeout do quadro 0. Nao consome nada. */
-        while (l->peers[0].udp && !l->peers[0].u->rdy_n && !l->peers[0].u->dead && rt_now_us() - t0 < limit) {
-            udp_poll(l);
-            if (!idle()) break;
-            wait_fd(l->usock, 0, 50);
-        }
-        while (!l->peers[0].udp && !sim_active() && rt_now_us() - t0 < limit) {
-            fd_set fs;
-            struct timeval tv = {0, 200000};
-            FD_ZERO(&fs); FD_SET(l->peers[0].fd, &fs);
-            if (select((int)l->peers[0].fd + 1, &fs, NULL, NULL, &tv) != 0) break;
-            if (!idle()) break;
+        /* sala de espera: o host pode ainda estar esperando outros jogadores (ate `limit`); o primeiro dado do jogo (INFO ou
+         * FRAME) so chega quando ele comeca. Aqui o filho manda 'pronto' + nome, atende PING e mostra a sala ao launcher. */
+        {
+            Peer *hp = &l->peers[0];
+            double last_send = 0, last_st = 0, last_idle = rt_now_us();
+            int sent = -1, begun = 0;
+            while (rt_now_us() - t0 < limit && !begun && hp->fd != SOCK_BAD) {
+                int rdy = self_ready();
+                double now = rt_now_us();
+                if (rdy != sent || now - last_send > 500000.0) {
+                    uint8_t b[1 + 15];
+                    char nm[16];
+                    name_clean(nm, rt_link_name, 15);
+                    b[0] = (uint8_t)rdy;
+                    memcpy(b + 1, nm, strlen(nm));
+                    if (peer_send(hp, M_LOBBY_C, b, 1 + (int)strlen(nm)) == 0) { sent = rdy; last_send = now; }
+                }
+                if (now - last_st > 250000.0) { last_st = now; wait_status(l, "waiting", t->player_id); }
+                sim_pump(hp);
+                for (;;) {
+                    Msg lm;
+                    int r = recv_msg(hp, &lm);
+                    if (r <= 0) { if (r < 0) begun = 1; break; }   /* r < 0: o host caiu; o resto do fluxo trata */
+                    child_msg(l, &lm);
+                    if (lm.type == M_INFO || lm.type == M_FRAME) begun = 1;
+                    if (l->rejected) begun = 1;
+                }
+                if (begun) break;
+                if (now - last_idle > 50000.0) { last_idle = now; if (!idle()) break; }
+                wait_peer(hp, 30);
+            }
         }
     }
     t->lockstep = 1;

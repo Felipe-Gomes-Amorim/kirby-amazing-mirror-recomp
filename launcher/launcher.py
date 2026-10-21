@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 
-VERSION = '0.6'
+VERSION = '0.7'
 SUPPORTED = {'274b102b6d940f46861a92b4e65f89a51815c12c': 'Kirby & The Amazing Mirror (USA)'}
 HERE = os.path.dirname(os.path.abspath(__file__))            # <install>/app/launcher
 APP = os.path.dirname(HERE)                                  # <install>/app
@@ -521,7 +521,7 @@ class LauncherEnv:
         d = os.path.join(BASE, 'online')
         os.makedirs(d, exist_ok=True)
         status, flag = os.path.join(d, 'link_status.json'), os.path.join(d, 'start.flag')
-        for p in (status, status + '.tmp', flag):
+        for p in (status, status + '.tmp', flag, flag + '.ready'):
             try:
                 os.remove(p)
             except OSError:
@@ -558,6 +558,17 @@ class LauncherEnv:
         with open(flag, 'w') as f:
             f.write('1')
 
+    def online_set_ready(self, flag, on):
+        """The READY button: the game process looks for this file (it exists = this player is ready)."""
+        if on:
+            with open(flag, 'w') as f:
+                f.write('1')
+        else:
+            try:
+                os.remove(flag)
+            except OSError:
+                pass
+
     def online_failure_hint(self):
         """Last [link] line of kirby.log (it sits next to the ROM), shortened for the status line."""
         try:
@@ -575,7 +586,9 @@ class LauncherEnv:
             return None
         self.backup_now()
         args = [exe, self.rom, '--gui', '--link', role, '--link-port', str(p['port']), '--link-status', status, '--link-required',
-                '--link-transport', p.get('transport', 'auto')]
+                '--link-transport', p.get('transport', 'auto'),
+                '--link-ready-file', flag + '.ready',
+                '--link-name-hex', p.get('name', 'Player').encode('utf-8')[:15].hex()]    # hex: the Windows argv is not UTF-8
         if role == 'host':
             args += ['--link-players', str(p['players']), '--link-delay', str(p['delay']),
                      '--link-bind', '0.0.0.0', '--link-start-file', flag]
