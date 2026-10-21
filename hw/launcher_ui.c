@@ -42,6 +42,8 @@ static SDL_Renderer *ren;
 static SDL_Texture *canvas;          /* the UI is drawn here at KL_W x KL_H and then scaled to the window by us */
 static SDL_Texture *atlas[UF_COUNT]; /* one white glyph atlas per font (tinted with the colour mod) */
 static int cell_w[UF_COUNT], cell_h[UF_COUNT];
+static SDL_Texture *upscaled;        /* canvas blown up by an integer factor (nearest), then shrunk linearly to the window */
+static int up_k;
 static SDL_Rect dst;                 /* where the canvas lands in the window output (pixels) */
 static KirbyConfig cfg;
 static KlStatus st;
@@ -1351,7 +1353,24 @@ static void render(void) {
     setc(C_BG);
     SDL_RenderClear(ren);                     /* the letterbox bars */
     compute_dst();
-    SDL_RenderCopy(ren, canvas, NULL, &dst);
+    /* A non-integer window/canvas ratio with nearest filtering makes the pixel-font strokes uneven. So the canvas is first
+     * enlarged by the next integer factor (exact, nearest) and only that is resampled (linear) to the window. */
+    int k = (dst.w + KL_W - 1) / KL_W;
+    if (k > 6) k = 6;
+    if (k > 1 && dst.w != KL_W * k) {
+        if (!upscaled || up_k != k) {
+            if (upscaled) SDL_DestroyTexture(upscaled);
+            upscaled = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, KL_W * k, KL_H * k);
+            if (upscaled) SDL_SetTextureScaleMode(upscaled, SDL_ScaleModeLinear);
+            up_k = k;
+        }
+        if (upscaled) {
+            SDL_SetRenderTarget(ren, upscaled);
+            SDL_RenderCopy(ren, canvas, NULL, NULL);
+            SDL_SetRenderTarget(ren, NULL);
+            SDL_RenderCopy(ren, upscaled, NULL, &dst);
+        } else SDL_RenderCopy(ren, canvas, NULL, &dst);
+    } else SDL_RenderCopy(ren, canvas, NULL, &dst);
     SDL_RenderPresent(ren);
 }
 
@@ -1665,6 +1684,7 @@ KL_API int kl_run(const char *ini_path, KlPoll poll) {
     commit_fields();
     if (pad) { SDL_GameControllerClose(pad); pad = NULL; }
     fonts_free();
+    if (upscaled) { SDL_DestroyTexture(upscaled); upscaled = NULL; }
     SDL_DestroyTexture(canvas); canvas = NULL;
     SDL_DestroyRenderer(ren); ren = NULL;
     SDL_DestroyWindow(win); win = NULL;
