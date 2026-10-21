@@ -171,7 +171,8 @@ def main():
     inc, lib = os.path.join(sdl, 'include', 'SDL2'), os.path.join(sdl, 'lib')
     run([zexe, 'cc', '-target', 'x86_64-windows-gnu', '-O2', '-shared', '-DKL_BUILD_DLL', '-I', inc,
          os.path.join(ROOT, 'hw', 'window_sdl.c'), os.path.join(ROOT, 'hw', 'launcher_ui.c'),
-         os.path.join(ROOT, 'hw', 'config_ini.c'), os.path.join(ROOT, 'launcher', 'ui_dll.c'),
+         os.path.join(ROOT, 'hw', 'ui_font_data.c'), os.path.join(ROOT, 'hw', 'config_ini.c'),
+         os.path.join(ROOT, 'launcher', 'ui_dll.c'),
          os.path.join(lib, 'libSDL2.dll.a'), '-o', os.path.join(app, 'launcher', 'kirby_ui.dll')])   # import lib, not the static one
     shutil.copy2(os.path.join(sdl, 'bin', 'SDL2.dll'), os.path.join(app, 'launcher', 'SDL2.dll'))
     import ctypes
@@ -183,6 +184,8 @@ def main():
     run([zexe, 'cc', '-target', 'x86_64-windows-gnu', '-O2', '-municode', '-Wl,--subsystem,windows',
          os.path.join(ROOT, 'launcher', 'stub.c'), '-o', os.path.join(dist, 'KirbyRecomp.exe')])
     shutil.copy2(os.path.join(ROOT, 'LICENSE'), os.path.join(dist, 'LICENSE'))
+    os.makedirs(os.path.join(app, 'hw', 'fonts'), exist_ok=True)
+    shutil.copy2(os.path.join(ROOT, 'hw', 'fonts', 'OFL.txt'), os.path.join(app, 'hw', 'fonts', 'OFL.txt'))
     print('4b/6 warm the Zig cache (the real interpreter-only build on a zero-filled dummy ROM; no game data)')
     zcache = os.path.join(app, 'tools', 'zigcache')
     os.makedirs(zcache, exist_ok=True)
@@ -250,6 +253,7 @@ LICENSE files shipped inside the corresponding folder.
                                    (its lib/ directory carries LLVM/clang and mingw-w64 headers under
                                     their own permissive licences; see lib/ and the LICENSE file)
   app/sdl2/                        SDL2 development files, SDL2.dll - zlib          https://www.libsdl.org
+  launcher fonts                   Pixelify Sans, Silkscreen (baked in as bitmaps) - SIL OFL 1.1 (app/hw/fonts/OFL.txt)
 
 The launcher, recompiler, runtime and hardware model (app/launcher, app/recomp, app/hw, app/tools/*.py)
 are the sources of https://github.com/Felipe-Gomes-Amorim/kirby-amazing-mirror-recomp ,

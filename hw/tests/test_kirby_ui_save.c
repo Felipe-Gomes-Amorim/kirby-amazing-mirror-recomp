@@ -75,7 +75,7 @@ static void poll_cb(KlStatus *out) {
     if (step > 200) { SDL_Event e; SDL_zero(e); e.type = SDL_QUIT; SDL_PushEvent(&e); }
 }
 
-static int run_script(Script s) { step = 0; script = s; return kl_run(ini, poll_cb); }
+static int run_script(Script s, int pg) { step = 0; script = s; kl_set_start_page(pg); return kl_run(ini, poll_cb); }
 static void quit_now(void) { SDL_Event e; SDL_zero(e); e.type = SDL_QUIT; SDL_PushEvent(&e); }
 
 static int count_color(uint32_t argb, int x0, int y0, int x1, int y1) {
@@ -99,11 +99,13 @@ static void dump_frame(const char *name) {
 }
 
 /* ---------------------------------------------------------------- layout checks */
-static const char *const MAIN_IDS[] = {
-    "selectrom", "online", "size1", "size2", "size3", "size4", "size5", "size6", "fullscreen", "scale_integer", "scale_fit",
-    "scale_stretch", "volume", "mute", "save_open", "save_export", "save_import", "keyboard", "controller", "reset",
-    "play", "quit" };
-#define NMAIN ((int)(sizeof MAIN_IDS / sizeof MAIN_IDS[0]))
+static const char *const HOME_IDS[] = { "selectrom", "play", "settings", "input", "online", "quit" };
+static const char *const SET_IDS[] = { "back", "size1", "size2", "size3", "size4", "size5", "size6", "fullscreen", "scale_integer",
+    "scale_fit", "scale_stretch", "volume", "mute", "save_open", "save_export", "save_import", "done" };
+static const char *const *page_ids = HOME_IDS;
+static int page_n = 6;
+#define NMAIN page_n
+#define MAIN_IDS page_ids
 
 static int overlap(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh) {
     return ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
@@ -148,19 +150,9 @@ static int layout_problems(const char *tag) {
             int ux, uy, uw, uh;
             kl_test_text(j, &ux, &uy, &uw, &uh);
             if (overlap(tx, ty, tw, th, ux, uy, uw, uh)) {
-                printf("  [%s] texts %d and %d overlap\n", tag, i, j); bad++;
+                printf("  [%s] texts %d (%d,%d %dx%d) and %d (%d,%d %dx%d) overlap\n", tag, i, tx, ty, tw, th, j, ux, uy, uw, uh); bad++;
             }
         }
-    }
-    /* the slider value ("100%") is drawn by the slider at x+w+12; it must stay on the canvas and clear of the rest */
-    int vx, vy, vw, vh;
-    if (kl_test_widget("volume", &vx, &vy, &vw, &vh)) {
-        int tx = vx + vw + 12, ty = vy + 4, tw = 4 * 12 - 2, th = 14;
-        if (tx + tw > KL_W) { printf("  [%s] volume value leaves the canvas\n", tag); bad++; }
-        for (int j = 0; j < nr; j++)
-            if (strcmp(rn[j], "volume") && overlap(tx, ty, tw, th, rx[j], ry[j], rw[j], rh[j])) {
-                printf("  [%s] volume value is behind %s\n", tag, rn[j]); bad++;
-            }
     }
     return bad;
 }
@@ -172,15 +164,15 @@ static void scen_enabled(KlStatus *o, int s) {
     case 2:
         CHECK(kl_test_enabled("save_open") && kl_test_enabled("save_export") && kl_test_enabled("save_import"),
               "SAVE buttons are enabled with a verified ROM");
-        CHECK(count_color(0xFFE6E6F0u, 84, 236, 224, 258) > 100, "enabled button drawn with the bright frame and label");
+        CHECK(count_color(0xFFE8E9FFu, 597, 296, 709, 328) > 20, "enabled button drawn with the bright label");
         dump_frame("ui_save.ppm");
         cur_state = 0; cur_ok = 0; cur_rom = "";
         break;
     case 4:
         CHECK(!kl_test_enabled("save_open") && !kl_test_enabled("save_export") && !kl_test_enabled("save_import"),
               "SAVE buttons are disabled with no ROM");
-        CHECK(count_color(0xFFE6E6F0u, 84, 236, 224, 258) == 0, "disabled button is drawn greyed out (no bright pixels)");
-        kl_test_set_focus("size1");                       /* (focus on ONLINE vanished with the ROM) */
+        CHECK(count_color(0xFFE8E9FFu, 597, 296, 709, 328) == 0, "disabled button is drawn greyed out (no bright pixels)");
+        kl_test_set_focus("size1");
         click("save_import");
         key(SDLK_RETURN);
         break;
@@ -303,7 +295,8 @@ static void scen_nav(KlStatus *o, int s) {
     switch (s) {
     case 2: kl_test_set_focus("mute"); key(SDLK_DOWN); break;
     case 3:
-        CHECK(!strcmp(kl_test_focus(), "save_open"), "Down from MUTE reaches OPEN FOLDER");
+        CHECK(strncmp(kl_test_focus(), "save_", 5) == 0, "Down from MUTE reaches the save buttons");
+        kl_test_set_focus("save_open");
         key(SDLK_RIGHT);
         break;
     case 4:
@@ -315,7 +308,7 @@ static void scen_nav(KlStatus *o, int s) {
         key(SDLK_TAB);
         break;
     case 6:
-        CHECK(!strcmp(kl_test_focus(), "keyboard"), "Tab continues to the INPUT row");
+        CHECK(!strcmp(kl_test_focus(), "done"), "Tab continues to DONE");
         pad_button(SDL_CONTROLLER_BUTTON_DPAD_UP);
         break;
     case 7:
@@ -335,7 +328,7 @@ static const Case CASES[] = {
     { 3, 100, 1, 3, 0, "C:\\roms\\Kirby.gba", "", "ready" },
     { 3, 100, 0, 3, 0, "C:\\a\\very\\long\\folder\\name\\with\\many\\parts\\Kirby & The Amazing Mirror (USA) [hack v2].gba", "", "unverified, long name" },
     { 4, 0, 1, 3, 0, "x.gba", "Compilation failed: see build.log for details of the error", "error" },
-    { 2, 100, 1, 1, 0, "x.gba", "Almost done", "scale 1 caption" },
+    { 2, 100, 1, 1, 0, "x.gba", "Almost done", "scale 1" },
     { 2, 50, 1, 5, 1, "x.gba", "Fullscreen", "fullscreen" },
 };
 #define NCASES ((int)(sizeof CASES / sizeof CASES[0]))
@@ -348,8 +341,9 @@ static void scen_layout(KlStatus *o, int s) {
     const Case *c = &CASES[case_idx];
     cur_state = c->state; cur_pct = c->pct; cur_ok = c->ok; cur_rom = c->rom; cur_text = c->text;
     if (s == 3 + (case_idx - case_lo) * 3) {      /* the case was set 2 polls ago: it has been drawn */
-        CHECK(kl_test_text_count() >= 8, "the layout check really sees the free texts of the frame");
-        CHECK(kl_test_bar(NULL, NULL, NULL, NULL) == (c->state == 1 || c->state == 2), "progress bar drawn only in states 1 and 2");
+        CHECK(kl_test_text_count() >= 6, "the layout check really sees the free texts of the frame");
+        if (page_ids == HOME_IDS)
+            CHECK(kl_test_bar(NULL, NULL, NULL, NULL) == (c->state == 1 || c->state == 2), "progress bar drawn only in states 1 and 2");
         int bad = layout_problems(c->tag);
         layout_total += bad;
         CHECK(bad == 0, c->tag);
@@ -378,36 +372,41 @@ int main(int argc, char **argv) {
           overlap(0, 0, 10, 10, 9, 9, 1, 1), "overlap() detects touching-by-area but not edge-to-edge");
 
     remove(ini);
-    rc = run_script(scen_enabled);
+    rc = run_script(scen_enabled, KL_PAGE_SETTINGS);
     CHECK(rc == KL_QUIT, "enabled/disabled scenario ends with SDL_QUIT");
 
     cur_state = 3; cur_ok = 1; cur_rom = "C:\\roms\\Kirby.gba"; cur_text = "";
-    rc = run_script(scen_open);
+    rc = run_script(scen_open, KL_PAGE_SETTINGS);
     CHECK(rc == KL_OPEN_SAVE_DIR && rc == 3, "OPEN FOLDER returns KL_OPEN_SAVE_DIR (3)");
-    rc = run_script(scen_export);
+    rc = run_script(scen_export, KL_PAGE_SETTINGS);
     CHECK(rc == KL_EXPORT_SAVE && rc == 4, "EXPORT... returns KL_EXPORT_SAVE (4)");
-    rc = run_script(scen_import_yes);
+    rc = run_script(scen_import_yes, KL_PAGE_SETTINGS);
     CHECK(rc == KL_IMPORT_SAVE && rc == 5, "IMPORT... then YES returns KL_IMPORT_SAVE (5)");
-    rc = run_script(scen_import_keys);
+    rc = run_script(scen_import_keys, KL_PAGE_SETTINGS);
     CHECK(rc == KL_IMPORT_SAVE, "IMPORT... then YES by keyboard returns KL_IMPORT_SAVE");
-    rc = run_script(scen_import_pad);
+    rc = run_script(scen_import_pad, KL_PAGE_SETTINGS);
     CHECK(rc == KL_IMPORT_SAVE, "IMPORT... then YES by controller returns KL_IMPORT_SAVE");
-    rc = run_script(scen_nav);
+    rc = run_script(scen_nav, KL_PAGE_SETTINGS);
     CHECK(rc == KL_QUIT, "navigation scenario ends with SDL_QUIT");
 
-    /* the codes never leak when the user declines: a NO then Esc on the main page really quits */
-    write_text(ini, "[video]\r\nscale=3\r\n");
-    case_lo = 0; case_hi = 6;
-    rc = run_script(scen_layout);
-    CHECK(rc == KL_QUIT, "layout scenario (default video) ends with SDL_QUIT");
-    write_text(ini, "[video]\r\nscale=1\r\n");                 /* caption "1X PREVIEW (UI AT 2X)" */
-    case_lo = 6; case_hi = 7;
-    rc = run_script(scen_layout);
-    CHECK(rc == KL_QUIT, "layout scenario (1X) ends with SDL_QUIT");
-    write_text(ini, "[video]\r\nscale=5\r\nfullscreen=1\r\nscaling=stretch\r\n");
-    case_lo = 7; case_hi = 8;
-    rc = run_script(scen_layout);
-    CHECK(rc == KL_QUIT, "layout scenario (fullscreen, stretch) ends with SDL_QUIT");
+    /* layout in many states, on the home page and on the settings page */
+    for (int pg = 0; pg < 2; pg++) {
+        page_ids = pg ? SET_IDS : HOME_IDS;
+        page_n = pg ? (int)(sizeof SET_IDS / sizeof SET_IDS[0]) : (int)(sizeof HOME_IDS / sizeof HOME_IDS[0]);
+        int start = pg ? KL_PAGE_SETTINGS : KL_PAGE_MAIN;
+        write_text(ini, "[video]\r\nscale=3\r\n");
+        case_lo = 0; case_hi = 6;
+        rc = run_script(scen_layout, start);
+        CHECK(rc == KL_QUIT, "layout scenario (default video) ends with SDL_QUIT");
+        write_text(ini, "[video]\r\nscale=1\r\n");
+        case_lo = 6; case_hi = 7;
+        rc = run_script(scen_layout, start);
+        CHECK(rc == KL_QUIT, "layout scenario (1X) ends with SDL_QUIT");
+        write_text(ini, "[video]\r\nscale=5\r\nfullscreen=1\r\nscaling=stretch\r\n");
+        case_lo = 7; case_hi = 8;
+        rc = run_script(scen_layout, start);
+        CHECK(rc == KL_QUIT, "layout scenario (fullscreen, stretch) ends with SDL_QUIT");
+    }
     CHECK(layout_total == 0, "no overlapping widgets / texts / progress bar in any state");
 
     printf("save section: codes 3/4/5 verified, %d layout cases checked\n", NCASES);

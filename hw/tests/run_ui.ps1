@@ -19,7 +19,7 @@ if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE }
 
 # 2) kirby_ui.dll + import lib
 & $gcc @flags -DKL_BUILD_DLL -shared -o "$out\kirby_ui.dll" "-Wl,--out-implib,$out\libkirby_ui.dll.a" `
-    "$root\hw\launcher_ui.c" "$root\hw\config_ini.c" "$root\hw\window_sdl.c" "-L$Sdl\lib" -lSDL2
+    "$root\hw\launcher_ui.c" "$root\hw\ui_font_data.c" "$root\hw\config_ini.c" "$root\hw\window_sdl.c" "-L$Sdl\lib" -lSDL2
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Copy-Item "$Sdl\bin\SDL2.dll" $out -Force
 

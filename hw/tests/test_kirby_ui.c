@@ -87,8 +87,9 @@ static void poll_cb(KlStatus *out) {
     if (step > 200) { SDL_Event e; SDL_zero(e); e.type = SDL_QUIT; SDL_PushEvent(&e); }   /* safety net */
 }
 
-static int run_script(Script s) {
+static int run_script(Script s, int pg) {
     step = 0; script = s;
+    kl_set_start_page(pg);
     return kl_run(ini, poll_cb);
 }
 
@@ -119,17 +120,17 @@ static void dump_frame(const char *name) {
     fclose(f);
 }
 
-static const uint32_t ACC = 0xFFFF78AAu, DIM = 0xFF6E6E87u;
+static const uint32_t ACC = 0xFFFF7EB6u, OKC = 0xFF7EE0A0u;
 #define ROM1 "C:\\roms\\Kirby & The Amazing Mirror (USA).gba"
 
-static int has_dim_caption(void) { return count_color(DIM, 330, 19, 470, 30); }
 
-/* ---------------------------------------------------------------- A: window follows the options */
+/* ---------------------------------------------------------------- A: window follows the options (SETTINGS page) */
 static void scen_video(KlStatus *o, int s) {
     int ww, wh, fs;
     set_status(o, 1, 20, "Analyzing...", ROM1, 1);
     switch (s) {
     case 1:
+        CHECK(!strcmp(kl_test_page(), "settings"), "the settings page opens");
         click("size4");
         break;
     case 2:
@@ -141,15 +142,13 @@ static void scen_video(KlStatus *o, int s) {
     case 3:
         CHECK(now_cfg().scale == 1, "1X saves scale=1");
         kl_test_video(&ww, &wh, &fs);
-        CHECK(ww == 480 && wh == 320, "scale 1 -> window clamped to the 480x320 minimum");
-        CHECK(has_dim_caption() > 40, "scale 1 draws the '1X PREVIEW (UI AT 2X)' caption");
+        CHECK(ww == 960 && wh == 600, "scale 1 -> window clamped to the 960x600 minimum");
         click("size2");
         break;
     case 4:
         kl_test_video(&ww, &wh, &fs);
-        CHECK(ww == 480 && wh == 320, "scale 2 -> window 480x320");
-        CHECK(has_dim_caption() == 0, "caption is gone at 2X");
-        dump_frame("ui_launcher.ppm");                      /* native 480x320: no resampling */
+        CHECK(ww == 960 && wh == 600, "scale 2 -> window 960x600 (minimum)");
+        dump_frame("ui_settings.ppm");                      /* native 960x600: no resampling */
         click("size5");
         break;
     case 5:
@@ -169,6 +168,7 @@ static void scen_video(KlStatus *o, int s) {
     }
     case 7:
         CHECK(now_cfg().scale == 5, "clicking a disabled size does nothing");
+        kl_test_set_focus("fullscreen");
         key(SDLK_TAB, 0);                                   /* focus must skip disabled widgets */
         break;
     case 8:
@@ -196,30 +196,23 @@ static void scen_video(KlStatus *o, int s) {
         break;
     case 13:
         kl_test_video(&ww, &wh, &fs);
-        CHECK(now_cfg().scale == 3 && ww == 720 && wh == 480, "applies immediately: 3X -> 720x480");
+        CHECK(now_cfg().scale == 3 && ww == 960 && wh == 600, "applies immediately: 3X -> 720x480, clamped to 960x600");
         break;
     default: break;
     }
     if (s >= 14) { SDL_Event e; SDL_zero(e); e.type = SDL_QUIT; SDL_PushEvent(&e); }
 }
 
-/* ---------------------------------------------------------------- B: settings, Play disabled, Play */
+/* ---------------------------------------------------------------- B: settings page: mute / volume / keyboard navigation */
 static void scen_a(KlStatus *o, int s) {
     int x, y, w, h;
-    if (s >= 5) set_status(o, 3, 100, "", "x.gba", 1);   /* the status persists until the script changes it */
+    set_status(o, 3, 100, "", "x.gba", 1);
     switch (s) {
-    case 0: set_status(o, 1, 20, "Analyzing...", ROM1, 1); break;
     case 1:
-        set_status(o, 1, 20, "Analyzing...", ROM1, 1);
         click("mute");
         break;
     case 2:
         CHECK(now_cfg().mute == 1, "mute saved");
-        set_status(o, 1, 20, "Analyzing...", "x.gba", 1);
-        kl_test_widget("play", &x, &y, &w, &h);
-        CHECK(!kl_test_enabled("play"), "Play is disabled while state==1");
-        CHECK(!pixel_is(x + 6, y + 6, ACC), "Play is drawn disabled while state==1");
-        click("play");                                    /* must be ignored */
         kl_test_widget("volume", &x, &y, &w, &h);
         {
             int wx, wy;
@@ -230,26 +223,24 @@ static void scen_a(KlStatus *o, int s) {
     case 3: {
         KirbyConfig c = now_cfg();
         CHECK(c.volume >= 47 && c.volume <= 53, "volume slider click ~50%");
-        set_status(o, 2, 40, "Compiling 4/16...", "x.gba", 1);
-        break;
-    }
-    case 4:
-        set_status(o, 2, 40, "Compiling 4/16...", "x.gba", 1);
-        CHECK(count_color(ACC, 201, 88, 459, 95) > 600, "progress bar filled (state 2, 40%)");
-        kl_test_widget("play", &x, &y, &w, &h);
-        CHECK(pixel_is(x + 6, y + 6, ACC), "Play is drawn enabled in state 2");
-        CHECK(!kl_test_widget("selectrom", NULL, NULL, NULL, NULL), "no SELECT ROM... when a verified ROM is loaded");
         kl_test_set_focus("size3");
         key(SDLK_RIGHT, 0);
         break;
+    }
+    case 4:
+        CHECK(!strcmp(kl_test_focus(), "size4"), "Right moves the focus to the next size");
+        CHECK(now_cfg().scale == 3, "Right alone does not change the size");
+        key(SDLK_RETURN, 0);
+        break;
     case 5:
-        CHECK(!strcmp(kl_test_focus(), "size4"), "Right moves the focus to the next radio");
-        CHECK(now_cfg().scale == 4, "Right on a radio selects it");
+        CHECK(now_cfg().scale == 4, "Enter selects the focused size");
+        kl_test_set_focus("size4");
         key(SDLK_LEFT, 0);
         key(SDLK_LEFT, 0);
+        key(SDLK_RETURN, 0);
         break;
     case 6:
-        CHECK(now_cfg().scale == 2, "Left twice -> 2X");
+        CHECK(now_cfg().scale == 2, "Left twice + Enter -> 2X");
         kl_test_set_focus("volume");
         key(SDLK_RIGHT, 0);
         key(SDLK_RIGHT, 0);
@@ -257,15 +248,52 @@ static void scen_a(KlStatus *o, int s) {
     case 7: {
         int v = now_cfg().volume;
         CHECK(v >= 57 && v <= 63, "Right on the slider adds 5 per press");
-        kl_test_set_focus("quit");
-        key(SDLK_TAB, 0);                                  /* quit -> wraps to the first widget */
+        click("done");
         break;
     }
     case 8:
-        CHECK(!strcmp(kl_test_focus(), "online"), "Tab wraps around (no SELECT ROM button => first is ONLINE...)");
-        key(SDLK_TAB, 1);                                  /* Shift+Tab goes back to quit */
+        CHECK(!strcmp(kl_test_page(), "main"), "Done returns to the home page");
+        click("quit");
+        break;
+    default: break;
+    }
+}
+
+/* ---------------------------------------------------------------- B2: home page: status, Play, focus order */
+static void scen_home(KlStatus *o, int s) {
+    int x, y, w, h;
+    if (s >= 7) set_status(o, 3, 100, "", "x.gba", 1);
+    else if (s >= 3) set_status(o, 2, 40, "Compiling 4/16...", "x.gba", 1);
+    else set_status(o, 1, 20, "Analyzing...", "x.gba", 1);
+    switch (s) {
+    case 2:
+        kl_test_widget("play", &x, &y, &w, &h);
+        CHECK(!kl_test_enabled("play"), "Play is disabled while state==1");
+        CHECK(!pixel_is(x + 6, y + 6, ACC), "Play is drawn disabled while state==1");
+        click("play");                                    /* must be ignored */
+        kl_test_set_focus("quit");
+        key(SDLK_TAB, 0);
+        break;
+    case 4:
+        CHECK(!strcmp(kl_test_focus(), "settings"), "Tab skips the disabled Play (state 1 -> still preparing)");
+        kl_test_widget("play", &x, &y, &w, &h);
+        CHECK(pixel_is(x + 6, y + 6, ACC), "Play is drawn enabled in state 2");
+        {
+            int bx, by, bw, bh;
+            CHECK(kl_test_bar(&bx, &by, &bw, &bh), "the progress bar is drawn in state 2");
+            CHECK(count_color(ACC, bx, by, bx + bw, by + bh) > 600, "progress bar filled (state 2, 40%)");
+        }
+        CHECK(!kl_test_widget("selectrom", NULL, NULL, NULL, NULL), "no SELECT ROM when a verified ROM is loaded");
+        break;
+    case 8:
+        kl_test_set_focus("quit");
+        key(SDLK_TAB, 0);                                  /* quit -> wraps to the first widget */
         break;
     case 9:
+        CHECK(!strcmp(kl_test_focus(), "play"), "Tab wraps around to Play");
+        key(SDLK_TAB, 1);                                  /* Shift+Tab goes back to quit */
+        break;
+    case 10:
         CHECK(!strcmp(kl_test_focus(), "quit"), "Shift+Tab goes back");
         kl_test_set_focus("play");
         key(SDLK_RETURN, 0);
@@ -280,8 +308,8 @@ static void scen_rom_vis(KlStatus *o, int s) {
     case 0: set_status(o, 3, 100, "", ROM1, 1); break;
     case 2:
         set_status(o, 3, 100, "", ROM1, 1);
-        CHECK(!kl_test_widget("selectrom", NULL, NULL, NULL, NULL), "verified ROM (state 3): only 'ROM: <name> OK'");
-        CHECK(count_color(0xFF78DC96u, 300, 8, 470, 20) > 20, "ROM line is drawn green");
+        CHECK(!kl_test_widget("selectrom", NULL, NULL, NULL, NULL), "verified ROM (state 3): only the ROM chip");
+        CHECK(count_color(OKC, 560, 16, 940, 44) > 20, "the ROM chip shows a green dot");
         break;
     case 3: set_status(o, 3, 100, "", ROM1, 0); break;
     case 4:
@@ -347,40 +375,59 @@ static void scen_stretch(KlStatus *o, int s) {
     }
 }
 
-/* ---------------------------------------------------------------- I: Reset + info pages + Quit */
+/* ---------------------------------------------------------------- I: cards, input page (Reset), settings page, Quit */
 static void scen_pages(KlStatus *o, int s) {
     set_status(o, 3, 100, "", "x.gba", 1);
     switch (s) {
-    case 2: {
+    case 2:
+        CHECK(kl_test_widget("settings", NULL, NULL, NULL, NULL) && kl_test_widget("input", NULL, NULL, NULL, NULL) &&
+              kl_test_enabled("online"), "the home page has the SETTINGS / INPUT / ONLINE cards");
+        click("input");
+        break;
+    case 3: {
         KirbyConfig c = now_cfg();
         CHECK(!strcmp(c.key[CFG_BTN_A], "Q") && !strcmp(c.pad[CFG_BTN_B], "y"), "preset bindings present");
+        CHECK(!strcmp(kl_test_page(), "keyboard"), "the INPUT card opens the keyboard page");
+        CHECK(kl_test_widget("back", NULL, NULL, NULL, NULL) && !kl_test_widget("play", NULL, NULL, NULL, NULL),
+              "the input page has Back and no Play");
         click("reset");
         break;
     }
-    case 3: {
+    case 4: {
         KirbyConfig c = now_cfg();
-        CHECK(!strcmp(c.key[CFG_BTN_A], "X") && !strcmp(c.key[CFG_BTN_B], "Z") && !strcmp(c.pad[CFG_BTN_A], "b"),
-              "Reset restores keyboard and controller maps");
+        CHECK(!strcmp(c.key[CFG_BTN_A], "X") && !strcmp(c.key[CFG_BTN_B], "Z"), "Reset restores the keyboard map");
+        CHECK(!strcmp(c.pad[CFG_BTN_B], "y"), "Reset on the keyboard tab leaves the controller alone");
         CHECK(c.scale == 6, "Reset does not touch video settings");
-        click("keyboard");
-        break;
-    }
-    case 4:
-        CHECK(!strcmp(kl_test_page(), "keyboard"), "KEYBOARD... opens the bindings page");
-        CHECK(kl_test_widget("back", NULL, NULL, NULL, NULL) && !kl_test_widget("play", NULL, NULL, NULL, NULL),
-              "info page has only Back");
         key(SDLK_ESCAPE, 0);                              /* closes the page, does NOT quit */
         break;
+    }
     case 5:
-        CHECK(!strcmp(kl_test_page(), "main"), "Esc closes the info page");
-        click("controller");
+        CHECK(!strcmp(kl_test_page(), "main"), "Esc closes the input page");
+        click("input");
         break;
     case 6:
-        CHECK(!strcmp(kl_test_page(), "controller"), "CONTROLLER... opens the controller page");
-        click("back");
+        click("tab_controller");
         break;
     case 7:
-        CHECK(!strcmp(kl_test_page(), "main"), "Back returns to the main page");
+        CHECK(!strcmp(kl_test_page(), "controller"), "the Controller tab opens the controller page");
+        click("reset");
+        break;
+    case 8:
+        CHECK(!strcmp(now_cfg().pad[CFG_BTN_A], "b") && !strcmp(now_cfg().pad[CFG_BTN_B], "a"), "Reset restores the controller map");
+        click("back");
+        break;
+    case 9:
+        CHECK(!strcmp(kl_test_page(), "main"), "Back returns to the home page");
+        click("settings");
+        break;
+    case 10:
+        CHECK(!strcmp(kl_test_page(), "settings"), "the SETTINGS card opens the settings page");
+        CHECK(kl_test_widget("volume", NULL, NULL, NULL, NULL) && kl_test_widget("save_open", NULL, NULL, NULL, NULL),
+              "settings: volume and save buttons");
+        key(SDLK_ESCAPE, 0);
+        break;
+    case 11:
+        CHECK(!strcmp(kl_test_page(), "main"), "Esc closes the settings page");
         click("quit");
         break;
     default: break;
@@ -402,42 +449,45 @@ int main(int argc, char **argv) {
 
     /* A: window size / fullscreen / scaling apply immediately and persist */
     remove(ini);
-    rc = run_script(scen_video);
+    rc = run_script(scen_video, KL_PAGE_SETTINGS);
     CHECK(rc == KL_QUIT, "video scenario ends with SDL_QUIT");
     {
         KirbyConfig c = now_cfg();
         CHECK(c.scale == 3 && c.fullscreen == 0 && c.scaling == CFG_SCALING_FIT, "final ini: 3X, windowed, fit");
     }
 
-    /* B: mute / volume / keyboard navigation / Play */
+    /* B: mute / volume / keyboard navigation on the settings page */
     remove(ini);
-    rc = run_script(scen_a);
-    CHECK(rc == KL_PLAY, "Enter on Play returns KL_PLAY");
+    rc = run_script(scen_a, KL_PAGE_SETTINGS);
+    CHECK(rc == KL_QUIT, "settings scenario ends with Quit");
     {
         KirbyConfig c = now_cfg();
         CHECK(c.scale == 2 && c.mute == 1 && c.volume >= 57, "final ini holds every change");
     }
+    /* B2: the home page: status, Play, focus */
+    rc = run_script(scen_home, KL_PAGE_MAIN);
+    CHECK(rc == KL_PLAY, "Enter on Play returns KL_PLAY");
     printf("scenario B (settings/Play): rc=%d, polls=%d\n", rc, step);
 
-    rc = run_script(scen_rom_vis);
+    rc = run_script(scen_rom_vis, KL_PAGE_MAIN);
     CHECK(rc == KL_QUIT, "ROM visibility scenario ends with Esc");
-    rc = run_script(scen_esc);
+    rc = run_script(scen_esc, KL_PAGE_MAIN);
     CHECK(rc == KL_QUIT, "Esc returns KL_QUIT");
-    rc = run_script(scen_pick);
+    rc = run_script(scen_pick, KL_PAGE_MAIN);
     CHECK(rc == KL_PICK_ROM, "SELECT ROM... returns KL_PICK_ROM");
-    rc = run_script(scen_drop);
+    rc = run_script(scen_drop, KL_PAGE_MAIN);
     CHECK(rc == KL_PICK_ROM, "dropping a file returns KL_PICK_ROM");
     CHECK(kl_dropped_path() && !strcmp(kl_dropped_path(), "D:\\roms\\Kirby.gba"), "kl_dropped_path has the path");
-    rc = run_script(scen_play0);
+    rc = run_script(scen_play0, KL_PAGE_MAIN);
     CHECK(rc == KL_PICK_ROM, "Play with no ROM (state 0) asks for a ROM");
     CHECK(kl_dropped_path() == NULL, "no stale dropped path");
 
     write_text(ini, "[video]\r\nscale=4\r\nscaling=stretch\r\n");
-    rc = run_script(scen_stretch);
+    rc = run_script(scen_stretch, KL_PAGE_MAIN);
     CHECK(rc == KL_QUIT, "stretch: a click mapped over the whole window hits QUIT");
 
     write_text(ini, "[video]\r\nscale=6\r\n[keyboard]\r\na=Q\r\n[controller]\r\nb=y\r\n");
-    rc = run_script(scen_pages);
+    rc = run_script(scen_pages, KL_PAGE_MAIN);
     CHECK(rc == KL_QUIT, "Quit button returns KL_QUIT");
 
     printf(fails ? "RESULT: %d failure(s)\n" : "RESULT: OK\n", fails);

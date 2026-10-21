@@ -91,8 +91,9 @@ static void fresh_ini(const char *txt) {
 }
 
 /* ---------------------------------------------------------------- layout */
-static const char *const ONL_IDS[] = { "online_name", "online_p2", "online_p3", "online_p4", "online_addr", "online_port",
-    "online_delay", "online_net", "online_host", "online_join", "online_ready", "online_start", "online_leave", "online_copy", "online_back",
+static const char *const ONL_IDS[] = { "back", "online_name", "online_p2", "online_p3", "online_p4", "online_addr", "online_port",
+    "online_delay", "online_auto", "online_net_auto", "online_net_udp", "online_net_tcp", "role_host", "role_join", "online_host",
+    "online_join", "online_ready", "online_start", "online_leave", "online_copy",
     "online_ip0", "online_ip1", "online_ip2", "online_ip3" };
 static const char *const KP_IDS[] = { "kp_0", "kp_1", "kp_2", "kp_3", "kp_4", "kp_5", "kp_6", "kp_7", "kp_8", "kp_9",
     "kp_del", "kp_clr", "kp_dot", "kp_ok", "kp_cancel" };
@@ -116,16 +117,6 @@ static int layout_problems(const char *tag, const char *const *ids, int n, int w
                 printf("  [%s] widgets %s and %s overlap\n", tag, rn[i], rn[j]); bad++;
             }
     if (with_texts) {
-        /* slider value text is drawn at x+w+12 */
-        int dx, dy, dw, dh;
-        if (kl_test_widget("online_delay", &dx, &dy, &dw, &dh)) {
-            int tx = dx + dw + 12, ty = dy + 4, tw = 4 * 12, th = 14;
-            if (tx + tw > KL_W) { printf("  [%s] delay value leaves the canvas\n", tag); bad++; }
-            for (int j = 0; j < nr; j++)
-                if (strcmp(rn[j], "online_delay") && overlap(tx, ty, tw, th, rx[j], ry[j], rw[j], rh[j])) {
-                    printf("  [%s] delay value is behind %s\n", tag, rn[j]); bad++;
-                }
-        }
         int nt = kl_test_text_count();
         for (int i = 0; i < nt; i++) {
             int tx, ty, tw, th;
@@ -156,7 +147,7 @@ static void scen_fields(int s) {
         break;
     case 4:
         CHECK(!strcmp(kl_test_page(), "online"), "ONLINE opens the online page");
-        CHECK(kl_test_enabled("online_host") && kl_test_enabled("online_join"), "HOST and JOIN are enabled while offline");
+        CHECK(kl_test_enabled("online_host"), "HOST GAME is enabled while offline");
         CHECK(!kl_test_enabled("online_start") && !kl_test_enabled("online_leave") && !kl_test_enabled("online_copy"),
               "START / LEAVE / COPY are disabled while offline");
         CHECK(!strcmp(kl_test_field(1), "127.0.0.1") && !strcmp(kl_test_field(2), "47900") && !strcmp(kl_test_field(0), "Player"),
@@ -187,7 +178,7 @@ static void scen_fields(int s) {
         key(SDLK_BACKSPACE); key(SDLK_BACKSPACE); key(SDLK_BACKSPACE);
         break;
     case 16:
-        CHECK(!kl_test_enabled("online_host") && !kl_test_enabled("online_join"), "an empty port disables HOST and JOIN");
+        CHECK(!kl_test_enabled("online_host"), "an empty port disables HOST GAME");
         typed("70000");
         break;
     case 18:
@@ -196,18 +187,21 @@ static void scen_fields(int s) {
         typed("5123");
         break;
     case 20:
-        CHECK(kl_test_enabled("online_host") && kl_test_enabled("online_join"), "a valid port enables HOST and JOIN");
+        CHECK(kl_test_enabled("online_host"), "a valid port enables HOST GAME");
         key(SDLK_ESCAPE);                                     /* ends the edit, stays on the page */
         break;
     case 22:
         CHECK(kl_test_editing() == -1 && !strcmp(kl_test_page(), "online"), "Escape in a field only ends the edit");
+        CHECK(!kl_test_enabled("online_delay"), "the delay slider is locked while DELAY is AUTO");
         click("online_p4");
         break;
     case 23:
-        kl_test_set_focus("online_delay");
+        click("online_auto");                                       /* AUTO off: the slider comes back */
         break;
     case 24:
-        key(SDLK_RIGHT); key(SDLK_RIGHT); key(SDLK_RIGHT);          /* auto -> 0 -> 1 -> stops at 1 (4 players: max K is 1) */
+        CHECK(kl_test_enabled("online_delay"), "AUTO off unlocks the delay slider");
+        kl_test_set_focus("online_delay");
+        key(SDLK_RIGHT); key(SDLK_RIGHT); key(SDLK_RIGHT);          /* stops at 1 (4 players: max K is 1) */
         break;
     case 25:
         click("online_name");
@@ -247,7 +241,7 @@ static void scen_keys(int s) {
         break;
     case 10:
         CHECK(!strcmp(kl_test_page(), "online"), "ONLINE reopens");
-        click("online_back");
+        click("back");
         break;
     case 12:
         CHECK(!strcmp(kl_test_page(), "main"), "BACK goes to the main page");
@@ -352,7 +346,7 @@ static void scen_live(int s) {
         click("online_copy");
         break;
     case 8:
-        CHECK(!strcmp(kl_test_note(), "ADDRESS COPIED"), "COPY gives feedback");
+        CHECK(!strcmp(kl_test_note(), "Address copied"), "COPY gives feedback");
         click("online_start");
         break;
     default: break;
@@ -392,6 +386,13 @@ static void scen_leave(int s) {
 
 static void scen_join(int s) {
     if (s == 2) {
+        CHECK(kl_test_widget("online_host", NULL, NULL, NULL, NULL) && !kl_test_widget("online_join", NULL, NULL, NULL, NULL),
+              "the big action button is HOST GAME by default");
+        click("role_join");
+    }
+    if (s == 4) {
+        CHECK(kl_test_widget("online_join", NULL, NULL, NULL, NULL) && !kl_test_widget("online_host", NULL, NULL, NULL, NULL),
+              "the JOIN role turns the big button into JOIN GAME");
         CHECK(kl_test_enabled("online_join"), "JOIN enabled with an address");
         click("online_join");
     }
@@ -400,10 +401,14 @@ static void scen_join(int s) {
 static void scen_join_empty(int s) {
     switch (s) {
     case 2: click("online_addr"); break;
-    case 4: for (int i = 0; i < 20; i++) key(SDLK_BACKSPACE); break;
+    case 4: for (int i = 0; i < 50; i++) key(SDLK_BACKSPACE); break;
     case 6:
         CHECK(!kl_test_field(1)[0], "address cleared");
-        CHECK(!kl_test_enabled("online_join") && kl_test_enabled("online_host"), "an empty address disables JOIN but not HOST");
+        CHECK(kl_test_enabled("online_host"), "an empty address does not disable HOST");
+        click("role_join");
+        break;
+    case 8:
+        CHECK(!kl_test_enabled("online_join"), "an empty address disables JOIN");
         quit_now();
         break;
     default: break;
@@ -571,6 +576,7 @@ int main(int argc, char **argv) {
     /* no poll: the page still works and shows an offline state */
     kl_set_online_poll(NULL);
     reset_online();
+    fresh_ini("[link]\r\nmode=off\r\n");
     rc = run_script(scen_join_empty, 1);
     CHECK(rc == KL_QUIT, "works without an online poll");
 

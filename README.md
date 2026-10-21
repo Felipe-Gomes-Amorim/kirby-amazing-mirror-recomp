@@ -28,7 +28,7 @@ somewhere you can write to, then:
    opens while the fully compiled version is built in the background, a few minutes at low priority. The next start uses the
    compiled game and opens in under a second.
 
-Controls (all remappable from the launcher: **Keyboard...** / **Controller...**):
+Controls (all remappable from the launcher: **Input**):
 
 | GBA | Keyboard | Controller (by position) |
 |---|---|---|
@@ -48,7 +48,7 @@ Windows may warn about an unsigned program: the launcher runs a compiler and the
 | ARM/Thumb → C recompiler | working: the game boots and runs 8,000+ frames without stopping |
 | Hardware model | tiled/affine backgrounds, sprites, windows, blending, mosaic, DMA, timers, PCM and PSG audio |
 | Picture | title screen, opening cutscene and the first level render correctly |
-| Launcher | build status, window size 1x–6x, fullscreen, Integer / Fit / Stretch scaling, volume, Play |
+| Launcher | redesigned in 0.8 (Home / Settings / Input / Online pages, pixel fonts Pixelify Sans + Silkscreen under SIL OFL); build status, window size 1x–6x, fullscreen, Integer / Fit / Stretch scaling, volume, Play |
 | Input | keyboard and one controller (tested with a generic pad and a PlayStation 4 controller), remapping screens, analog stick with adjustable dead zone |
 | Sound | PCM and PSG through SDL2 audio (not compared against a reference yet) |
 | Save | 32 KiB `<rom>.sav` next to the ROM; written within ~1 s of the game saving (atomic), automatic backups, export/import from the launcher |

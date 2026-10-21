@@ -27,7 +27,7 @@ em uma pasta onde você possa gravar e:
    abre enquanto a versão compilada é construída em segundo plano, em alguns minutos e com prioridade baixa. Nas próximas
    aberturas usa o jogo compilado e abre em menos de um segundo.
 
-Controles (todos configuráveis no launcher: **Keyboard...** / **Controller...**):
+Controles (todos configuráveis no launcher: **Input**):
 
 | GBA | Teclado | Controle (por posição) |
 |---|---|---|
@@ -47,7 +47,7 @@ O Windows pode avisar sobre programa não assinado: o launcher executa um compil
 | Recompilador ARM/Thumb → C | funciona: o jogo inicia e roda mais de 8.000 quadros sem parar |
 | Hardware | fundos tiled/afins, sprites, janelas, blending, mosaico, DMA, timers, áudio PCM e PSG |
 | Imagem | título, abertura e a primeira fase aparecem corretos |
-| Launcher | estado da construção, janela 1x–6x, tela cheia, escala Integer / Fit / Stretch, volume, Play |
+| Launcher | redesenhado na 0.8 (páginas Home / Settings / Input / Online, fontes pixel Pixelify Sans + Silkscreen sob SIL OFL); estado da construção, janela 1x–6x, tela cheia, escala Integer / Fit / Stretch, volume, Play |
 | Entrada | teclado e um controle (testado com um genérico e com um controle de PlayStation 4), telas de remapeamento, analógico com zona morta ajustável |
 | Som | PCM e PSG por SDL2 (ainda não comparado com uma referência) |
 | Save | `<rom>.sav` de 32 KiB ao lado da ROM; gravado ~1 s depois de o jogo salvar (atômico), backups automáticos, exportar/importar no launcher |

@@ -81,7 +81,7 @@ static void poll_cb(KlStatus *out) {
     if (step > 200) { SDL_Event e; SDL_zero(e); e.type = SDL_QUIT; SDL_PushEvent(&e); }
 }
 
-static int run_script(Script s) { step = 0; script = s; return kl_run(ini, poll_cb); }
+static int run_script(Script s, int pg) { step = 0; script = s; kl_set_start_page(pg); return kl_run(ini, poll_cb); }
 
 static int count_color(uint32_t argb, int x0, int y0, int x1, int y1) {
     static uint32_t px[KL_W * KL_H];
@@ -108,9 +108,8 @@ static void scen_keyboard(KlStatus *o, int s) {
     (void)o;
     KirbyConfig c;
     switch (s) {
-    case 1: click("keyboard"); break;
     case 2:
-        CHECK(!strcmp(kl_test_page(), "keyboard"), "KEYBOARD... opens the editable page");
+        CHECK(!strcmp(kl_test_page(), "keyboard"), "the keyboard page opens");
         CHECK(kl_test_widget("btn_a", NULL, NULL, NULL, NULL) && kl_test_widget("btn_start", NULL, NULL, NULL, NULL) &&
               kl_test_widget("btn_l", NULL, NULL, NULL, NULL) && kl_test_widget("btn_right", NULL, NULL, NULL, NULL),
               "the GBA outline has A B L R Start Select and the d-pad as buttons");
@@ -134,7 +133,7 @@ static void scen_keyboard(KlStatus *o, int s) {
     case 6:
         c = now_cfg();
         CHECK(!strcmp(c.key[CFG_BTN_B], "Q") && !strcmp(c.key[CFG_BTN_A], "Z"), "a used key swaps the two bindings (A gets B's old Z)");
-        CHECK(strstr(kl_test_note(), "SWAPPED") != NULL, "the swap is announced");
+        CHECK(strstr(kl_test_note(), "swapped") != NULL, "the swap is announced");
         click("btn_start");
         break;
     case 7:
@@ -142,7 +141,7 @@ static void scen_keyboard(KlStatus *o, int s) {
         break;
     case 8:
         CHECK(kl_test_capture() == CFG_BTN_START, "a reserved key keeps capturing");
-        CHECK(strstr(kl_test_note(), "RESERVED") != NULL, "F11 is refused with a warning");
+        CHECK(strstr(kl_test_note(), "reserved") != NULL, "F11 is refused with a warning");
         CHECK(!strcmp(now_cfg().key[CFG_BTN_START], "Return"), "binding unchanged after the refusal");
         key(SDLK_F1);
         break;
@@ -180,11 +179,11 @@ static void scen_keyboard(KlStatus *o, int s) {
         key(SDLK_UP);
         break;
     case 15:
-        CHECK(!strcmp(kl_test_focus(), "back"), "Up from A lands on the nearest widget above (BACK)");
+        CHECK(!strcmp(kl_test_focus(), "btn_r"), "Up from A lands on the nearest widget above (R)");
         key(SDLK_LEFT);
         break;
     case 16:
-        CHECK(!strcmp(kl_test_focus(), "reset"), "Left from BACK lands on RESET");
+        CHECK(strcmp(kl_test_focus(), "btn_r") != 0, "Left from R moves the focus");
         kl_test_set_focus("btn_up");
         key(SDLK_DOWN);
         break;
@@ -207,7 +206,7 @@ static void scen_keyboard(KlStatus *o, int s) {
         break;
     case 21:
         CHECK(!strcmp(kl_test_page(), "main"), "Esc (not capturing) leaves the editor");
-        click("keyboard");
+        click("input");
         break;
     case 22:
         click("btn_select");                               /* then click elsewhere: cancels */
@@ -231,16 +230,15 @@ static void scen_controller(KlStatus *o, int s) {
     (void)o;
     KirbyConfig c;
     switch (s) {
-    case 1: click("controller"); break;
     case 2:
-        CHECK(!strcmp(kl_test_page(), "controller"), "CONTROLLER... opens the controller page");
+        CHECK(!strcmp(kl_test_page(), "controller"), "the controller page opens");
         real_pad = kl_test_pad_present();                  /* a real gamepad may be plugged in on a dev machine */
         kl_test_fake_pad(0, 0, 0);                         /* force "no controller" for the test */
         CHECK(!kl_test_pad_present(), "fake override: no controller");
         click("btn_a");
         break;
     case 3:
-        CHECK(kl_test_capture() == -1 && strstr(kl_test_note(), "NO CONTROLLER") != NULL,
+        CHECK(kl_test_capture() == -1 && strstr(kl_test_note(), "No controller") != NULL,
               "without a controller the capture is refused with a warning");
         dump_frame("ui_controller_none.ppm");
         kl_test_fake_pad(1, 0, 0);                         /* pretend one is connected */
@@ -289,15 +287,15 @@ static void scen_controller(KlStatus *o, int s) {
         kl_test_fake_pad(1, 30000, 0);                     /* far right: outside the dead zone */
         break;
     case 13: {
-        /* indicator centre (414,276) radius 34; dot at +30000/32767*34 = +31 px, green when outside */
-        CHECK(count_color(0xFF78DC96u, 435, 270, 450, 282) > 10, "live indicator: dot drawn green outside the dead zone");
+        /* indicator centre (880,508) radius 28; dot at +30000/32767*28 = +25 px, green when outside */
+        CHECK(count_color(0xFF7EE0A0u, 897, 500, 915, 516) > 10, "live indicator: dot drawn green outside the dead zone");
         dump_frame("ui_controller.ppm");
         kl_test_fake_pad(1, 3000, 0);                      /* inside */
         break;
     }
     case 14:
-        CHECK(count_color(0xFF78DC96u, 400, 260, 460, 295) == 0, "live indicator: dot is not green inside the dead zone");
-        CHECK(count_color(0xFFE6E6F0u, 410, 272, 426, 281) > 5, "live indicator: dot near the centre");
+        CHECK(count_color(0xFF7EE0A0u, 845, 475, 915, 540) == 0, "live indicator: dot is not green inside the dead zone");
+        CHECK(count_color(0xFFE8E9FFu, 872, 500, 888, 516) > 5, "live indicator: dot near the centre");
         kl_test_fake_pad(-1, 0, 0);
         break;
     case 15:
@@ -316,32 +314,45 @@ static void scen_controller(KlStatus *o, int s) {
         break;
     case 18:
         CHECK(!strcmp(kl_test_page(), "main"), "east button goes back");
+        kl_test_set_focus("input");
+        pad_button(SDL_CONTROLLER_BUTTON_A);               /* south: OK */
+        break;
+    case 19:
+        CHECK(!strcmp(kl_test_page(), "keyboard"), "south button activates the focused card");
+        pad_button(SDL_CONTROLLER_BUTTON_B);
+        break;
+    case 20:
+        CHECK(!strcmp(kl_test_page(), "main"), "east returns from the input page");
+        kl_test_set_focus("settings");
+        pad_button(SDL_CONTROLLER_BUTTON_A);
+        break;
+    case 21:
+        CHECK(!strcmp(kl_test_page(), "settings"), "south opens SETTINGS");
         kl_test_set_focus("size3");
         pad_button(SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
         break;
-    case 19:
-        CHECK(!strcmp(kl_test_focus(), "size4") && now_cfg().scale == 4, "d-pad Right changes the radio");
-        kl_test_set_focus("keyboard");
-        pad_button(SDL_CONTROLLER_BUTTON_A);               /* south: OK */
-        break;
-    case 20:
-        CHECK(!strcmp(kl_test_page(), "keyboard"), "south button activates the focused button");
-        pad_button(SDL_CONTROLLER_BUTTON_B);
-        break;
-    case 21:
-        CHECK(!strcmp(kl_test_page(), "main"), "east returns from the keyboard page");
-        kl_test_set_focus("size1");
-        pad_button(SDL_CONTROLLER_BUTTON_DPAD_DOWN);
-        break;
     case 22:
-        CHECK(strcmp(kl_test_focus(), "size1") != 0, "d-pad Down moves the focus");
-        pad_axis(SDL_CONTROLLER_AXIS_LEFTY, -30000);       /* stick up */
+        CHECK(!strcmp(kl_test_focus(), "size4") && now_cfg().scale == 3, "d-pad Right moves the focus without changing the size");
+        pad_button(SDL_CONTROLLER_BUTTON_A);
         break;
     case 23:
+        CHECK(now_cfg().scale == 4, "south selects the size under the focus");
+        pad_button(SDL_CONTROLLER_BUTTON_B);
+        break;
+    case 24:
+        CHECK(!strcmp(kl_test_page(), "main"), "east returns from SETTINGS");
+        kl_test_set_focus("play");
+        pad_button(SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+        break;
+    case 25:
+        CHECK(strcmp(kl_test_focus(), "play") != 0, "d-pad Down moves the focus");
+        pad_axis(SDL_CONTROLLER_AXIS_LEFTY, -30000);       /* stick up */
+        break;
+    case 26:
         pad_axis(SDL_CONTROLLER_AXIS_LEFTY, 0);
         pad_button(SDL_CONTROLLER_BUTTON_B);               /* east on the main page: nothing (does not quit) */
         break;
-    case 24:
+    case 27:
         CHECK(!strcmp(kl_test_page(), "main"), "east on the main page does not quit");
         kl_test_set_focus("quit");
         pad_button(SDL_CONTROLLER_BUTTON_A);
@@ -359,11 +370,11 @@ int main(int argc, char **argv) {
     int rc;
 
     remove(ini);
-    rc = run_script(scen_keyboard);
+    rc = run_script(scen_keyboard, KL_PAGE_KEYBOARD);
     CHECK(rc == KL_QUIT, "keyboard scenario ends with SDL_QUIT");
 
     remove(ini);
-    rc = run_script(scen_controller);
+    rc = run_script(scen_controller, KL_PAGE_CONTROLLER);
     CHECK(rc == KL_QUIT, "south button on QUIT returns KL_QUIT (controller navigation)");
 
     printf(fails ? "RESULT: %d failure(s)\n" : "RESULT: OK\n", fails);

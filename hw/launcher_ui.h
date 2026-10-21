@@ -9,7 +9,7 @@
  *   kl_run returns KL_PLAY, KL_QUIT or KL_PICK_ROM (the user clicked "Select ROM..." or dropped a file
  *   on the window; the dropped path, if any, is in kl_dropped_path()).
  *
- *   SAVE section (main screen): OPEN FOLDER, EXPORT... and IMPORT... are enabled only while a verified ROM
+ *   SAVE section (SETTINGS page): OPEN FOLDER, EXPORT... and IMPORT... are enabled only while a verified ROM
  *   is loaded (rom[0] != 0 and rom_ok == 1). Each returns a code; the launcher performs the action and calls
  *   kl_run again:
  *     KL_OPEN_SAVE_DIR = 3   open the folder that holds the .sav in the file explorer
@@ -18,9 +18,9 @@
  *                            ("OVERWRITE CURRENT SAVE? A BACKUP IS KEPT" YES / NO) - the launcher must back
  *                            up the current save before overwriting it and validate the size (32768 bytes).
  *
- *   ONLINE page (button ONLINE... in the header, shown instead of SELECT ROM... while a verified ROM is loaded):
- *   fields NAME / ADDRESS / PORT, PLAYERS 2-4, DELAY 0-100, buttons HOST / JOIN / START / LEAVE, a list of the 4 slots
- *   with state and ping and a state line. The values are saved to kirby.ini [link] (mode/host/port/players/delay/name).
+ *   ONLINE page (card ONLINE on the home screen, enabled while a verified ROM is loaded):
+ *   fields NAME / ADDRESS / PORT, PLAYERS 2-4, DELAY (AUTO or 0-2), NET AUTO/UDP/TCP, HOST|JOIN + the big action button,
+ *   READY / START / LEAVE, and the lobby (4 slots with name, state and ping). The values are saved to kirby.ini [link] (mode/host/port/players/delay/name).
  *   Return codes (the launcher acts, then calls kl_run again; call kl_set_start_page(KL_PAGE_ONLINE) first so the
  *   screen reopens on the ONLINE page):
  *     KL_ONLINE_HOST  = 6   start hosting with [link] players/port/delay/name ([link] mode is now host)
@@ -31,13 +31,14 @@
  *   The live data (slots, ping, messages) comes from a second poll set with kl_set_online_poll(), called with
  *   the normal poll (~10x/s, UI thread).
  *
- * The window follows the video options: size = 240*scale x 160*scale (never below 480x320, the logical
+ * The window follows the video options: size = 240*scale x 160*scale (never below 960x600, the logical
  * canvas of the UI), "Fullscreen" applies to the launcher too, and "Scaling" picks how the canvas is
  * mapped to the window: integer (whole-number zoom, black bars), fit (aspect preserved) or stretch
- * (fills the window). The KEYBOARD / CONTROLLER pages are editable (click or Enter on a button of the GBA
- * outline, then press the new key/button; Esc cancels; used keys are swapped; Esc/F11/F1 are refused).
+ * (fills the window). Pages: HOME (status, PLAY, cards SETTINGS / INPUT / ONLINE), SETTINGS (video, audio, saves),
+ * INPUT (KEYBOARD / CONTROLLER tabs, editable: click or Enter on a key of the GBA outline, then press the new
+ * key/button; Esc cancels; used keys are swapped; Esc/F11/F1 are refused) and ONLINE.
  * The first connected game controller can also drive the whole UI (d-pad + south = OK, east = back).
- * All UI text is English; the font has no accents. */
+ * Text is drawn with baked Pixelify Sans / Silkscreen bitmaps (accents included). All UI text is English. */
 #ifndef LAUNCHER_UI_H
 #define LAUNCHER_UI_H
 #include <stdint.h>
@@ -92,12 +93,12 @@ typedef struct {
 } KlOnline;
 typedef void (*KlOnlinePoll)(KlOnline *out);   /* the UI zeroes *out before each call */
 
-enum { KL_PAGE_MAIN = 0, KL_PAGE_ONLINE = 3 };
+enum { KL_PAGE_MAIN = 0, KL_PAGE_KEYBOARD = 1, KL_PAGE_CONTROLLER = 2, KL_PAGE_ONLINE = 3, KL_PAGE_SETTINGS = 4 };
 
 KL_API int kl_run(const char *ini_path, KlPoll poll);
 KL_API const char *kl_dropped_path(void);        /* path dropped on the window (valid until the next kl_run) */
 KL_API void kl_set_online_poll(KlOnlinePoll poll);   /* NULL = no live data (everything shows as offline/empty) */
-KL_API void kl_set_start_page(int page);          /* KL_PAGE_MAIN (default) or KL_PAGE_ONLINE; applies to the next kl_run calls */
+KL_API void kl_set_start_page(int page);          /* KL_PAGE_* (default MAIN): the page the next kl_run calls open on */
 
 /* ---- test hooks (headless tests drive the UI with simulated events) ---- */
 KL_API void kl_set_poll_interval(int ms);         /* default 100 */
@@ -122,7 +123,7 @@ KL_API int kl_test_text_count(void);              /* free texts drawn on the las
 KL_API int kl_test_text(int i, int *x, int *y, int *w, int *h);   /* bounding box of free text i */
 KL_API int kl_test_bar(int *x, int *y, int *w, int *h);           /* progress bar rectangle (1 = drawn) */
 
-#define KL_W 480    /* logical canvas */
-#define KL_H 320
+#define KL_W 960    /* logical canvas */
+#define KL_H 600
 
 #endif
