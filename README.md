@@ -1,3 +1,6 @@
+<img width="2011" height="782" alt="kirby-logo" src="https://github.com/user-attachments/assets/95e4f21b-0782-4897-a114-18d336d0b216" />
+
+
 # Kirby & The Amazing Mirror (GBA) — static recompilation
 
 **English** · [Português](README.pt-BR.md)
